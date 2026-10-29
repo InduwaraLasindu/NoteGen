@@ -3,6 +3,7 @@ name: Verify and build Windows
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', 'README.md', 'CONTRIBUTING.md', 'THIRD_PARTY_NOTICES.md']
   pull_request:
   workflow_dispatch:
 
@@ -27,7 +28,7 @@ jobs:
           cache: pip
       - name: Install Tesseract on Linux
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr libegl1 libopengl0 libgl1 libxkbcommon0 fonts-dejavu-core
       - name: Install Tesseract on Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -62,6 +63,8 @@ jobs:
         run: .\scripts\Build-Windows.ps1
       - name: Smoke-test packaged CLI
         run: .\dist\NoteGen\CLI\NoteGenCLI.exe --version
+      - name: Smoke-test packaged Word export
+        run: python scripts/smoke_package.py dist/NoteGen/CLI/NoteGenCLI.exe
       - name: Smoke-test packaged desktop startup
         shell: pwsh
         run: |

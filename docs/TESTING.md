@@ -7,7 +7,9 @@
 | Iteration 1: core conversion | 18 passed; real Tesseract on a generated raster-only PDF |
 | Iteration 2: AI transport and orchestration | 36 passed; includes deterministic model responses and error paths |
 | Iteration 3: desktop and review | 44 passed; includes a real OCR conversion through the Qt worker |
-| Iteration 4: packaging and platform acceptance | In progress; see Actions for Windows/Linux results |
+| Iteration 4: local regression suite | 48 passed, 1 GPU test skipped |
+| Windows source tests | 48 passed, 1 GPU test skipped in GitHub Actions; Python 3.12.15 |
+| Packaged Windows app / clean Linux CI | In progress; see Actions for build results |
 | NVIDIA CUDA + real model quality | Not run in this CPU-only development environment |
 
 The current suite checks PDF bounds and invalid inputs, word boxes, table cells,
@@ -55,3 +57,9 @@ The external model server's CPU working set is not included in app RSS. Record m
 SHA256, runtime release/build, driver, peak server memory and observer judgments separately.
 
 No universal speed, accuracy or peak-memory number is claimed until that validation runs.
+
+The first clean Linux CI run found a missing system `libEGL` dependency, and local
+packaged-export validation found a python-docx template lookup issue. CI installs
+the native Qt libraries explicitly, and both portable executables collect the full
+docx package. The package smoke test exports actual text, table cells and a source
+figure; starting the EXE alone would not catch that failure.

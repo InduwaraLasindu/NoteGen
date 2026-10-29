@@ -38,6 +38,9 @@ def main(argv=None) -> int:
         prog="notegen", description="Local scanned PDF to editable Word"
     )
     parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument(
+        "--debug", action="store_true", help="Print a local traceback for troubleshooting"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("convert")
     p.add_argument("pdf", type=Path)
@@ -108,6 +111,10 @@ def main(argv=None) -> int:
             print(f"Saved: {result.output}\nProject: {result.project.root}")
         return 0
     except Exception as exc:
+        if args.debug:
+            import traceback
+
+            traceback.print_exc()
         error = classify(exc)
         print(f"{error}\n{error.diagnosis.cause}\nFix: {error.diagnosis.action}", file=sys.stderr)
         return 130 if error.code == "NG900" else 1

@@ -13,12 +13,12 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 if ($LASTEXITCODE -ne 0) { throw 'Test gate failed.' }
 Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 & $python -m PyInstaller --noconfirm --clean --windowed --name NoteGen --paths src `
-    --collect-all pypdfium2 --collect-all pypdfium2_raw `
+    --collect-all pypdfium2 --collect-all pypdfium2_raw --collect-all docx `
     --exclude-module PySide6.QtWebEngineCore --exclude-module torch `
     scripts/gui_entry.py
 if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed.' }
 & $python -m PyInstaller --noconfirm --clean --console --name NoteGenCLI --paths src `
-    --collect-all pypdfium2 --collect-all pypdfium2_raw --exclude-module PySide6 `
+    --collect-all pypdfium2 --collect-all pypdfium2_raw --collect-all docx --exclude-module PySide6 `
     scripts/cli_entry.py
 if ($LASTEXITCODE -ne 0) { throw 'CLI build failed.' }
 Copy-Item LICENSE dist\NoteGen\LICENSE.txt
