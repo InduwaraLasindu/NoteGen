@@ -8,10 +8,10 @@
 | Iteration 2: AI transport and orchestration | 36 passed; includes deterministic model responses and error paths |
 | Iteration 3: desktop and review | 44 passed; includes a real OCR conversion through the Qt worker |
 | Iteration 4: local regression suite | 50 passed, 1 GPU test skipped |
-| Windows source tests | 48 passed, 1 GPU test skipped in GitHub Actions; Python 3.12.15 |
-| Clean Linux source tests | 48 passed, 1 GPU test skipped after native Qt dependency fix |
+| Windows source tests | 50 passed, 1 GPU test skipped in GitHub Actions; Python 3.12.15 |
+| Clean Linux source tests | 50 passed, 1 GPU test skipped after native Qt dependency fix |
 | Packaged CLI (Linux) | Built and passed actual DOCX export with text, cells, figure and templates; scanned PDF conversion also passed |
-| Latest Windows/Linux suite and portable Windows app | In progress; see Actions for final results |
+| Portable Windows app | Built successfully; packaged CLI export and desktop startup smoke tests passed |
 | NVIDIA CUDA + real model quality | Not run in this CPU-only development environment |
 
 The current suite checks PDF bounds and invalid inputs, word boxes, table cells,
@@ -59,6 +59,16 @@ The external model server's CPU working set is not included in app RSS. Record m
 SHA256, runtime release/build, driver, peak server memory and observer judgments separately.
 
 No universal speed, accuracy or peak-memory number is claimed until that validation runs.
+
+## Long-document CPU regression
+
+A generated 100-page image-only English printed PDF with a 2×2 ruled table on every
+page converted in **32.06 seconds**, at 150 DPI, fast profile, orientation detection off,
+on the development host. Peak process RSS was **144.5 MiB** via `resource.getrusage`.
+All 100 tables were recreated in Word and their amount `1250` was exact and editable.
+The input was 3,974,226 bytes and output 38,872 bytes. Pages repeated the same simple
+fixture: this checks streaming and resource retention, not diverse OCR accuracy, RTX
+performance, handwriting, image-heavy exports or complex diagram meaning.
 
 The first clean Linux CI run found a missing system `libEGL` dependency, and local
 packaged-export validation found a python-docx template lookup issue. CI installs

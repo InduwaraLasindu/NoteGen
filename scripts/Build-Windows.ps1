@@ -25,6 +25,8 @@ Copy-Item LICENSE dist\NoteGen\LICENSE.txt
 Copy-Item THIRD_PARTY_NOTICES.md dist\NoteGen\THIRD_PARTY_NOTICES.md
 Copy-Item docs\WINDOWS.md dist\NoteGen\START-HERE.md
 Copy-Item scripts\Start-LocalAI.ps1 dist\NoteGen\Start-LocalAI.ps1
+& $python scripts\copy_licenses.py dist\NoteGen\licenses
+if ($LASTEXITCODE -ne 0) { throw 'Dependency license collection failed.' }
 Copy-Item -Recurse dist\NoteGenCLI dist\NoteGen\CLI -Force
 Compress-Archive -Path dist\NoteGen -DestinationPath dist\NoteGen-Windows-x64.zip -Force
 Write-Host 'Built dist\NoteGen-Windows-x64.zip'

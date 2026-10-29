@@ -2,7 +2,8 @@
 
 NoteGen code is MIT-licensed. Dependency licenses continue to apply independently.
 Python packages and separately installed model/runtime files are not relicensed by NoteGen.
-Packaged distributions retain the dependencies' installed license files under `_internal`.
+Packaged distributions include installed dependency license files and a version manifest
+under `licenses`, plus standalone Qt LGPLv3/GPLv3 texts. Qt remains dynamically linked.
 
 | Component | Purpose | License / upstream |
 |---|---|---|
