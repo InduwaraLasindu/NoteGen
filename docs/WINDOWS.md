@@ -89,6 +89,7 @@ Convert queue → Review and correct → Export corrected Word.
   cannot be recovered reliably. Severe blur cannot be reversed reliably by software.
 - Text and table edits autosave when you change regions. Mark a page reviewed only
   after checking it. The original Word export is protected; corrected export uses a new name.
+- Double-click a completed queue item to reopen that document's saved review.
 - Pause takes effect at the next safe boundary. Cancel stops OCR promptly and AI at
   the next stream chunk or read timeout (default 45 s). Completed pages survive.
 - Retry the same PDF/settings to reuse completed checkpoints. Reopen a project folder
@@ -110,10 +111,12 @@ notegen doctor
 notegen convert scan.pdf -o notes.docx --mode thorough --handwriting --context 'Biology notes'
 notegen convert scan.pdf -o notes.docx --mode fast --language eng+sin --pages 1-5
 notegen export 'D:\Notes\.notegen\my-project' -o corrected.docx
+notegen --debug convert scan.pdf -o diagnostic-notes.docx --mode fast
 ```
 
 The portable CLI is `CLI\NoteGenCLI.exe`. The source install uses `notegen` or
 `python -m notegen`. Existing DOCX files are never overwritten automatically.
+The optional `--debug` traceback stays local and may contain local file paths.
 
 ## Developer build
 

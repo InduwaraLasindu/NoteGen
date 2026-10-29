@@ -7,9 +7,11 @@
 | Iteration 1: core conversion | 18 passed; real Tesseract on a generated raster-only PDF |
 | Iteration 2: AI transport and orchestration | 36 passed; includes deterministic model responses and error paths |
 | Iteration 3: desktop and review | 44 passed; includes a real OCR conversion through the Qt worker |
-| Iteration 4: local regression suite | 48 passed, 1 GPU test skipped |
+| Iteration 4: local regression suite | 50 passed, 1 GPU test skipped |
 | Windows source tests | 48 passed, 1 GPU test skipped in GitHub Actions; Python 3.12.15 |
-| Packaged Windows app / clean Linux CI | In progress; see Actions for build results |
+| Clean Linux source tests | 48 passed, 1 GPU test skipped after native Qt dependency fix |
+| Packaged CLI (Linux) | Built and passed actual DOCX export with text, cells, figure and templates; scanned PDF conversion also passed |
+| Latest Windows/Linux suite and portable Windows app | In progress; see Actions for final results |
 | NVIDIA CUDA + real model quality | Not run in this CPU-only development environment |
 
 The current suite checks PDF bounds and invalid inputs, word boxes, table cells,

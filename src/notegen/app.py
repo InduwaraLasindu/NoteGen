@@ -49,6 +49,7 @@ class QueueItem:
     source: Path
     state: str = "Waiting"
     output: Path | None = None
+    project: Path | None = None
 
 
 class Task(QThread):
@@ -287,6 +288,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(queue_header)
         self.file_list = PdfList()
         self.file_list.files_dropped.connect(self.add_files)
+        self.file_list.itemDoubleClicked.connect(self.open_selected_job)
         layout.addWidget(self.file_list, 1)
         self.empty_hint = label(
             "Drop scanned PDFs here to get started.\nMultiple files are processed one at a time.",
@@ -304,12 +306,18 @@ class MainWindow(QMainWindow):
         self.overall.setRange(0, 1000)
         self.overall.setValue(0)
         self.overall.setTextVisible(False)
+        self.overall.setToolTip(
+            "Completed page counts are exact. Within-page progress is a stage estimate."
+        )
         pl.addWidget(self.overall)
         self.progress_text = label("Document progress · 0%", "muted")
         pl.addWidget(self.progress_text)
         self.page_progress = QProgressBar()
         self.page_progress.setRange(0, 100)
         self.page_progress.setValue(0)
+        self.page_progress.setToolTip(
+            "Approximate progress through the current page's processing stages."
+        )
         pl.addWidget(self.page_progress)
         self.eta_label = label("Time remaining appears after completed pages.", "muted")
         pl.addWidget(self.eta_label)
@@ -618,6 +626,7 @@ class MainWindow(QMainWindow):
             item.source.name + f"\nCompleted · {review_count} page(s) to review"
         )
         self.last_output, self.last_project = result.output, result.project.root
+        item.project = result.project.root
         self.review.load_project(result.project.root, result.pages)
         self.review_metric.value.setText(str(review_count))
         self.open_button.setEnabled(True)
@@ -768,6 +777,20 @@ class MainWindow(QMainWindow):
     def open_output(self):
         if self.last_output:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_output.resolve())))
+
+    def open_selected_job(self, *_):
+        if self.running_queue:
+            return
+        index = self.file_list.currentRow()
+        if 0 <= index < len(self.queue):
+            item = self.queue[index]
+            if item.state == "Completed" and item.project:
+                try:
+                    self.load_saved_project(item.project)
+                    self.last_output = item.output
+                    self.tabs.setCurrentIndex(1)
+                except Exception as exc:
+                    self.present_error(classify(exc))
 
     def open_project(self):
         root = QFileDialog.getExistingDirectory(

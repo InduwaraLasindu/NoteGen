@@ -34,7 +34,7 @@ class PdfSource:
                 w, h = handle.get_size()
                 if not all(math.isfinite(x) and 0 < x < 1_000_000 for x in (w, h)):
                     raise NoteGenError("NG101")
-                scale = min(dpi / 72, math.sqrt(max_pixels / (w * h)))
+                scale = min(dpi / 72, math.sqrt(max_pixels / (w * h)), 10000 / max(w, h))
                 # Ceiling padding in PDFium can add one row/column; leave a margin.
                 scale *= 0.999
                 bitmap = handle.render(scale=scale)

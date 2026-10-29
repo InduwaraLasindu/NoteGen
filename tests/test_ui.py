@@ -166,3 +166,36 @@ def test_small_desktop_layout_keeps_controls_available(window, qtbot):
     assert window.tabs.width() > 500
     assert window.start_button.isVisible()
     assert window.file_list.minimumHeight() >= 160
+
+
+def test_table_merge_invalidates_the_visible_review_confirmation(review):
+    review.block_list.setCurrentRow(1)
+    review.reviewed.setChecked(True)
+    assert review.pages[0].reviewed
+    review.table.setRangeSelected(QTableWidgetSelectionRange(0, 0, 0, 1), True)
+    review.merge_selection()
+    assert not review.pages[0].reviewed and not review.reviewed.isChecked()
+    review.reviewed.setChecked(True)
+    review.split_merges()
+    assert not review.pages[0].reviewed and not review.reviewed.isChecked()
+
+
+def test_completed_queue_item_reopens_its_own_review(window, scanned_pdf, project_root):
+    path, _ = scanned_pdf
+    window.add_files([str(path)])
+    project = Project(project_root, "a", "b", [1])
+    Image.new("RGB", (100, 100), "white").save(project.image_path(1))
+    project.save(
+        PageResult(
+            page=1,
+            engine="test",
+            image="page-00001.png",
+            blocks=[Block(kind="text", text="Selected document review", confidence=0.99)],
+        )
+    )
+    window.queue[0].state = "Completed"
+    window.queue[0].project = project_root
+    window.file_list.setCurrentRow(0)
+    window.open_selected_job()
+    assert window.review.text.toPlainText() == "Selected document review"
+    assert window.tabs.currentIndex() == 1

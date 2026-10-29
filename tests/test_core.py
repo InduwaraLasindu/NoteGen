@@ -65,6 +65,8 @@ def test_valid_endpoints_and_page_ranges():
         with pytest.raises(NoteGenError):
             select_pages(spec, 5)
     assert Settings().fingerprint("a") != Settings().fingerprint("b")
+    crop = Box(left=0.50001, top=0.50001, right=0.50002, bottom=0.50002).pixels((100, 100))
+    assert crop[2] > crop[0] and crop[3] > crop[1]
 
 
 def test_raster_pdf_bounds_and_invalid_input(scanned_pdf, tmp_path):

@@ -347,6 +347,9 @@ class ReviewPanel(QWidget):
             updated = Block.model_validate(data)
             page.blocks[self.block_index] = updated
             page.reviewed = False
+            self.reviewed.blockSignals(True)
+            self.reviewed.setChecked(False)
+            self.reviewed.blockSignals(False)
             self.persist()
             self.select_block(self.block_index)
         except Exception as exc:
@@ -359,6 +362,9 @@ class ReviewPanel(QWidget):
         block = page.blocks[self.block_index]
         block.merges = []
         page.reviewed = False
+        self.reviewed.blockSignals(True)
+        self.reviewed.setChecked(False)
+        self.reviewed.blockSignals(False)
         try:
             self.persist()
             self.select_block(self.block_index)
