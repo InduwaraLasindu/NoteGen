@@ -2,6 +2,12 @@
 
 30 October 2026. Tests are gates, not evidence of perfect OCR or diagram truth.
 
+[Verified Windows build and test artifacts](https://github.com/InduwaraLasindu/NoteGen/actions/runs/40942918948#artifacts).
+The portable Windows artifact is 212,132,957 bytes (about 202 MiB) and includes notices
+for 21 installed dependencies plus Qt license texts. Its artifact SHA256 is
+`897b0e2fe3a17d0d256eef298367386f3800ed203785b8a0b0d652549f82d1e5`.
+The build is tied to code commit `6370a7f0209fa64dbb377ff7b1b7978fc4a214fe`.
+
 | Gate | Result |
 |---|---|
 | Iteration 1: core conversion | 18 passed; real Tesseract on a generated raster-only PDF |

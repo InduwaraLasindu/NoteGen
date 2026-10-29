@@ -21,6 +21,11 @@ an auditable JSON project. No uploads, telemetry, automatic model downloads or c
 No feature is described as verified on Windows or CUDA without an actual run there.
 Mocks verify transport and orchestration; they do not measure model recognition quality.
 
+Software gates 1–4 completed on 30 October 2026: 50 tests passed on Windows and Linux,
+and the portable Windows app passed startup and actual DOCX export smoke checks.
+Real-model CUDA quality and target-machine performance acceptance remain open; the
+opt-in GPU test was explicitly skipped. See TESTING.md for the exact build and evidence.
+
 ## Architecture
 
 `PySide6 desktop / CLI → sequential job runner → PDFium → OpenCV → Tesseract → local

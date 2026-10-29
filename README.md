@@ -11,6 +11,8 @@ one-time installation. No account, API key, document upload or cloud fallback.
 
 ## Start here
 
+- [Download the verified Windows build](https://github.com/InduwaraLasindu/NoteGen/actions/runs/40942918948#artifacts)
+  — choose **NoteGen-Windows-x64** under Artifacts. Source/model setup is described below.
 - [Windows setup and usage](docs/WINDOWS.md) — portable app or source install.
 - [Verification record](docs/TESTING.md) — what passed and what still needs real hardware.
 - [Architecture, iterations and acceptance plan](docs/PLAN.md).
