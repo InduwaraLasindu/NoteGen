@@ -63,6 +63,9 @@ def test_routing_and_disagreement():
     assert wants_vision(Settings(handwriting=True), content)
     assert wants_vision(Settings(mode="thorough"), content)
     assert not wants_vision(Settings(mode="fast"), content)
+    blurry = content.model_copy(deep=True)
+    blurry.warnings.append("Possible blur")
+    assert wants_vision(Settings(), blurry)
     ai = PageContent(blocks=[Block(kind="text", text="1200")])
     check_disagreement(content, ai)
     assert any("numbers" in w for w in ai.warnings)
@@ -253,3 +256,18 @@ def test_multiple_pages_and_selected_range(tmp_path, fake_ocr):
     assert [p.page for p in result.pages] == [1, 3]
     assert len(Document(result.output).sections) == 1
     assert "Source page 3" in " ".join(p.text for p in Document(result.output).paragraphs)
+
+
+def test_unrecognized_page_is_preserved_in_word(tmp_path, monkeypatch):
+    class EmptyOCR(FakeOCR):
+        def recognize(self, *args):
+            return []
+
+    monkeypatch.setattr(pipeline, "Tesseract", EmptyOCR)
+    source = tmp_path / "blank.pdf"
+    Image.new("RGB", (400, 600), "white").save(source, "PDF")
+    result = convert(
+        source, tmp_path / "preserved.docx", Settings(mode="fast", dpi=100), resource_reader=no_gpu
+    )
+    assert result.pages[0].needs_review()
+    assert len(Document(result.output).inline_shapes) == 1

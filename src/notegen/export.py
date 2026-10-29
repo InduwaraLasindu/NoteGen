@@ -5,6 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
+import psutil
 from docx import Document
 from docx.enum.text import WD_BREAK
 from docx.oxml import OxmlElement
@@ -58,6 +59,11 @@ def export_docx(
     for index, page in enumerate(pages):
         if cancel and cancel.is_set():
             raise NoteGenError("NG900")
+        if (
+            psutil.virtual_memory().available < 2**30
+            or psutil.Process().memory_info().rss > 4 * 2**30
+        ):
+            raise NoteGenError("NG300", "Export memory safety margin reached; split the page range")
         if index:
             doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         p = doc.add_paragraph(f"Source page {page.page}", style="Caption")
@@ -81,16 +87,30 @@ def export_docx(
                         repeat = OxmlElement("w:tblHeader")
                         table.rows[r]._tr.get_or_add_trPr().append(repeat)
                 for merge in block.merges:
-                    table.cell(merge.row, merge.col).merge(
+                    merged = table.cell(merge.row, merge.col).merge(
                         table.cell(merge.row + merge.rowspan - 1, merge.col + merge.colspan - 1)
                     )
+                    # Do not concatenate empty placeholder paragraphs as blank lines.
+                    merged.text = clean_xml(
+                        "\n".join(
+                            block.rows[r][c]
+                            for r in range(merge.row, merge.row + merge.rowspan)
+                            for c in range(merge.col, merge.col + merge.colspan)
+                            if block.rows[r][c]
+                        )
+                    )
+                    if merge.row < block.header_rows:
+                        for paragraph in merged.paragraphs:
+                            for run in paragraph.runs:
+                                run.bold = True
                 doc.add_paragraph()
             elif block.kind == "figure":
                 path = safe_image(root, page.image)
                 with Image.open(path) as im:
                     crop = im.crop(block.box.pixels(im.size)).convert("RGB")
+                    crop.thumbnail((1800, 2400), Image.Resampling.LANCZOS)
                     data = io.BytesIO()
-                    crop.save(data, format="PNG")
+                    crop.save(data, format="JPEG", quality=94)
                     data.seek(0)
                     shape = doc.add_picture(data, width=Inches(min(6, crop.width / 160)))
                     shape._inline.docPr.set(

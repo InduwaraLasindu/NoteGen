@@ -11,7 +11,7 @@ from .events import Activity
 from .export import export_docx
 from .imaging import prepare
 from .layout import extract_layout
-from .models import PageContent, PageResult, Settings, select_pages
+from .models import Block, Box, PageContent, PageResult, Settings, select_pages
 from .ocr import Tesseract
 from .resources import guard, snapshot
 from .storage import Project, file_hash
@@ -46,6 +46,7 @@ def wants_vision(settings: Settings, content: PageContent) -> bool:
     return (
         settings.mode == "thorough"
         or settings.handwriting
+        or bool(content.warnings)
         or not content.blocks
         or any(
             b.kind in ("figure", "table")
@@ -197,7 +198,8 @@ def convert(
                     content = PageContent(warnings=["CPU OCR failed; local AI used for this page."])
                     event("ocr", "CPU OCR failed; trying local AI", level="warning", code=exc.code)
                 prepared.ocr.close()
-                warnings = prepared.warnings + content.warnings
+                content.warnings.extend(prepared.warnings)
+                warnings = list(content.warnings)
                 engine = "tesseract"
                 if settings.handwriting and settings.mode == "fast":
                     warnings.append("Fast mode is not suitable for handwriting. Select an AI mode.")
@@ -214,7 +216,7 @@ def convert(
                             settings.context + "\nPrevious selected page: " + previous,
                             control.cancel,
                             on_tokens=lambda n: event(
-                                "vision", f"Local AI generated {n} stream fragments"
+                                "vision", "Local AI is writing the page result"
                             ),
                             on_retry=lambda exc: event(
                                 "recovery",
@@ -252,6 +254,14 @@ def convert(
                 if not content.blocks:
                     warnings.append(
                         "No content recognized. The original page is preserved in this project."
+                    )
+                    content.blocks.append(
+                        Block(
+                            kind="figure",
+                            box=Box(left=0, top=0, right=1, bottom=1),
+                            description="Source page preserved because no reliable content was recognized. Manual transcription is required.",
+                            uncertain=True,
+                        )
                     )
                 result = PageResult(
                     page=number,

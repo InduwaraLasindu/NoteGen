@@ -53,11 +53,12 @@ class Box(StrictModel):
 
     def pixels(self, size: tuple[int, int]) -> tuple[int, int, int, int]:
         w, h = size
+        left, top = min(w - 1, int(self.left * w)), min(h - 1, int(self.top * h))
         return (
-            int(self.left * w),
-            int(self.top * h),
-            max(1, int(self.right * w)),
-            max(1, int(self.bottom * h)),
+            left,
+            top,
+            max(left + 1, int(self.right * w)),
+            max(top + 1, int(self.bottom * h)),
         )
 
 

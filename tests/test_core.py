@@ -201,3 +201,23 @@ def test_live_activity_has_machine_readable_codes(tmp_path):
     Activity(log, received.append).emit("ocr", "Page recognized", page=1, total=2, code="NG111")
     assert received[0].page == 1
     assert json.loads(log.read_text())["code"] == "NG111"
+
+
+def test_vertical_table_merges_survive_docx_export(project_root, tmp_path):
+    page = PageResult(
+        page=1,
+        engine="test",
+        image="page-00001.png",
+        blocks=[
+            Block(
+                kind="table",
+                rows=[["Group A", "10"], ["", "20"]],
+                merges=[Merge(row=0, col=0, rowspan=2, colspan=1)],
+            )
+        ],
+    )
+    path = export_docx([page], project_root, tmp_path / "vertical.docx")
+    with zipfile.ZipFile(path) as z:
+        assert b'w:vMerge w:val="restart"' in z.read("word/document.xml")
+    table = Document(path).tables[0]
+    assert table.cell(1, 0).text == "Group A" and table.cell(1, 1).text == "20"
