@@ -26,6 +26,14 @@ desktop = ["dep:eframe", "dep:rfd"]
 name = "core"
 path = "rust/tests/core.rs"
 
+[[test]]
+name = "engine"
+path = "rust/tests/engine.rs"
+
+[dev-dependencies]
+imageproc = { version = "0.25", default-features = false }
+ab_glyph = "0.2"
+
 [dependencies]
 anyhow = "1"
 thiserror = "2"
@@ -42,6 +50,7 @@ tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rayon = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
 base64 = "0.22"
 regex = "1"
 zip = { version = "4", default-features = false, features = ["deflate"] }

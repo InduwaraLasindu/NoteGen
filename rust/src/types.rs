@@ -464,6 +464,8 @@ impl PageContent {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Candidate {
+    #[serde(default)]
+    pub region: Option<BoxRect>,
     pub model_id: String,
     pub family: String,
     pub view: String,
@@ -473,6 +475,7 @@ pub struct Candidate {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Page {
+    pub edited: bool,
     pub page: usize,
     pub image: String,
     pub content: PageContent,

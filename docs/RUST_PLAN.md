@@ -15,8 +15,11 @@ are required evidence. No universal accuracy or zero-error claim is made.
    protection and numeric disagreement. Planning is deterministic and does not need a GPU.
 2. Native PDF/image/OCR adapters, local model lifecycle, model-specific protocols,
    high-resolution crop retries, persistent evidence, resumable pipeline and DOCX.
-   Gate: native fixtures, local HTTP server protocol, faults/cancellation, Word XML and
-   model-major scheduling tests. Preserve all alternatives and uncertainty.
+   Gate passed: 31 automated tests (13 core + 18 engine), format and clippy. Native
+   raster-only PDF + real Tesseract conversion/resume; local HTTP streaming, faults,
+   cancellation, source graphics, merges and Word XML. Separately ran GLM-OCR Q8 on
+   CPU against a generated scan and a table crop: text recognized and cell 1250
+   recovered with the model-specific table protocol. No GPU/handwriting claim.
 3. Minimal Rust desktop, Advanced settings, animations/customization, review/editing.
    Gate: headless egui state tests, worker lifecycle, settings roundtrip, real conversion.
 4. Windows release, clean Linux/Windows CI, package smoke tests and hardware acceptance.

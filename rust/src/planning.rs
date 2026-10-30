@@ -51,7 +51,11 @@ pub fn build(hw: &Hardware, s: &Settings, models: &[Model]) -> Result<Plan> {
     let backend = match s.backend {
         Backend::Auto => {
             if gpu.is_some() {
-                Backend::Cuda
+                if gpu.is_some_and(|g| g.backend == "vulkan") {
+                    Backend::Vulkan
+                } else {
+                    Backend::Cuda
+                }
             } else {
                 Backend::Cpu
             }
@@ -202,10 +206,15 @@ pub fn server_args(model: &Model, plan: &Plan, s: &Settings, port: u16) -> Vec<S
     }
     if let Some(index) = plan.gpu_index {
         args.extend([
-            "--main-gpu".into(),
-            index.to_string(),
-            "--split-mode".into(),
-            "none".into(),
+            "--device".into(),
+            format!(
+                "{}{index}",
+                if plan.backend == Backend::Vulkan {
+                    "Vulkan"
+                } else {
+                    "CUDA"
+                }
+            ),
         ]);
     }
     args

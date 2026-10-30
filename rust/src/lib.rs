@@ -1,4 +1,10 @@
-pub mod types;
-pub mod hardware;
-pub mod planning;
 pub mod consensus;
+pub mod hardware;
+pub mod parsing;
+pub mod pipeline;
+pub mod planning;
+pub mod runtime;
+pub mod scan;
+pub mod storage;
+pub mod types;
+pub mod word;

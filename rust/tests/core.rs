@@ -163,6 +163,7 @@ fn table_merges_checked() {
 }
 fn candidate(model: &str, family: &str, text: &str) -> Candidate {
     Candidate {
+        region: None,
         model_id: model.into(),
         family: family.into(),
         view: "full".into(),
@@ -228,5 +229,5 @@ fn server_is_offline_cuda_and_not_shell_code() {
     assert!(a.contains(&"--offline".to_string()));
     assert!(a.contains(&"C:/a b/weights.gguf".to_string()));
     assert!(a.contains(&"--flash-attn".to_string()));
-    assert!(a.windows(2).any(|a| a == ["--main-gpu", "1"]));
+    assert!(a.windows(2).any(|a| a == ["--device", "CUDA1"]));
 }

@@ -90,3 +90,44 @@ pub fn detect() -> Hardware {
         simd,
     }
 }
+
+pub fn parse_devices(text: &str) -> Vec<Gpu> {
+    let re = regex::Regex::new(
+        r"(?im)^\s*(CUDA|Vulkan)(\d+):\s*(.*?)\s*\((\d+)\s*MiB,\s*(\d+)\s*MiB\s*free\)",
+    )
+    .unwrap();
+    re.captures_iter(text)
+        .filter_map(|c| {
+            Some(Gpu {
+                index: c[2].parse().ok()?,
+                name: c[3].into(),
+                uuid: format!("{}{}", &c[1], &c[2]),
+                total_mib: c[4].parse().ok()?,
+                free_mib: c[5].parse().ok()?,
+                backend: c[1].to_lowercase(),
+            })
+        })
+        .collect()
+}
+pub fn detect_for(s: &crate::types::Settings, c: &crate::storage::Control) -> Hardware {
+    let mut h = detect();
+    if s.server.is_file()
+        && let Ok((true, a, b)) = crate::scan::run(
+            &s.server,
+            &["--list-devices".into()],
+            std::time::Duration::from_secs(20),
+            c,
+        )
+    {
+        let mut devices = parse_devices(&format!("{a}\n{b}"));
+        if !devices.is_empty() {
+            if s.backend == crate::types::Backend::Vulkan {
+                devices.retain(|g| g.backend == "vulkan");
+            } else if devices.iter().any(|g| g.backend == "cuda") {
+                devices.retain(|g| g.backend == "cuda");
+            }
+            h.gpus = devices;
+        }
+    }
+    h
+}
