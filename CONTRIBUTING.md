@@ -1,23 +1,25 @@
-# Development
+# Developing NoteGen Rust
 
-Use Python 3.12 and the locked dependencies. Install Tesseract for the real OCR tests.
+Use Rust 1.99.1 and Cargo.lock. Desktop, resource planning, consensus, native adapters,
+evidence and Word export are separate modules in rust/src. The Python predecessor is
+archived under legacy/python and is not used in current builds.
 
-```shell
-python -m pip install -r requirements-dev-lock.txt
-python -m pip install --no-deps --no-build-isolation -e .
-python -m ruff check src tests scripts
-python -m ruff format --check src tests scripts
-QT_QPA_PLATFORM=offscreen python -m pytest -q -rA
-```
+Install Tesseract (eng/osd), PDFium chromium/8125, and set NOTEGEN_PDFIUM for tests.
+Linux desktop builds need fontconfig/OpenGL/X11/Wayland system dependencies; CI lists
+them. Windows needs MSVC Build Tools.
 
-On PowerShell set `$env:QT_QPA_PLATFORM='offscreen'` before running pytest.
+~~~shell
+cargo fmt --all --check
+cargo clippy --locked --all-features --all-targets -j 2 -- -D warnings
+cargo test --locked --all-features --all-targets -j 2
+cargo build --locked --release --features desktop --bins
+~~~
 
-Keep PDFium on one worker and one AI request in flight. Preserve loopback-only
-networking, disabled environment proxies, blocked redirects, explicit uncertainty,
-atomic checkpoints and no implicit output overwrite. No documents, weights, logs,
-credentials or private paths in git. Fixtures must be generated or permissively licensed.
+Complete the relevant tests before declaring an iteration finished. Use real raster
+PDF/native OCR checks for scan changes. Adapters need real vendor protocol examples;
+mocked JSON does not establish model quality. Preserve source, alternatives and numeric
+conflicts. Do not synthesize average transcripts or claim calibrated accuracy without
+evidence. Physical model/GPU/corpus validation must be identified separately.
 
-Add meaningful regression evidence for behavior changes. Run the current iteration's
-gate before moving on. Do not equate mocked AI tests with recognition accuracy tests.
-Update TESTING.md when validating on Windows/CUDA. Report code + app/model/runtime
-version when filing a bug; avoid attaching personal scans without redacting them.
+Do not commit model weights, private scans, generated documents or native binaries.
+Preserve dependency notices and source links when packaging. Large AI tests are opt-in.

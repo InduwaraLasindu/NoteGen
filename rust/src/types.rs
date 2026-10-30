@@ -69,6 +69,8 @@ pub enum Backend {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub preset: Preset,
+    pub automatic_models: bool,
+    pub model_ids: Vec<String>,
     pub handwriting: bool,
     pub languages: String,
     pub page_range: String,
@@ -122,6 +124,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             preset: Preset::Accuracy,
+            automatic_models: true,
+            model_ids: vec![],
             handwriting: false,
             languages: "eng".into(),
             page_range: String::new(),
@@ -156,7 +160,7 @@ impl Default for Settings {
             request_timeout_secs: 180,
             allow_cpu_offload: false,
             require_acceleration: false,
-            tesseract: "tesseract".into(),
+            tesseract: if PathBuf::from("runtime/tesseract/tesseract.exe").is_file() { "runtime/tesseract/tesseract.exe".into() } else { "tesseract".into() },
             pdfium: "runtime".into(),
             server: "runtime/llama-server.exe".into(),
             models_dir: "models".into(),
@@ -275,6 +279,9 @@ impl Settings {
             || !(6.0..=32.0).contains(&self.font_size)
         {
             return bad("Invalid document settings");
+        }
+        if self.model_ids.len()>32 || self.model_ids.iter().any(|s|s.is_empty() || s.len()>100 || !s.chars().all(|c|c.is_ascii_alphanumeric() || c=='-' || c=='_')) {
+            return bad("Invalid model allowlist");
         }
         local_endpoint(&self.endpoint)?;
         Ok(())

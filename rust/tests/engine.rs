@@ -421,6 +421,10 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
     let t = tempfile::tempdir().unwrap();
     let source = t.path().join("scan.pdf");
     pdf(&source, &fixture());
+    if let Some(out)=std::env::var_os("NOTEGEN_FIXTURE_DIR") {
+        let folder=PathBuf::from(out);fs::create_dir_all(&folder).unwrap();
+        fs::copy(&source,folder.join("scan.pdf")).unwrap();fixture().save(folder.join("scan.png")).unwrap();
+    }
     let mut im = None;
     scan::render_pdf(
         &source,
@@ -515,7 +519,7 @@ fn live_model() {
     let projector = PathBuf::from(std::env::var("NOTEGEN_LIVE_PROJECTOR").unwrap());
     let mut model = planning::catalog()
         .into_iter()
-        .find(|m| m.id == "glm-ocr")
+        .find(|m| m.id == std::env::var("NOTEGEN_LIVE_ID").unwrap_or_else(|_|"glm-ocr".into()))
         .unwrap();
     model.weights = weights;
     model.projector = projector;
@@ -639,4 +643,22 @@ fn unrecognized_graphics_are_preserved() {
     assert_eq!(blocks.len(), 1);
     assert!(blocks[0].bbox.as_ref().unwrap().valid());
     assert!(blocks[0].uncertain);
+}
+
+#[test]
+fn live_lighton_mixed_html_markdown_table_is_editable() {
+    let text="<table>\n### Table - Sales Summary\n*Type: data*\n\n| Item | Amount |\n|------|-------|\n| Sales | 1250 |\n\n</table>";
+    let p=parsing::lighton(text);let t=p.blocks.iter().find(|b|b.kind=="table").unwrap();
+    assert_eq!(t.rows[1][1],"1250");assert!(p.validate().is_ok());
+}
+#[test]
+fn balanced_skips_only_agreed_plain_pages_and_preserves_human_work() {
+    let mut p=Page{agreement:0.99,content:PageContent{blocks:vec![Block::text("Clean print")],..Default::default()},..Default::default()};
+    let mut s=Settings{preset:Preset::Balanced,..Default::default()};
+    assert!(!notegen::pipeline::should_read("vision","vision",&p,&s));
+    assert!(notegen::pipeline::should_read("ocr","ocr",&p,&s));
+    s.handwriting=true;assert!(notegen::pipeline::should_read("vision","vision",&p,&s));
+    s.handwriting=false;p.content.blocks.push(Block{kind:"figure".into(),bbox:Some(BoxRect::full()),..Default::default()});
+    assert!(notegen::pipeline::should_read("vision","vision",&p,&s));
+    p.edited=true;assert!(!notegen::pipeline::should_read("ocr","ocr",&p,&s));
 }

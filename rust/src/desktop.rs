@@ -288,7 +288,7 @@ impl Desktop {
                     self.state.recent.retain(|p| p != &r.project.root);
                     self.state.recent.insert(0, r.project.root.clone());
                     self.state.recent.truncate(12);
-                    if let Ok(v) = Review::load(r.project, 0, ctx) {
+                    if self.flush_review().is_ok() && let Ok(v) = Review::load(r.project, 0, ctx) {
                         self.review = Some(v);
                     }
                     self.finished();
@@ -341,6 +341,7 @@ impl Desktop {
         if self.worker.is_some() {
             return;
         }
+        if let Err(e)=self.flush_review() {self.notice=e.to_string();self.running_queue=false;return;}
         let Some(i) = self.state.next() else {
             self.running_queue = false;
             return;
@@ -394,7 +395,15 @@ impl Desktop {
             repaint.request_repaint();
         }));
     }
-    fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) {
+    fn flush_review(&mut self) -> Result<()> {
+        if let Some(r)=&mut self.review && r.dirty {
+            save_review(&r.project,&mut r.page,false)?;
+            r.dirty=false;
+        }
+        Ok(())
+    }
+    pub fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if let Err(e)=self.flush_review() {self.notice=e.to_string();return;}
         match Project::read(path).and_then(|p| Review::load(p, 0, ctx)) {
             Ok(r) => {
                 self.review = Some(r);
@@ -403,7 +412,7 @@ impl Desktop {
             Err(e) => self.notice = e.to_string(),
         }
     }
-    fn advanced_open(&mut self) {
+    pub fn advanced_open(&mut self) {
         self.draft = self.state.settings.clone();
         self.raw = serde_json::to_string_pretty(&self.draft).unwrap_or_default();
         self.settings_error.clear();
@@ -420,9 +429,13 @@ impl Desktop {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
             self.pick_files();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.advanced = false;
-            self.review_open = false;
+        if ctx.input(|i|i.key_pressed(egui::Key::Escape)) {
+            self.advanced=false;
+            match self.flush_review() {Ok(())=>self.review_open=false,Err(e)=>self.review_error=e.to_string()}
+        }
+        if ctx.input(|i|i.viewport().close_requested()) && let Err(e)=self.flush_review() {
+            self.notice=format!("Could not save review draft: {e}");
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.background()).inner_margin(if self.state.settings.ui.compact {
             18}
@@ -1038,7 +1051,18 @@ impl Desktop {
             );
         }
         ui.separator();
-        let catalog = planning::catalog();
+        ui.checkbox(&mut self.draft.automatic_models,"Automatically choose the strongest fitting installed models");
+        let catalog=planning::catalog();
+        if !self.draft.automatic_models {
+            ui.small("Allow these readers. Memory admission still applies.");
+            for m in &catalog {
+                let mut selected=self.draft.model_ids.contains(&m.id);
+                if ui.checkbox(&mut selected,&m.name).changed() {
+                    self.draft.model_ids.retain(|v|v!=&m.id);
+                    if selected {self.draft.model_ids.push(m.id.clone());}
+                }
+            }
+        }
         egui::ComboBox::from_label("Register model")
             .selected_text(
                 catalog
@@ -1486,6 +1510,7 @@ impl eframe::App for Desktop {
         }
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        let _=self.flush_review();
         self.control.cancelled.store(true, Ordering::Relaxed);
         self.running_queue = false;
         if let Some(w) = self.worker.take() {
@@ -1696,4 +1721,16 @@ mod acceptance {
             draw(&mut app, &ctx);
         }
     }
+    #[test]
+    fn switching_projects_saves_the_previous_review_draft() {
+        let dir=tempfile::tempdir().unwrap();
+        let p=Project::open(dir.path().into(),Manifest{schema:2,input_sha256:"a".into(),fingerprint:"b".into(),pages:vec![1],models:vec![],settings:Settings::default()}).unwrap();
+        p.save(&Page{page:1,image:"page-00001.png".into(),content:PageContent{blocks:vec![Block::text("Original")],..Default::default()},..Default::default()}).unwrap();
+        let ctx=egui::Context::default();let mut app=Desktop::new(Workspace::default());
+        app.open_review(p.root.clone(),&ctx);
+        let r=app.review.as_mut().unwrap();r.page.content.blocks[0].text="Human correction".into();r.dirty=true;
+        app.open_review(p.root.clone(),&ctx);
+        assert!(p.load(1).unwrap().edited);assert_eq!(app.review.as_ref().unwrap().page.content.plain(),"Human correction");
+    }
+
 }

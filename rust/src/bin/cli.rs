@@ -86,7 +86,7 @@ fn run() -> Result<()> {
     };
     match args.command {
         Action::Doctor => {
-            let h = hardware::detect();
+            let h = hardware::detect_for(&s, &c);
             println!("{}", serde_json::to_string_pretty(&h)?);
             println!(
                 "Installed readers: {}",
@@ -102,7 +102,7 @@ fn run() -> Result<()> {
             };
             println!(
                 "{}",
-                serde_json::to_string_pretty(&planning::build(&hardware::detect(), &s, &models)?)?
+                serde_json::to_string_pretty(&planning::build(&hardware::detect_for(&s, &c), &s, &models)?)?
             );
         }
         Action::Catalog => println!("{}", serde_json::to_string_pretty(&planning::catalog())?),

@@ -78,6 +78,7 @@ pub fn html_table(text: &str) -> Option<Block> {
 }
 pub fn plain_blocks(text: &str) -> Vec<Block> {
     let table = Regex::new(r"(?is)<table\b.*?</table>").unwrap();
+    let tags = Regex::new(r"<[^>]+>").unwrap();
     let mut out = vec![];
     let mut last = 0;
     for m in table.find_iter(text) {
@@ -85,7 +86,8 @@ pub fn plain_blocks(text: &str) -> Vec<Block> {
         if let Some(t) = html_table(m.as_str()) {
             out.push(t);
         } else {
-            out.push(Block::text(m.as_str()));
+            // Live readers may wrap Markdown tables in HTML tags.
+            out.extend(markdown(&tags.replace_all(m.as_str(), "")));
         }
         last = m.end();
     }
@@ -173,7 +175,7 @@ pub fn lighton(text: &str) -> PageContent {
             continue;
         }
         let mut b = if c[1] == *"table" || c[1] == *"chart" {
-            html_table(body).unwrap_or_else(|| Block::text(body))
+            html_table(body).or_else(||plain_blocks(body).into_iter().find(|b|b.kind=="table")).unwrap_or_else(|| Block::text(body))
         } else {
             Block::text(body)
         };

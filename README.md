@@ -1,89 +1,96 @@
 # NoteGen
 
-**Scanned PDF → editable Word. Local AI. Native Windows desktop.**
+**Scanned PDF → editable Word. Rust desktop. Local AI. Adaptive NVIDIA acceleration.**
 
-Built for a 32 GB RAM / 16 GB NVIDIA RTX PC, including RTX 5070 Ti. Fast CPU printed
-OCR handles easy content; a CUDA vision model handles difficult pages, handwriting,
-table structure and grounded diagram explanations. Everything runs locally after a
-one-time installation. No account, API key, document upload or cloud fallback.
+NoteGen transcribes print and handwriting with local readers, rebuilds editable Word
+tables, and preserves diagrams with observations and contextual interpretations.
+The desktop and pipeline are Rust. PDFium, Tesseract and llama.cpp are native engines.
+Python is not needed to run the current app.
 
-![NoteGen workspace](docs/images/workspace.png)
+![Native Rust desktop](docs/images/rust-workspace.png)
 
-## Start here
+[Windows builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
+· [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
 
-- [Download the verified Windows build](https://github.com/InduwaraLasindu/NoteGen/actions/runs/40942918948#artifacts)
-  — choose **NoteGen-Windows-x64** under Artifacts. Source/model setup is described below.
-- [Windows setup and usage](docs/WINDOWS.md) — portable app or source install.
-- [Verification record](docs/TESTING.md) — what passed and what still needs real hardware.
-- [Architecture, iterations and acceptance plan](docs/PLAN.md).
-- [Primary engineering sources](docs/SOURCES.md).
+Choose the latest **successful Rust workflow**, then download **NoteGen-Rust-Windows-x64**
+under Artifacts. Extract the outer artifact and portable ZIP inside it. English printed
+OCR and Word export work immediately. For AI, run inside the extracted NoteGen folder:
 
-From source, install Python 3.12 x64 and run:
+~~~powershell
+.\scripts\Setup-Runtime.ps1
+.\scripts\Install-Models.ps1 -MaximumAccuracy
+.\NoteGen.exe
+~~~
 
-```powershell
-.\scripts\Setup-Windows.ps1 -Launch
-```
-
-Install Tesseract for printed OCR. For handwriting and contextual diagrams, install a
-CUDA llama.cpp build, local vision GGUF and matching projector, then use
-`scripts/Start-LocalAI.ps1`. Recommended initial model: **Qwen2.5-VL-7B-Instruct Q4_K_M**.
-The setup guide includes exact commands and a diagnostics workflow. Models/runtime
-executables are separate downloads, and are never fetched while converting documents.
+Setup selects models for actual free memory, downloads pinned revisions, verifies SHA256
+and registers them. Models are separate, potentially large downloads. Once installed,
+conversion uses only local files and loopback HTTP. There is no cloud fallback, API key
+or document upload.
 
 ## Features
 
-| Feature | Behavior |
+| Capability | Behavior |
 |---|---|
-| Three quality profiles | Fast OCR; selective AI; AI on every page |
-| Printed text and handwriting | Multilingual Tesseract + local vision; explicit uncertainty for illegible content |
-| Editable tables | Ruled-table CPU recovery; AI reconstruction including borderless/merged structures; manual cell/merge correction |
-| Contextual diagrams | Preserve source crop, describe visible evidence, then qualify a contextual interpretation |
-| Scan preparation | Orientation check, small-angle deskew, contrast enhancement, blur warning and image size limits |
-| Live activity | Stage and document progress, elapsed/estimated time, filterable logs and memory telemetry |
-| Understandable errors | Stable NG codes, likely cause, suggested fix, bounded AI retry and explicit OCR fallback |
-| Durable jobs | Queue, page ranges, pause/cancel and input/settings/model-bound page checkpoints |
-| Human review | Side-by-side scan and editable regions; confidence flags, persistent corrections and reviewed-page markers |
-| Safe exports | Editable DOCX, repeatable table headers, source figure alt text, new filenames and protected existing output |
-| CLI and benchmarking | Offline diagnostics, headless conversion/re-export, exact CER/WER and sampled performance reports |
+| Adaptive hardware | CPU/SIMD, RAM and CUDA/Vulkan discovery; strongest fitting installed readers; memory re-admission before model load |
+| Four presets | Fast printed OCR; Balanced with selective vision; Accuracy on every page; Maximum Accuracy with independent families and difficult-region crop retries |
+| Print and handwriting | Tesseract baseline, LightOnOCR-3 / GLM-OCR specialists and Qwen vision; original source and all alternative readings retained |
+| Ensemble decisions | Weighted medoid selects an observed transcript; duplicate models/crops do not count as independent agreement; numeric conflicts require review |
+| Tables | Native ruled-grid recovery and HTML/Markdown/JSON tables; real Word cells, merges and repeated headers |
+| Diagrams | Source crop, visible evidence and qualified contextual interpretation kept separately; interpretations require review |
+| Scan preparation | Orientation detection, small-angle deskew, contrast normalization, blur warnings and image memory limits |
+| Live activity | Stage/page progress, elapsed/estimated time, filterable activity, NG error codes and remedies; full JSONL/native runtime logs |
+| Durable jobs | Queue, page ranges, pause, active-request cancellation, input/model/settings-bound checkpoints, restart recovery and protected output names |
+| Review | Side-by-side source boxes, editable text/cells/diagram explanations, reader evidence, validated page JSON and persistent human corrections |
+| Minimal native UI | Advanced controls and every parameter in validated JSON; light/dark, accent/background, scale, motion/FPS, reduced motion, compact mode |
+| Offline CLI | Diagnostics, hardware plan, registration, conversion, project inspection, native export and re-export |
 
-![Editable table review](docs/images/review.png)
+Windows UI rendering uses wgpu/Direct3D or Vulkan; AI uses CUDA/Vulkan through llama.cpp.
+Actual offloaded layers are recorded in the native startup log. PDF rendering, Tesseract,
+export and some preprocessing remain CPU operations. Not every operation can occupy
+100% of the GPU. The UI and AI select graphics devices independently.
 
-Screenshots use a generated synthetic accounting scan and real CPU OCR. They do not
-claim to demonstrate AI handwriting accuracy.
+## Hardware and models
 
-## Resource design
+| VRAM | Illustrative automatic choice, when installed and enough memory is free |
+|---|---|
+| 4 GB | LightOnOCR-3 1B Q8 + Qwen3.5 2B Q4 |
+| 8 GB | Small OCR specialist + Qwen3.5 4B Q5 |
+| 16 GB | LightOnOCR-3 4B Q8 + Qwen3.5 9B Q5 |
+| 32 GB | LightOnOCR-3 4B Q8 + Qwen3.8 27B Q4 |
 
-One PDF page and one AI request run at a time. Images and page results checkpoint to
-disk. PDFium runs only in the conversion worker; the GUI stays responsive through
-queued Qt signals. The reference CUDA launcher limits context, image tokens, batch
-size and parallel slots. App memory guards preserve completed work under pressure.
+Maximum adds a different OCR family such as GLM-OCR when it fits. One model is resident
+at a time. Pages are processed per model before switching, avoiding repeated weight
+loads for every page. Windows/UI memory headroom is reserved. Threads, resolution,
+image tokens, context, batch and micro-batch adapt; Advanced supports manual model
+selection and validated overrides. Estimates are planning inputs, not measured peaks.
 
-These choices target the hardware budget; actual peak VRAM and speed require the
-Windows/RTX benchmark. Other running apps also consume memory. A 4-bit model's file
-size is not its total GPU footprint. See the test report for measured versus untested claims.
+Catalog checked **30 October 2026**: LightOnOCR-3, GLM-OCR, Qwen3.5 and Qwen3.8.
+[Primary sources](docs/SOURCES.md) distinguish vendor models from community GGUF
+conversions. Setup pins runtime b11998 and immutable model revisions/checksums.
 
-## Limits you should know
+## Quality and verification
 
-Terrible handwriting and severely blurred text cannot always be recovered. AI can
-misread text or infer a wrong diagram meaning. Review flagged content against the
-source. Confidence scores are estimates, not calibrated accuracy guarantees.
-Output prioritizes editable reading order and structure over a pixel-perfect facsimile.
-Complex merged/borderless tables, cross-page tables and mixed scripts need corpus
-evaluation; specialized handwriting models and dense-page tiling are planned quality
-upgrades, not claimed tested capabilities.
+Real PDFium/Tesseract conversion and actual GLM-OCR/LightOnOCR-3 CPU inference have
+been exercised on a raster-only printed scan and accounting table. Tests cover model
+protocols, faults/cancellation, memory profiles, consensus, persistence, Word structure
+and native desktop rendering. Windows/Linux CI compiles the executables and smoke-tests
+the portable package. See [exact evidence and limits](docs/TESTING.md).
 
-## Development and build
+Terrible handwriting and severe blur can destroy information. Agreement is not a
+calibrated accuracy score; AI may misread text or a diagram. Flagged content and diagram
+interpretations need source review. Broad handwriting accuracy and actual peak RAM/VRAM,
+speed and offload on 4/8/16/32 GB RTX PCs still require target-hardware/corpus measurement.
+Word export prioritizes editable structure and reading order over a pixel-identical copy.
 
-```shell
-python -m pip install -r requirements-dev-lock.txt
-python -m pip install --no-deps --no-build-isolation -e .
-python -m pytest -q -rA
-python -m ruff check src tests scripts
-```
+## Build
 
-The GitHub Actions workflow tests Linux and Windows, then builds a portable x64 ZIP
-with PyInstaller and smoke-tests both executables. Successful runs attach the app in
-the **NoteGen-Windows-x64** artifact. Builds are unsigned; no model is included.
+~~~shell
+rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+cargo build --locked --release --features desktop --bins
+cargo run --locked --bin notegen-cli -- doctor
+cargo run --locked --features desktop --bin NoteGen
+~~~
 
-The implementation is committed in tested iterations. See [CONTRIBUTING.md](CONTRIBUTING.md)
-and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). NoteGen code is MIT-licensed.
+Tests require Tesseract and PDFium; set NOTEGEN_PDFIUM to the native library.
+[Development](CONTRIBUTING.md). The [Python predecessor](legacy/python) is archived and
+is not part of the Rust release. NoteGen is MIT-licensed; dependency/model terms apply.

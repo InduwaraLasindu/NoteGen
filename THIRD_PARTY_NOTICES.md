@@ -1,28 +1,24 @@
-# Third-party components
+# Third-party notices
 
-NoteGen code is MIT-licensed. Dependency licenses continue to apply independently.
-Python packages and separately installed model/runtime files are not relicensed by NoteGen.
-Packaged distributions include installed dependency license files and a version manifest
-under `licenses`, plus standalone Qt LGPLv3/GPLv3 texts. Qt remains dynamically linked.
+NoteGen source is MIT-licensed. Runtime/dependency/model licenses apply independently.
+Windows packages collect Cargo dependency licenses/metadata (including font notices),
+PDFium license material, and the original Tesseract distribution notices. Native runtime
+setup preserves upstream notices. Models are separate downloads.
 
-| Component | Purpose | License / upstream |
-|---|---|---|
-| PySide6 Essentials / Qt | Native desktop | LGPLv3 / GPLv3 / commercial; https://doc.qt.io/qtforpython-6/licenses.html |
-| pypdfium2 | PDF rasterizer binding | Apache-2.0 or BSD-3-Clause; https://github.com/pypdfium2-team/pypdfium2 |
-| PDFium | Native PDF renderer | BSD-style plus third-party notices; bundled by pypdfium2 |
-| OpenCV | Scan preparation and grid detection | Apache-2.0; https://github.com/opencv/opencv |
-| NumPy | Image arrays | BSD-3-Clause; https://numpy.org/doc/stable/license.html |
-| Pillow | Image I/O and crops | HPND; https://github.com/python-pillow/Pillow |
-| python-docx | Word generation | MIT; https://github.com/python-openxml/python-docx |
-| lxml | DOCX XML | BSD-style; https://lxml.de/copyright.html |
-| Pydantic | Page data validation | MIT; https://github.com/pydantic/pydantic |
-| HTTPX | Local HTTP transport | BSD-3-Clause; https://github.com/encode/httpx |
-| psutil | Memory telemetry | BSD-3-Clause; https://github.com/giampaolo/psutil |
-| Tesseract (separate install) | Printed OCR | Apache-2.0; https://github.com/tesseract-ocr/tesseract |
-| llama.cpp (separate install) | CUDA vision runtime | MIT; https://github.com/ggml-org/llama.cpp |
-| Qwen2.5-VL-7B-Instruct (separate download) | Reference vision model | Apache-2.0; https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct |
+| Component | Purpose / source |
+|---|---|
+| egui / eframe | Rust GUI · MIT / Apache-2.0 · https://github.com/emilk/egui |
+| wgpu | GPU rendering · MIT / Apache-2.0 · https://github.com/gfx-rs/wgpu |
+| PDFium | PDF rendering · BSD-style plus third-party terms · https://pdfium.googlesource.com/pdfium/ |
+| pdfium-render | Rust bindings · MIT / Apache-2.0 · https://github.com/ajrcarey/pdfium-render |
+| Tesseract | OCR · Apache-2.0; libraries have separate terms · https://github.com/tesseract-ocr/tesseract |
+| llama.cpp | Native inference · MIT · https://github.com/ggml-org/llama.cpp |
+| CUDA / cuBLAS | Optional NVIDIA runtime · NVIDIA terms · https://docs.nvidia.com/cuda/eula/index.html |
+| LightOnOCR-3 | Specialist models · Apache-2.0 · https://huggingface.co/lightonai |
+| GLM-OCR | Specialist model · see upstream terms · https://huggingface.co/zai-org/GLM-OCR |
+| Qwen | Vision models · see each model's license · https://huggingface.co/Qwen |
 
-Use an onedir distribution so Qt remains dynamically linked and its libraries can be
-replaced. Source, build instructions and license notices are supplied in this repository.
-Do not bundle weights or third-party executables without their required notices and terms.
-PyInstaller uses GPL with a bootloader exception; it does not change NoteGen's license.
+Cargo.lock pins dependencies; packaged licenses include original available crate files.
+Community GGUF conversions retain upstream model terms and publisher notices. Sources
+and exact revisions are documented in docs/SOURCES.md and rust/downloads.json. Legacy
+Python dependencies are preserved separately; they are not Rust runtime requirements.

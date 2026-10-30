@@ -1,0 +1,121 @@
+[
+  {
+    "id": "lighton3-1b",
+    "publisher": "richardyoung",
+    "revision": "85b208e3ad87ac8d022067e2a491dbd0f9beb79f",
+    "weights": {
+      "file": "LightOnOCR-3-1B-Q8_0.gguf",
+      "bytes": 639443936,
+      "sha256": "7d59f5dddd10897cd75871b8176f12bb0397a87375a3fd688a1bfa151f3eb0e6",
+      "url": "https://huggingface.co/richardyoung/LightOnOCR-3-1B-GGUF/resolve/85b208e3ad87ac8d022067e2a491dbd0f9beb79f/LightOnOCR-3-1B-Q8_0.gguf"
+    },
+    "projector": {
+      "file": "mmproj-LightOnOCR-3-1B-F16.gguf",
+      "bytes": 819312896,
+      "sha256": "4395f93581407d809bf5b64a3688ead545667a652c0d13d7c13f17642e337c8c",
+      "url": "https://huggingface.co/richardyoung/LightOnOCR-3-1B-GGUF/resolve/85b208e3ad87ac8d022067e2a491dbd0f9beb79f/mmproj-LightOnOCR-3-1B-F16.gguf"
+    }
+  },
+  {
+    "id": "lighton3-4b",
+    "publisher": "richardyoung",
+    "revision": "8406c78c9f35b0a4d6c9cc5f69dff0e14e93ce01",
+    "weights": {
+      "file": "LightOnOCR-3-4B-Q8_0.gguf",
+      "bytes": 4482403296,
+      "sha256": "51e2913cad715f2516a7ab1a6f7677ebc6122361b80ba21bffc490198621ec0a",
+      "url": "https://huggingface.co/richardyoung/LightOnOCR-3-4B-GGUF/resolve/8406c78c9f35b0a4d6c9cc5f69dff0e14e93ce01/LightOnOCR-3-4B-Q8_0.gguf"
+    },
+    "projector": {
+      "file": "mmproj-LightOnOCR-3-4B-F16.gguf",
+      "bytes": 672423200,
+      "sha256": "21eae623f60580f19ae4f04716292cd76ad36b420ee01e761254c8b1ec966321",
+      "url": "https://huggingface.co/richardyoung/LightOnOCR-3-4B-GGUF/resolve/8406c78c9f35b0a4d6c9cc5f69dff0e14e93ce01/mmproj-LightOnOCR-3-4B-F16.gguf"
+    }
+  },
+  {
+    "id": "glm-ocr",
+    "publisher": "ggml-org",
+    "revision": "65a42de1148dbed2297e922b5dbc7d9b70c36578",
+    "weights": {
+      "file": "GLM-OCR-Q8_0.gguf",
+      "bytes": 950433408,
+      "sha256": "45bc244a6446aff850521dc41f18bc8d7105ad5f0c2c8c28af04e7cc4f4d50b1",
+      "url": "https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/65a42de1148dbed2297e922b5dbc7d9b70c36578/GLM-OCR-Q8_0.gguf"
+    },
+    "projector": {
+      "file": "mmproj-GLM-OCR-Q8_0.gguf",
+      "bytes": 484403648,
+      "sha256": "9c4b58e33e316ed142eb5dcb41abec3844d3e6e5dc361ffb782c3fa9d175141f",
+      "url": "https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/65a42de1148dbed2297e922b5dbc7d9b70c36578/mmproj-GLM-OCR-Q8_0.gguf"
+    }
+  },
+  {
+    "id": "qwen35-2b",
+    "publisher": "unsloth",
+    "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+    "weights": {
+      "file": "Qwen3.5-2B-Q4_K_M.gguf",
+      "bytes": 1280835840,
+      "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf"
+    },
+    "projector": {
+      "file": "mmproj-F16.gguf",
+      "bytes": 668227264,
+      "sha256": "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/mmproj-F16.gguf"
+    }
+  },
+  {
+    "id": "qwen35-4b",
+    "publisher": "unsloth",
+    "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+    "weights": {
+      "file": "Qwen3.5-4B-Q5_K_M.gguf",
+      "bytes": 3143656608,
+      "sha256": "8814232b85594dcd46c50e5b8b29324a7efe9e746edbe8a3d1df3d3fce7aad39",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q5_K_M.gguf"
+    },
+    "projector": {
+      "file": "mmproj-F16.gguf",
+      "bytes": 672423616,
+      "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-F16.gguf"
+    }
+  },
+  {
+    "id": "qwen35-9b",
+    "publisher": "unsloth",
+    "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+    "weights": {
+      "file": "Qwen3.5-9B-Q5_K_M.gguf",
+      "bytes": 6577841376,
+      "sha256": "dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q5_K_M.gguf"
+    },
+    "projector": {
+      "file": "mmproj-F16.gguf",
+      "bytes": 918166080,
+      "sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/mmproj-F16.gguf"
+    }
+  },
+  {
+    "id": "qwen38-27b",
+    "publisher": "ggml-org",
+    "revision": "a316ea527fde32c12487be7574e2db5ac2ad2a7e",
+    "weights": {
+      "file": "Qwen3.8-27B-Q4_K_M.gguf",
+      "bytes": 18973870528,
+      "sha256": "c600de0300ae8a0eb3a6c0b8b5561b8b96f16bd2c863c2a66c42de29d391a747",
+      "url": "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/resolve/a316ea527fde32c12487be7574e2db5ac2ad2a7e/Qwen3.8-27B-Q4_K_M.gguf"
+    },
+    "projector": {
+      "file": "mmproj-Qwen3.8-27B-Q8_0.gguf",
+      "bytes": 629247008,
+      "sha256": "2e968a6af97ce35d8971890b257b9b7edabf20ad91450501fa53162a19ee33eb",
+      "url": "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/resolve/a316ea527fde32c12487be7574e2db5ac2ad2a7e/mmproj-Qwen3.8-27B-Q8_0.gguf"
+    }
+  }
+]

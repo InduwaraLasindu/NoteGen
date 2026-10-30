@@ -75,3 +75,10 @@ cursive, difficult handwriting, Sinhala/Tamil mixed print, blur, tables and diag
 Record CER/WER, exact table cells and topology, grounded diagram claims, false agreement,
 peak RAM/VRAM, per-page latency, driver/runtime and model SHA256. Test real 4/8/16/32 GiB
 devices or equivalent controlled free-memory cases. Unit profiles cannot replace these runs.
+
+## Release recovery and final gate
+
+The development environment disconnected during final packaging. The tested source was
+recovered into GitHub. CI regenerates the native GPU lockfile, formats source, runs all
+ordinary tests/clippy, captures native UI evidence, and compiles/tests the Windows ZIP.
+Final completion depends on successful Windows/Linux jobs, not an inferred build result.

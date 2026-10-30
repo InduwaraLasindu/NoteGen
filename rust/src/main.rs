@@ -13,7 +13,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1000., 860.])
             .with_min_inner_size([740., 650.])
             .with_title("NoteGen · Local document studio"),
-        renderer: eframe::Renderer::Glow,
+        renderer: if cfg!(windows) { eframe::Renderer::Wgpu } else { eframe::Renderer::Glow },
         centered: true,
         ..Default::default()
     };

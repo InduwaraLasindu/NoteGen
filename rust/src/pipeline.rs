@@ -85,7 +85,7 @@ pub fn convert(
         0,
         "",
     );
-    let input = hash_file(source, c)?;
+    let input = hash_file(source, c).map_err(|e| if e.downcast_ref::<Fault>().is_some() {e} else {Fault::new("NG100",format!("Cannot read input PDF: {e}")).into()})?;
     let key = fingerprint(&(
         2,
         recognition_settings(s),
@@ -237,15 +237,7 @@ pub fn convert(
         let tasks = selected
             .iter()
             .copied()
-            .filter(|n| {
-                project.load(*n).ok().is_none_or(|p| {
-                    !(p.edited
-                        || p.reviewed
-                        || p.candidates
-                            .iter()
-                            .any(|v| v.model_id == model.id && v.view == "full"))
-                })
-            })
+            .filter(|n| project.load(*n).ok().is_none_or(|p| should_read(&model.id,&model.role,&p,s)))
             .collect::<Vec<_>>();
         if tasks.is_empty() {
             done += selected.len();
@@ -305,6 +297,9 @@ pub fn convert(
             recovery.micro_batch = 32;
             recovery.gpu_layers = if plan.backend == Backend::Cpu { 0 } else { 16 };
             active_settings.projector_on_cpu = true;
+            active_settings.context=recovery.context;
+            active_settings.image_tokens=recovery.image_tokens;
+            active_settings.max_tokens=active_settings.max_tokens.min(recovery.context.saturating_sub(recovery.image_tokens+6000).max(512));
             server = Server::start(model, &recovery, &active_settings, c, &log, &root);
         }
         let server = match server {
@@ -330,13 +325,7 @@ pub fn convert(
         for n in &selected {
             c.check()?;
             let mut page = project.load(*n)?;
-            if page.edited
-                || page.reviewed
-                || page
-                    .candidates
-                    .iter()
-                    .any(|v| v.model_id == model.id && v.view == "full")
-            {
+            if !tasks.contains(n) {
                 done += 1;
                 continue;
             }
@@ -564,4 +553,11 @@ pub fn recognition_settings(s: &Settings) -> Settings {
     value.keep_page_breaks = true;
     value.preserve_figures = true;
     value
+}
+
+/// Balanced skips a vision pass only after independent full-page agreement.
+pub fn should_read(id:&str, role:&str, page:&Page,s:&Settings)->bool {
+    if page.edited || page.reviewed || page.candidates.iter().any(|v|v.model_id==id && v.view=="full") {return false;}
+    !(s.preset==Preset::Balanced && role=="vision" && !s.handwriting && page.agreement>=s.agreement_threshold
+        && !page.content.blocks.iter().any(|b|b.kind=="figure" || b.uncertain || b.plain().contains("[illegible]")))
 }

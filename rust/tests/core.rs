@@ -1,4 +1,4 @@
-use notegen::{consensus::*, hardware::*, planning::*, types::*};
+use notegen::{consensus::*, hardware::*, planning, planning::*, types::*};
 fn hw(vram: u64) -> Hardware {
     Hardware {
         cpu: "Test CPU".into(),
@@ -230,4 +230,20 @@ fn server_is_offline_cuda_and_not_shell_code() {
     assert!(a.contains(&"C:/a b/weights.gguf".to_string()));
     assert!(a.contains(&"--flash-attn".to_string()));
     assert!(a.windows(2).any(|a| a == ["--device", "CUDA1"]));
+}
+
+#[test]
+fn manual_model_selection_still_respects_memory() {
+    let h=hw(4096);
+    let s=Settings {automatic_models:false,model_ids:vec!["qwen38-27b".into()],..Default::default()};
+    assert!(planning::build(&h,&s,&planning::catalog()).unwrap().models.is_empty());
+    let s=Settings {automatic_models:false,model_ids:vec!["glm-ocr".into()],..Default::default()};
+    let p=planning::build(&h,&s,&planning::catalog()).unwrap();assert_eq!(p.models.len(),1);assert_eq!(p.models[0].id,"glm-ocr");
+}
+#[test]
+fn forced_cpu_never_allocates_gpu_projector() {
+    let h=hw(16384);let s=Settings{backend:Backend::Cpu,..Default::default()};
+    let p=planning::build(&h,&s,&planning::catalog()).unwrap();assert_eq!(p.gpu_index,None);assert_eq!(p.gpu_layers,0);
+    let args=planning::server_args(&p.models[0],&p,&s,18745);
+    assert!(!args.contains(&"--device".into()));assert!(args.contains(&"--no-mmproj-offload".into()));
 }

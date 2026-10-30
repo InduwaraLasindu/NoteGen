@@ -86,7 +86,7 @@ pub fn build(hw: &Hardware, s: &Settings, models: &[Model]) -> Result<Plan> {
     let mut fitting = models
         .iter()
         .filter(|m| {
-            m.weights_mib + 512 <= ram_budget
+            (s.automatic_models || s.model_ids.contains(&m.id)) && m.weights_mib + 512 <= ram_budget
                 && if backend == Backend::Cpu {
                     m.weights_mib <= 6500
                 } else {
@@ -129,7 +129,7 @@ pub fn build(hw: &Hardware, s: &Settings, models: &[Model]) -> Result<Plan> {
     }
     Ok(Plan {
         backend,
-        gpu_index: gpu.map(|g| g.index),
+        gpu_index: if backend == Backend::Cpu { None } else { gpu.map(|g|g.index) },
         ram_budget_mib: ram_budget,
         vram_budget_mib: vram_budget,
         threads: if s.cpu_threads == 0 {
@@ -201,7 +201,7 @@ pub fn server_args(model: &Model, plan: &Plan, s: &Settings, port: u16) -> Vec<S
         "--cache-type-v".into(),
         s.kv_cache.clone(),
     ];
-    if s.projector_on_cpu {
+    if s.projector_on_cpu || plan.backend == Backend::Cpu {
         args.push("--no-mmproj-offload".into());
     }
     if let Some(index) = plan.gpu_index {

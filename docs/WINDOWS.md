@@ -1,129 +1,119 @@
-# Run NoteGen on Windows 11
+# Windows setup and usage
 
-## Option A: portable app
+Use Windows 10/11 x64. Download the latest successful **Rust verification and Windows
+executable** run from [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml),
+then choose **NoteGen-Rust-Windows-x64**. Extract the Actions artifact ZIP and portable
+ZIP inside it. Keep the NoteGen folder together. English print works immediately;
+the native runtime, PDFium and Tesseract accompany the unsigned executables.
 
-When the **Verify and build Windows** workflow passes, open the workflow run in the
-repository's Actions tab and download the **NoteGen-Windows-x64** artifact. Extract
-both ZIP layers. Keep the whole `NoteGen` folder together and run `NoteGen.exe`.
-It is an unsigned early build. The portable app contains the Python/Qt runtime;
-Tesseract, llama.cpp and model weights are installed separately. Do not move the EXE
-out of its folder. No administrator permission is needed to run NoteGen itself.
+## One-time AI setup
 
-## Option B: run from source
+Open PowerShell inside the extracted NoteGen folder:
 
-Install Python 3.12 x64 from [python.org](https://www.python.org/downloads/windows/).
-In a PowerShell terminal opened at the repository root:
+~~~powershell
+.\scripts\Setup-Runtime.ps1 -Backend Auto
+.\scripts\Install-Models.ps1 -MaximumAccuracy
+.\NoteGen.exe
+~~~
 
-```powershell
-.\scripts\Setup-Windows.ps1 -Launch
-```
+Auto selects CUDA13 on NVIDIA, Vulkan otherwise. Update the NVIDIA driver first.
+CUDA13 uses CUDA 13.4 and requires a compatible GPU/driver; older cards may need
+-Backend CUDA12 (CUDA 12.4) or Vulkan. RTX 50-series needs a Blackwell-compatible
+runtime such as CUDA13. CPU mode is also available with -Backend CPU.
+CUDA runtime/server downloads total roughly 590 MB; Vulkan roughly 38 MB.
 
-The setup script downloads Python packages once. Later launches work offline:
+Scripts pin official llama.cpp b11998 asset SHA256. Model setup pins immutable model
+revisions and original LFS SHA256, probes free RAM/VRAM, chooses fitting models and
+registers verified files. Conversion never downloads. Downloads resume via .part files.
+If a range is rejected, remove only that invalid .part and retry. Model terms remain
+applicable; some quantizations are community conversions. Publishers are recorded in
+assets/model-downloads.json (source: rust/downloads.json).
 
-```powershell
-.\scripts\Run-NoteGen.ps1
-```
+If Windows blocks a downloaded script, inspect it and Unblock-File that script.
+A process-only policy for an inspected script is available:
 
-The scripts do not change system execution policy. If your machine blocks local
-PowerShell scripts, use Python directly in a terminal:
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Setup-Runtime.ps1
+~~~
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation -e .
-.\.venv\Scripts\python.exe -m notegen.app
-```
+No account or permanent execution-policy change is needed. Specific model selection:
 
-## Install printed OCR
+~~~powershell
+.\scripts\Install-Models.ps1 -ModelIds glm-ocr,lighton3-1b,qwen35-2b
+~~~
 
-Follow [Tesseract's Windows installation guidance](https://tesseract-ocr.github.io/tessdoc/Installation.html).
-Its documentation links Windows builds maintained by UB Mannheim. Standard install
-location: `C:\Program Files\Tesseract-OCR\tesseract.exe`.
-Use the app's Setup tab to select another location if needed. Install `eng` and `osd`
-language files. For Sinhala or Tamil print, also install `sin` / `tam`, and choose
-`eng+sin` / `eng+tam`. Recognition quality varies; those languages need acceptance tests.
+## Convert, inspect and correct
 
-## Install local vision AI for RTX
+1. Choose/drop PDFs, an output folder and optional page range (1-4,8).
+2. Choose Fast, Balanced, Accuracy or Maximum accuracy. Enable handwriting for
+   handwritten pages. Maximum trades time for additional independent readings/crops.
+3. Convert and open Live activity. Pause acts at safe checkpoints; cancellation
+   also aborts an active inference request. Completed evidence remains on disk.
+4. Open Review results. Compare source boxes with transcripts; edit text, table cells,
+   visible diagram evidence and interpretation. Page JSON allows merges, headers,
+   source boxes and structural edits with validation.
+5. Save drafts or mark pages reviewed, then export a new corrected Word document.
 
-1. Use a recent NVIDIA driver and a **CUDA-enabled Windows x64** build from the
-   [official llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases).
-   Include its matching CUDA runtime libraries. RTX 50-series cards need a build
-   supporting Blackwell; confirm the CUDA device is listed in the server console.
-2. Download [Qwen2.5-VL-7B-Instruct Q4_K_M](https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF)
-   and the **matching projector** from the same model repository. The main weights
-   are about 4.68 GB; the projector, KV cache and image encoder use additional memory.
-3. Start the server from a terminal, using your actual file paths:
+Add factual course/document context in Advanced → Recognition for diagram interpretation.
+Every diagram interpretation requires review. Severe blur, illegibility and numeric
+conflicts remain explicit. Models cannot reliably restore information absent in a scan.
 
-```powershell
-.\scripts\Start-LocalAI.ps1 `
-  -Server 'D:\NoteGen\llama\llama-server.exe' `
-  -Model 'D:\NoteGen\models\Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf' `
-  -Projector 'D:\NoteGen\models\mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf'
-```
+Advanced exposes backend/device, threads, memory limits/reserves, GPU layers, Flash
+Attention, projector placement, KV precision, image/context/output tokens, batch sizes,
+timeout, rendering/crops, agreement/review thresholds, sampling/seed, languages,
+preprocessing and Word typography. Zero means adaptive where labeled. Models supports
+automatic or manual selection, GGUF registration and runtime paths. All parameters
+exposes validated JSON; settings import/export is supported. Appearance controls theme,
+colors, scale, motion, FPS, rounding, compact spacing and reduced motion.
 
-The default endpoint is `http://127.0.0.1:8080` and the alias is `notegen-vision`.
-Keep the server terminal open. Press **Check local engines & hardware** in NoteGen.
-The model must advertise `image` input through `/v1/models`. A text-only server cannot
-describe diagrams. Use a recent compatible llama.cpp build if diagnostics report NG204.
+Require verified acceleration to fail explicitly if model layers did not offload.
+The UI renderer and AI backend are independent. CPU stages still use CPU resources.
 
-Start with 16,384 context tokens, 3,072 image tokens, 128 micro-batch tokens and one
-parallel request. These are budget-conscious starting settings, not a measured memory
-guarantee. For memory errors try `-ImageTokens 2048` or `-ProjectorOnCPU`; the latter
-reduces GPU memory at a speed cost. If the context becomes too small, do not force
-truncation: retain OCR and review instead. Model weights are never auto-downloaded by
-the conversion app, and the server launcher sets offline mode.
+## CLI and manual installation
 
-## Convert and review
+Run the CLI from the NoteGen folder. Select a compatible GGUF and matching projector:
 
-Add or drop PDFs → choose profile/languages → optionally enter subject context →
-Convert queue → Review and correct → Export corrected Word.
+~~~powershell
+.\notegen-cli.exe register --id glm-ocr --weights C:\Models\GLM-OCR-Q8_0.gguf --projector C:\Models\mmproj-GLM-OCR-Q8_0.gguf
+.\notegen-cli.exe doctor
+.\notegen-cli.exe plan --catalog
+.\notegen-cli.exe convert C:\Scans\notes.pdf --preset maximum --handwriting -o C:\Scans\notes.docx
+~~~
 
-- **Fast**: CPU printed OCR and ruled tables. Semantic diagram descriptions need AI.
-- **Balanced**: AI for low-confidence pages, tables, detected visual regions or blur.
-- **Thorough**: AI on every page. Use this for complex layouts or difficult writing.
-- **Expect handwriting**: requires a local vision model and prevents silent CPU-only use.
-- Page ranges accept `1-4,7,9`. Each queued document uses that range independently.
-- A diagram's **Observed** text describes visible evidence; **Interpretation** gives
-  a qualified explanation. Verify it against the scan. It is not guaranteed truth.
-- Review figures and uncalibrated low confidence scores. `[illegible]` means information
-  cannot be recovered reliably. Severe blur cannot be reversed reliably by software.
-- Text and table edits autosave when you change regions. Mark a page reviewed only
-  after checking it. The original Word export is protected; corrected export uses a new name.
-- Double-click a completed queue item to reopen that document's saved review.
-- Pause takes effect at the next safe boundary. Cancel stops OCR promptly and AI at
-  the next stream chunk or read timeout (default 45 s). Completed pages survive.
-- Retry the same PDF/settings to reuse completed checkpoints. Reopen a project folder
-  in Review after restarting the app. A changed input hash/settings/model metadata gets
-  a different cache. If replacing weights under an identical alias/metadata, use a new
-  alias or new project to avoid reusing old recognition.
+Export Advanced settings and pass --settings settings.json before a subcommand to
+override parameters. Registry descriptors end in .notegen.json; unrelated Hugging Face
+metadata is ignored. Changed model bytes require re-registration. An air-gapped PC can
+use copied runtimes/models; re-register paths after moving them.
 
-Default output: Documents\NoteGen. Checkpoints and activity logs are under `.notegen`
-inside the output folder. These contain document images and recognized text; keep
-them private as you would the original scan. NoteGen does not upload or delete them.
-The live log records processing stages, retries and error codes without OCR text.
-Memory figures are best-effort telemetry. GPU data comes from `nvidia-smi`; inference
-still works if telemetry is unavailable. The app keeps one page and one AI job active.
+External-server mode accepts only literal loopback HTTP. Its /v1/models alias must
+match the registered model. Managed mode is required to verify GPU allocation and
+normally handles independent model switching automatically.
 
-## Command line
+## Logs, recovery and errors
 
-```powershell
-notegen doctor
-notegen convert scan.pdf -o notes.docx --mode thorough --handwriting --context 'Biology notes'
-notegen convert scan.pdf -o notes.docx --mode fast --language eng+sin --pages 1-5
-notegen export 'D:\Notes\.notegen\my-project' -o corrected.docx
-notegen --debug convert scan.pdf -o diagnostic-notes.docx --mode fast
-```
+Projects live under the output folder's .notegen: source PNGs, page JSON, candidates,
+settings/model identity, activity JSONL, hardware/plan and native runtime logs. Back up
+the entire project to preserve corrections. Matching work resumes from checkpoints.
+Recognition changes create distinct projects; UI appearance and Word typography do not
+invalidate recognition. Existing output files are protected.
 
-The portable CLI is `CLI\NoteGenCLI.exe`. The source install uses `notegen` or
-`python -m notegen`. Existing DOCX files are never overwritten automatically.
-The optional `--debug` traceback stays local and may contain local file paths.
+| Code | Action |
+|---|---|
+| NG100 | Choose a readable, unlocked PDF and valid page range |
+| NG102 | Correct Advanced values or restore defaults |
+| NG110 | Check Tesseract and requested language data |
+| NG200 | Check runtime/backend, model/projector paths and native startup log |
+| NG201 | Review invalid/truncated responses and retained alternatives |
+| NG202 / NG300 | Free RAM/VRAM, reduce buffers/model and resume |
+| NG203 | Use a literal loopback endpoint; remote hosts/redirects are blocked |
+| NG400 / NG401 | Check disk access, close Word or choose a new output name |
+| NG500 | Inspect project/checkpoint identity or worker failure evidence |
+| NG900 | Cancelled; completed work remains available |
 
-## Developer build
+## Source build
 
-```powershell
-python -m pip install -r requirements-dev-lock.txt
-python -m pip install --no-deps --no-build-isolation -e .
-.\scripts\Build-Windows.ps1
-```
-
-Read [the test report](TESTING.md) before treating this as a validated production OCR engine.
+Install Rust 1.99.1 MSVC and Microsoft C++ Build Tools. Build the GUI/CLI with
+cargo build --locked --release --features desktop --bins.
+Run scripts/Build-Windows.ps1 with Tesseract installed to package the app.
+CI tests native scans on Linux/Windows, verifies the CPU runtime installer, checks
+packaged Word/table output and starts the executable extracted from its ZIP.
