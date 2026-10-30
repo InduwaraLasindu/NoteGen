@@ -328,6 +328,16 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
         if !(3..=41).contains(&xs.len()) || !(3..=101).contains(&ys.len()) {
             continue;
         }
+        // Solid bars/filled graphics produce many long runs but are not a table grid.
+        // Sample interior ink density without scanning a second page-sized buffer.
+        let (left,right,top,bottom)=(xs[0],*xs.last().unwrap(),ys[0],*ys.last().unwrap());
+        let mut ink=0;
+        for yy in 0..32 {for xx in 0..32 {
+            let x=left+((right-left) as u64*(xx*2+1) as u64/64) as u32;
+            let y=top+((bottom-top) as u64*(yy*2+1) as u64/64) as u32;
+            if g.get_pixel(x,y)[0]<120 {ink+=1;}
+        }}
+        if ink>700 {continue;}
         let mut rows = vec![vec![String::new(); xs.len() - 1]; ys.len() - 1];
         let mut confidences = vec![];
         for word in words {

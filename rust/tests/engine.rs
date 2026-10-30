@@ -687,3 +687,14 @@ fn manual_and_recovery_image_limits_override_specialist_defaults() {
     assert_eq!(runtime::input_edge(&m,&Settings{image_edge:3072,..Default::default()}),3072);
     assert_eq!(runtime::input_edge(&m,&Settings{image_edge:1024,..Default::default()}),1024);
 }
+
+#[test]
+fn solid_chart_bars_are_not_recreated_as_empty_tables() {
+    let mut g=image::GrayImage::from_pixel(600,800,image::Luma([255]));
+    for y in 200..500 {for x in 100..300 {g.put_pixel(x,y,image::Luma([40]));}}
+    assert!(scan::tables(&g,&[]).is_empty());
+    let mut grid=image::GrayImage::from_pixel(600,800,image::Luma([255]));
+    for y in [100,200,300] {for x in 100..400 {grid.put_pixel(x,y,image::Luma([0]));}}
+    for x in [100,250,400] {for y in 100..301 {grid.put_pixel(x,y,image::Luma([0]));}}
+    assert!(!scan::tables(&grid,&[]).is_empty(),"Real blank forms must remain editable tables");
+}
