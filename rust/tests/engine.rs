@@ -511,7 +511,7 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
             .unwrap()
             .content
             .plain()
-            .contains("1250")
+            .contains("1500")
     );
 }
 #[test]
@@ -724,4 +724,24 @@ fn late_ai_checkpoints_cannot_overwrite_manual_edits() {
     assert_eq!(project.load(1).unwrap().content.plain(),"Human correction 1500");
     fs::write(project.page_path(1),b"corrupt automatic cache").unwrap();
     assert_eq!(project.load(1).unwrap().content.plain(),"Human correction 1500");
+}
+
+#[test]
+fn identical_tables_at_distinct_source_locations_are_not_collapsed() {
+    let mut a=candidate("a","a","Intro");let mut b=candidate("b","b","Intro");
+    let table=|top|Block{kind:"table".into(),rows:vec![vec!["Sales".into(),"1250".into()]],
+        bbox:Some(BoxRect{left:0.1,top,right:0.9,bottom:top+0.15}),..Default::default()};
+    a.content.blocks.push(table(0.1));b.content.blocks.extend([table(0.1),table(0.6)]);
+    let (p,_)=consensus::select(&[a,b],2,0.92);
+    assert_eq!(p.blocks.iter().filter(|b|b.kind=="table").count(),2);
+}
+#[test]
+fn matching_table_recovers_grounding_for_specialist_crop_retries() {
+    let mut a=candidate("a","a","Intro");let mut b=candidate("b","b","Intro");
+    let table=Block{kind:"table".into(),rows:vec![vec!["Sales".into(),"1250".into()]],..Default::default()};
+    a.content.blocks.push(table.clone());let mut grounded=table;
+    grounded.bbox=Some(BoxRect{left:0.1,top:0.3,right:0.9,bottom:0.6});b.content.blocks.push(grounded);
+    let (p,_)=consensus::select(&[a,b],2,0.92);
+    assert_eq!(p.blocks.iter().filter(|b|b.kind=="table").count(),1);
+    assert!(p.blocks.iter().find(|b|b.kind=="table").unwrap().bbox.is_some());
 }

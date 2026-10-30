@@ -151,24 +151,23 @@ pub fn select(candidates: &[Candidate], minimum: usize, threshold: f64) -> (Page
     }
     let chosen = voters[selected];
     let mut result = chosen.content.clone();
-    // A transcript medoid must not silently remove a region another reader found.
+    // Align structures one-to-one per reader. Similar tables at different locations
+    // must not collapse, and a grounded reader can supply a missing source box.
     for candidate in &voters {
-        for block in candidate
-            .content
-            .blocks
-            .iter()
-            .filter(|b| b.kind == "table" || b.kind == "figure")
-        {
-            let exists = result.blocks.iter().any(|b| {
-                b.kind == block.kind
-                    && (b
-                        .bbox
-                        .as_ref()
-                        .zip(block.bbox.as_ref())
-                        .is_some_and(|(a, b)| overlap(a, b) > 0.35)
-                        || (b.kind == "table" && similarity(&b.plain(), &block.plain()) > 0.6))
+        let mut assigned=HashSet::new();
+        for block in candidate.content.blocks.iter().filter(|b|b.kind=="table" || b.kind=="figure") {
+            let matched=result.blocks.iter().enumerate().position(|(index,b)| {
+                !assigned.contains(&index) && b.kind==block.kind &&
+                match b.bbox.as_ref().zip(block.bbox.as_ref()) {
+                    Some((a,b))=>overlap(a,b)>0.35,
+                    None=>b.kind=="table" && similarity(&b.plain(),&block.plain())>0.85
+                }
             });
-            if !exists {
+            if let Some(index)=matched {
+                assigned.insert(index);
+                if result.blocks[index].bbox.is_none(){result.blocks[index].bbox=block.bbox.clone();}
+            } else {
+                assigned.insert(result.blocks.len());
                 result.blocks.push(block.clone());
                 result.warnings.push("A reader omitted a structured region; another reader's table/figure was retained for verification.".into());
             }
