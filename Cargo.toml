@@ -1,0 +1,61 @@
+[package]
+name = "notegen"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Adaptive local document recognition and editable Word export"
+
+[lib]
+path = "rust/src/lib.rs"
+
+[[bin]]
+name = "NoteGen"
+path = "rust/src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "notegen-cli"
+path = "rust/src/bin/cli.rs"
+
+[features]
+default = []
+desktop = ["dep:eframe", "dep:rfd"]
+
+[[test]]
+name = "core"
+path = "rust/tests/core.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+sysinfo = "0.37"
+csv = "1"
+strsim = "0.11"
+unicode-normalization = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rayon = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+base64 = "0.22"
+regex = "1"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+roxmltree = "0.21"
+scraper = "0.24"
+pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "image_025", "thread_safe"] }
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.37", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
+rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"

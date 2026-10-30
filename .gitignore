@@ -17,3 +17,6 @@ outputs/
 *.pdf
 *.jsonl
 !tests/fixtures/*.json
+
+/target/
+*.part

@@ -1,0 +1,9 @@
+[
+ {"id":"lighton3-1b","name":"LightOnOCR-3 1B Q8","family":"lighton3","role":"ocr","prompt":"lighton","resident_mib":2300,"weights_mib":1500,"rank":82,"source":"https://huggingface.co/lightonai/LightOnOCR-3-1B","released":"2026-10-08"},
+ {"id":"glm-ocr","name":"GLM-OCR 0.9B Q8","family":"glm","role":"ocr","prompt":"glm","resident_mib":2400,"weights_mib":1800,"rank":80,"source":"https://huggingface.co/ggml-org/GLM-OCR-GGUF","released":"2026-01"},
+ {"id":"lighton3-4b","name":"LightOnOCR-3 4B Q8","family":"lighton3","role":"ocr","prompt":"lighton","resident_mib":8500,"weights_mib":6200,"rank":96,"source":"https://huggingface.co/lightonai/LightOnOCR-3-4B","released":"2026-10-08"},
+ {"id":"qwen35-2b","name":"Qwen3.5 2B Q4","family":"qwen35","role":"vision","prompt":"structured","resident_mib":2800,"weights_mib":2000,"rank":60,"source":"https://huggingface.co/Qwen/Qwen3.5-2B","released":"2026-03-02"},
+ {"id":"qwen35-4b","name":"Qwen3.5 4B Q5","family":"qwen35","role":"vision","prompt":"structured","resident_mib":6000,"weights_mib":4000,"rank":72,"source":"https://huggingface.co/Qwen/Qwen3.5-4B","released":"2026-03-02"},
+ {"id":"qwen35-9b","name":"Qwen3.5 9B Q5","family":"qwen35","role":"vision","prompt":"structured","resident_mib":11800,"weights_mib":8500,"rank":88,"source":"https://huggingface.co/Qwen/Qwen3.5-9B","released":"2026-03-02"},
+ {"id":"qwen38-27b","name":"Qwen3.8 27B Q4","family":"qwen38","role":"vision","prompt":"structured","resident_mib":25000,"weights_mib":19500,"rank":99,"source":"https://huggingface.co/Qwen/Qwen3.8-27B","released":"2026-08-14"}
+]
