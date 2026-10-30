@@ -306,13 +306,7 @@ impl Server {
         log: &Activity,
         page: usize,
     ) -> Result<PageContent> {
-        let edge = if self.model.prompt == "lighton" && self.model.id == "lighton3-1b" {
-            1540
-        } else if s.image_edge == 0 {
-            2048
-        } else {
-            s.image_edge
-        };
+        let edge = input_edge(&self.model, s);
         let small = image.thumbnail(edge, edge);
         let mut buffer = Cursor::new(vec![]);
         small.write_to(&mut buffer, image::ImageFormat::Png)?;
@@ -330,7 +324,7 @@ impl Server {
         let messages = json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":format!("data:image/png;base64,{data}")}},{"type":"text","text":prompt}]}]);
         let mut body = json!({"model":self.model.id,"messages":messages,"stream":true,"max_tokens":s.max_tokens,"temperature":s.temperature,"top_p":s.top_p,"seed":s.seed,"chat_template_kwargs":{"enable_thinking":false}});
         if self.model.prompt == "structured" {
-            body["response_format"] = json!({"type":"json_object"});
+            body["response_format"] = json!({"type":"json_object","schema":page_schema()});
         }
         let text = chat(&self.endpoint, body, s, c, log, page)?;
         let mut p = match self.model.prompt.as_str() {
@@ -404,4 +398,35 @@ pub fn offloaded_layers(log: &str) -> usize {
         .filter_map(|c| c[1].parse().ok())
         .max()
         .unwrap_or(0)
+}
+
+pub fn input_edge(model:&Model,s:&Settings)->u32 {
+    if s.image_edge != 0 {s.image_edge} else if model.prompt=="lighton" && model.id=="lighton3-1b" {1540} else {2048}
+}
+
+/// Native llama.cpp schema constrains output shapes; semantic validation still follows.
+pub fn page_schema()->Value {
+    let bbox=json!({"type":"object","additionalProperties":false,
+        "properties":{"left":{"type":"number","minimum":0,"maximum":1},"top":{"type":"number","minimum":0,"maximum":1},
+        "right":{"type":"number","minimum":0,"maximum":1},"bottom":{"type":"number","minimum":0,"maximum":1}},
+        "required":["left","top","right","bottom"]});
+    json!({"type":"object","additionalProperties":false,"required":["blocks","warnings","summary"],"properties":{
+        "summary":{"type":"string"},"warnings":{"type":"array","items":{"type":"string"}},
+        "blocks":{"type":"array","items":{"type":"object","additionalProperties":false,
+            "required":["kind","text","box","rows","description","interpretation","uncertain"],
+            "properties":{
+                "kind":{"type":"string","enum":["text","heading","list","table","figure","equation"]},
+                "text":{"type":"string"},"box":{"anyOf":[bbox,{"type":"null"}]},
+                "confidence":{"anyOf":[{"type":"number","minimum":0,"maximum":1},{"type":"null"}]},
+                "rows":{"type":"array","items":{"type":"array","items":{"type":"string"}}},
+                "merges":{"type":"array","items":{"type":"object","additionalProperties":false,
+                    "required":["row","col","rowspan","colspan"],"properties":{
+                        "row":{"type":"integer","minimum":0},"col":{"type":"integer","minimum":0},
+                        "rowspan":{"type":"integer","minimum":1},"colspan":{"type":"integer","minimum":1}}}},
+                "header_rows":{"type":"integer","minimum":0},
+                "description":{"type":"string"},"interpretation":{"type":"string"},
+                "uncertain":{"type":"boolean"},"alternatives":{"type":"array","items":{"type":"string"}}
+            }
+        }}
+    }})
 }

@@ -490,6 +490,7 @@ pub struct Page {
     pub image: String,
     pub content: PageContent,
     pub candidates: Vec<Candidate>,
+    pub source_warnings: Vec<String>,
     pub agreement: f64,
     pub reviewed: bool,
     pub seconds: f64,
@@ -499,6 +500,7 @@ impl Page {
         !self.reviewed
             && (self.agreement < 0.92
                 || !self.content.warnings.is_empty()
+                || !self.source_warnings.is_empty()
                 || self.content.blocks.is_empty()
                 || self.content.blocks.iter().any(|b| {
                     b.uncertain

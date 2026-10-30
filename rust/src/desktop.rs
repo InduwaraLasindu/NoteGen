@@ -359,6 +359,10 @@ impl Desktop {
         };
         if let Err(e) = fs::create_dir_all(&folder) {
             self.notice = format!("NG400: {e}");
+            self.error_code = "NG400".into();
+            self.stage = "Needs attention".into();
+            self.state.queue[i].status = JobStatus::Failed;
+            self.state.queue[i].detail = self.notice.clone();
             self.running_queue = false;
             return;
         }
@@ -1653,8 +1657,9 @@ mod acceptance {
     fn worker_failure_stops_queue_and_explains_error() {
         let mut state = Workspace::default();
         state.settings.preset = Preset::Fast;
-        state.enqueue(PathBuf::from("/does-not-exist/notegen.pdf"));
-        state.enqueue(PathBuf::from("/does-not-exist/second.pdf"));
+        let dir=tempfile::tempdir().unwrap();
+        state.enqueue(dir.path().join("notegen.pdf"));
+        state.enqueue(dir.path().join("second.pdf"));
         let mut app = Desktop::new(state);
         let ctx = egui::Context::default();
         app.running_queue = true;
@@ -1731,6 +1736,15 @@ mod acceptance {
         let r=app.review.as_mut().unwrap();r.page.content.blocks[0].text="Human correction".into();r.dirty=true;
         app.open_review(p.root.clone(),&ctx);
         assert!(p.load(1).unwrap().edited);assert_eq!(app.review.as_ref().unwrap().page.content.plain(),"Human correction");
+    }
+
+    #[test]
+    fn invalid_output_folder_marks_job_failed_without_starting_worker() {
+        let dir=tempfile::tempdir().unwrap();let blocked=dir.path().join("a-file");fs::write(&blocked,b"file").unwrap();
+        let mut state=Workspace::default();state.settings.preset=Preset::Fast;state.output_dir=blocked.display().to_string();
+        state.enqueue(dir.path().join("scan.pdf"));let mut app=Desktop::new(state);let ctx=egui::Context::default();
+        app.running_queue=true;draw(&mut app,&ctx);
+        assert_eq!(app.state.queue[0].status,JobStatus::Failed);assert_eq!(app.error_code,"NG400");assert!(app.worker.is_none());
     }
 
 }

@@ -78,3 +78,9 @@ mixed scripts, merged/borderless tables, diagrams and cross-page context. Record
 exact cell/topology accuracy, grounded diagram claims, false agreement, peak memory,
 seconds/page and all model/runtime/driver hashes. Agreement is not calibrated accuracy;
 correlated readers can share mistakes. Unreadable source information remains uncertain.
+
+The Windows gate also invokes the real model installer and native CPU inference for
+GLM-OCR, LightOnOCR-3 1B and Qwen3.5 2B, then a Maximum Accuracy conversion. Its generated
+fixture now includes a bar chart; the vision adapter must preserve a valid source box,
+visible description and contextual interpretation. See the run for whether these gates
+have passed; inclusion in a workflow alone is not evidence of a successful test.

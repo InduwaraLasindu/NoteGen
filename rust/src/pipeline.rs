@@ -208,6 +208,7 @@ pub fn convert(
                     .warnings
                     .push("Blur/low detail detected. Verify small text against the source.".into());
             }
+            p.source_warnings=p.content.warnings.clone();
             atomic_json(&checkpoint, &p)?;
             rendered.push(n);
             log.emit(
@@ -468,6 +469,7 @@ pub fn convert(
             if let Some(warning) = failure {
                 content.warnings.push(warning);
             }
+            retain_source_warnings(&page.source_warnings, &mut content);
             page.content = content;
             page.agreement = agreement;
             page.seconds += started.elapsed().as_secs_f64();
@@ -560,4 +562,8 @@ pub fn should_read(id:&str, role:&str, page:&Page,s:&Settings)->bool {
     if page.edited || page.reviewed || page.candidates.iter().any(|v|v.model_id==id && v.view=="full") {return false;}
     !(s.preset==Preset::Balanced && role=="vision" && !s.handwriting && page.agreement>=s.agreement_threshold
         && !page.content.blocks.iter().any(|b|b.kind=="figure" || b.uncertain || b.plain().contains("[illegible]")))
+}
+
+pub fn retain_source_warnings(source:&[String],content:&mut PageContent) {
+    for warning in source {if !content.warnings.contains(warning){content.warnings.push(warning.clone());}}
 }

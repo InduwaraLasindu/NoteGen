@@ -49,6 +49,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) {throw 'PDFium download failed'}
           tar -xzf build/pdfium-rust/pdfium.tgz -C build/pdfium-rust
           "NOTEGEN_PDFIUM=$env:GITHUB_WORKSPACE/build/pdfium-rust/bin/pdfium.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        id: rust-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: notegen-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.toml') }}
+          restore-keys: notegen-${{ runner.os }}-1.99.1-
       - name: Refresh lockfile for native GPU renderer
         run: cargo generate-lockfile
       - name: Format source after remote recovery
@@ -94,6 +103,10 @@ jobs:
       - name: Release Windows executables
         if: runner.os == 'Windows'
         run: cargo build --locked --release --features desktop --bins -j 2
+      - name: Real Windows OCR, vision and Maximum Accuracy inference
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/Smoke-AI.ps1
       - name: Package and test actual scanned-PDF conversion
         if: runner.os == 'Windows'
         shell: pwsh
@@ -123,4 +136,22 @@ jobs:
             docs/images/rust-*.png
             build/qa.docx
             build/qa-cli.log
+          retention-days: 30
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        if: always() && steps.rust-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: notegen-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.toml') }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always() && runner.os == 'Windows'
+        with:
+          name: Native-AI-model-evidence
+          path: |
+            build/ai-smoke/NoteGen/results/**/*.json
+            build/ai-smoke/NoteGen/results/**/*.log
+            build/ai-smoke/NoteGen/maximum-smoke.docx
+          if-no-files-found: ignore
           retention-days: 30

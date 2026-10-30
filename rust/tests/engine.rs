@@ -102,6 +102,10 @@ fn fixture() -> RgbImage {
             }
         }
     }
+    for y in 720..990 {for x in 245..365 {im.put_pixel(x,y,Rgb([45,100,145]));}}
+    for y in 680..1005 {for x in 100..104 {im.put_pixel(x,y,Rgb([0,0,0]));}}
+    for x in 100..800 {for y in 1000..1004 {im.put_pixel(x,y,Rgb([0,0,0]));}}
+    imageproc::drawing::draw_text_mut(&mut im,Rgb([0,0,0]),220,1040,28.,&font,"Sales");
     im
 }
 fn pdfium() -> PathBuf {
@@ -565,6 +569,11 @@ fn live_model() {
     )
     .unwrap();
     assert!(result.plain().contains("1250"), "{}", result.plain());
+    println!("MODEL_EVIDENCE {} {}",model.id,serde_json::to_string(&result).unwrap());
+    if model.role=="vision" {
+        assert!(result.blocks.iter().any(|b|b.kind=="figure" && b.bbox.as_ref().is_some_and(BoxRect::valid)
+            && !b.description.is_empty() && !b.interpretation.is_empty()),"Vision reader must preserve and explain the bar chart");
+    }
     let table_image = DynamicImage::ImageRgb8(fixture()).crop_imm(45, 295, 815, 215);
     let table = server
         .read_table(
@@ -661,4 +670,20 @@ fn balanced_skips_only_agreed_plain_pages_and_preserves_human_work() {
     s.handwriting=false;p.content.blocks.push(Block{kind:"figure".into(),bbox:Some(BoxRect::full()),..Default::default()});
     assert!(notegen::pipeline::should_read("vision","vision",&p,&s));
     p.edited=true;assert!(!notegen::pipeline::should_read("ocr","ocr",&p,&s));
+}
+
+#[test]
+fn source_blur_warnings_survive_new_ai_consensus() {
+    let readers=vec![candidate("a","a","Correct 1250"),candidate("b","b","Correct 1250")];
+    let (mut content,_)=consensus::select(&readers,2,0.92);
+    notegen::pipeline::retain_source_warnings(&["Blur/low detail detected".into()],&mut content);
+    let page=Page{agreement:1.,content,source_warnings:vec!["Blur/low detail detected".into()],..Default::default()};
+    assert!(page.needs_review(0.9));assert_eq!(page.content.warnings.len(),1);
+}
+#[test]
+fn manual_and_recovery_image_limits_override_specialist_defaults() {
+    let m=planning::catalog().into_iter().find(|m|m.id=="lighton3-1b").unwrap();
+    assert_eq!(runtime::input_edge(&m,&Settings::default()),1540);
+    assert_eq!(runtime::input_edge(&m,&Settings{image_edge:3072,..Default::default()}),3072);
+    assert_eq!(runtime::input_edge(&m,&Settings{image_edge:1024,..Default::default()}),1024);
 }
