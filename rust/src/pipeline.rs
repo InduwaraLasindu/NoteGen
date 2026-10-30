@@ -457,14 +457,7 @@ pub fn convert(
                         .iter()
                         .any(|b| b.kind == "figure" && !b.interpretation.is_empty())
             }) {
-                content.blocks.retain(|b| b.kind != "figure");
-                content.blocks.extend(
-                    v.content
-                        .blocks
-                        .iter()
-                        .filter(|b| b.kind == "figure")
-                        .cloned(),
-                );
+                merge_contextual_figures(&mut content, &v.content);
             }
             if let Some(warning) = failure {
                 content.warnings.push(warning);
@@ -512,7 +505,7 @@ pub fn convert(
         if p.needs_review(s.review_threshold) {
             review += 1;
         }
-        project.save(&p)?;
+        if !p.edited && !p.reviewed {project.save(&p)?;}
     }
     c.check()?;
     log.emit(
@@ -566,4 +559,12 @@ pub fn should_read(id:&str, role:&str, page:&Page,s:&Settings)->bool {
 
 pub fn retain_source_warnings(source:&[String],content:&mut PageContent) {
     for warning in source {if !content.warnings.contains(warning){content.warnings.push(warning.clone());}}
+}
+
+pub fn merge_contextual_figures(target:&mut PageContent,incoming:&PageContent) {
+    for figure in incoming.blocks.iter().filter(|b|b.kind=="figure") {
+        target.blocks.retain(|old|old.kind!="figure" || old.bbox.as_ref().zip(figure.bbox.as_ref())
+            .is_none_or(|(a,b)|consensus::overlap(a,b)<0.35));
+        target.blocks.push(figure.clone());
+    }
 }

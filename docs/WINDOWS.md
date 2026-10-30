@@ -117,3 +117,6 @@ cargo build --locked --release --features desktop --bins.
 Run scripts/Build-Windows.ps1 with Tesseract installed to package the app.
 CI tests native scans on Linux/Windows, verifies the CPU runtime installer, checks
 packaged Word/table output and starts the executable extracted from its ZIP.
+
+Human edits use separate page-*.edits.json overlays. Later AI checkpoints cannot overwrite
+those corrections; back up both the original page evidence and edit overlays together.

@@ -153,7 +153,9 @@ impl Project {
         self.root.join(format!("page-{n:05}.json"))
     }
     pub fn load(&self, n: usize) -> Result<Page> {
-        let p: Page = serde_json::from_reader(fs::File::open(self.page_path(n))?)?;
+        let manual=self.root.join(format!("page-{n:05}.edits.json"));
+        let path=if manual.is_file(){manual}else{self.page_path(n)};
+        let p: Page = serde_json::from_reader(fs::File::open(path)?)?;
         anyhow::ensure!(
             p.page == n && p.image == format!("page-{n:05}.png"),
             Fault::new("NG500", "Checkpoint page or source path mismatch")
@@ -163,6 +165,7 @@ impl Project {
     }
     pub fn save(&self, p: &Page) -> Result<()> {
         p.content.validate()?;
-        atomic_json(&self.page_path(p.page), p)
+        let path=if p.edited || p.reviewed {self.root.join(format!("page-{:05}.edits.json",p.page))} else {self.page_path(p.page)};
+        atomic_json(&path, p)
     }
 }

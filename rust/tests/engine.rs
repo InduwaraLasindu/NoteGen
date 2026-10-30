@@ -698,3 +698,30 @@ fn solid_chart_bars_are_not_recreated_as_empty_tables() {
     for x in [100,250,400] {for y in 100..301 {grid.put_pixel(x,y,image::Luma([0]));}}
     assert!(!scan::tables(&grid,&[]).is_empty(),"Real blank forms must remain editable tables");
 }
+
+#[test]
+fn contextual_reader_does_not_discard_unmatched_source_diagrams() {
+    let first=BoxRect{left:0.1,top:0.1,right:0.4,bottom:0.4};
+    let second=BoxRect{left:0.6,top:0.6,right:0.9,bottom:0.9};
+    let mut target=PageContent{blocks:vec![
+        Block{kind:"figure".into(),bbox:Some(first.clone()),description:"First source".into(),..Default::default()},
+        Block{kind:"figure".into(),bbox:Some(second),description:"Second source".into(),uncertain:true,..Default::default()}
+    ],..Default::default()};
+    let incoming=PageContent{blocks:vec![Block{kind:"figure".into(),bbox:Some(first),description:"Visible bars".into(),interpretation:"Likely a sales comparison".into(),..Default::default()}],..Default::default()};
+    notegen::pipeline::merge_contextual_figures(&mut target,&incoming);
+    assert_eq!(target.blocks.len(),2);
+    assert!(target.blocks.iter().any(|b|b.description=="Second source"));
+    assert!(target.blocks.iter().any(|b|b.interpretation.contains("sales")));
+}
+#[test]
+fn late_ai_checkpoints_cannot_overwrite_manual_edits() {
+    let dir=tempfile::tempdir().unwrap();let project=project(dir.path(),vec![1]);
+    let raw=Page{page:1,image:"page-00001.png".into(),content:PageContent{blocks:vec![Block::text("AI original")],..Default::default()},..Default::default()};
+    project.save(&raw).unwrap();
+    let mut human=raw.clone();human.edited=true;human.content.blocks[0].text="Human correction 1500".into();
+    project.save(&human).unwrap();
+    project.save(&raw).unwrap();
+    assert_eq!(project.load(1).unwrap().content.plain(),"Human correction 1500");
+    fs::write(project.page_path(1),b"corrupt automatic cache").unwrap();
+    assert_eq!(project.load(1).unwrap().content.plain(),"Human correction 1500");
+}
