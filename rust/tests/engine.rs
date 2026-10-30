@@ -464,6 +464,47 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
     )
     .unwrap();
     assert_eq!(first.project.root, second.project.root);
+    let mut edited = second.project.load(1).unwrap();
+    edited.edited = true;
+    edited.reviewed = true;
+    edited.content = PageContent {
+        blocks: vec![Block::text("Human correction 1500")],
+        ..Default::default()
+    };
+    second.project.save(&edited).unwrap();
+    let mut themed = s.clone();
+    themed.ui.dark = false;
+    let third = notegen::pipeline::convert(
+        &source,
+        &t.path().join("notes3.docx"),
+        &themed,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    assert_eq!(third.project.root, second.project.root);
+    assert_eq!(
+        third.project.load(1).unwrap().content.plain(),
+        "Human correction 1500"
+    );
+    fs::write(third.project.page_path(1), b"broken checkpoint").unwrap();
+    let repaired = notegen::pipeline::convert(
+        &source,
+        &t.path().join("notes4.docx"),
+        &s,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    assert!(
+        repaired
+            .project
+            .load(1)
+            .unwrap()
+            .content
+            .plain()
+            .contains("1250")
+    );
 }
 #[test]
 #[ignore = "requires downloaded local model and native runtime; invoke explicitly"]

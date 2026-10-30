@@ -213,6 +213,9 @@ impl Settings {
         if self.dpi != 0 && !(100..=600).contains(&self.dpi) {
             return bad("DPI must be 0 (auto) or 100–600");
         }
+        if self.image_edge != 0 && !(512..=8192).contains(&self.image_edge) {
+            return bad("Image edge must be auto or 512–8192");
+        }
         if !(1_000_000..=40_000_000).contains(&self.max_pixels) {
             return bad("Image memory limit outside supported range");
         }

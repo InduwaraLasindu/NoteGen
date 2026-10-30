@@ -58,7 +58,7 @@ roxmltree = "0.21"
 scraper = "0.24"
 pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "image_025", "thread_safe"] }
 clap = { version = "4", features = ["derive"] }
-eframe = { version = "0.37", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
+eframe = { version = "0.37", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence", "system_fonts", "links", "clipboard"] }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
 
 [profile.release]
@@ -68,3 +68,8 @@ strip = true
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[[test]]
+name = "desktop"
+path = "rust/tests/desktop.rs"
+required-features = ["desktop"]

@@ -111,6 +111,25 @@ impl Server {
                 !s.require_acceleration,
                 Fault::new("NG200", "Managed runtime is required to verify GPU offload")
             );
+            let client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(5))
+                .build()?;
+            let identity: Value = client
+                .get(format!("{}/v1/models", s.endpoint))
+                .send()?
+                .error_for_status()?
+                .json()?;
+            anyhow::ensure!(
+                identity["data"].as_array().is_some_and(|items| items
+                    .iter()
+                    .any(|v| v["id"].as_str() == Some(model.id.as_str()))),
+                Fault::new(
+                    "NG200",
+                    "External server model alias does not match the selected registered reader"
+                )
+            );
             return Ok(Self {
                 child: None,
                 alive: Arc::new(AtomicBool::new(false)),

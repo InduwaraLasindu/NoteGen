@@ -363,12 +363,8 @@ pub fn convert(
                 .map(|p| p.content.summary)
                 .unwrap_or_default();
             let context = format!("{}\nPrevious selected page: {}", s.subject, previous);
-            let evidence = page
-                .candidates
-                .iter()
-                .map(|v| format!("{}: {}", v.model_id, v.content.plain()))
-                .collect::<Vec<_>>()
-                .join("\n");
+            // First-pass readers are blind to one another to avoid artificial agreement.
+            let evidence = String::new();
             let mut failure = None;
             let mut reading = server.read(&im, &evidence, &context, &active_settings, c, &log, *n);
             if reading

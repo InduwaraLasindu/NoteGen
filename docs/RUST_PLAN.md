@@ -21,7 +21,10 @@ are required evidence. No universal accuracy or zero-error claim is made.
    CPU against a generated scan and a table crop: text recognized and cell 1250
    recovered with the model-specific table protocol. No GPU/handwriting claim.
 3. Minimal Rust desktop, Advanced settings, animations/customization, review/editing.
-   Gate: headless egui state tests, worker lifecycle, settings roundtrip, real conversion.
+   Gate passed: 39 tests across core, native engine and desktop; format and clippy
+   with all features/targets. Every Advanced tab, text/table/figure review, light/dark
+   and reduced motion, queue recovery, worker failure, bounded live logs, safe output
+   names and saved human corrections. Fixed texture-size handling for small adapters.
 4. Windows release, clean Linux/Windows CI, package smoke tests and hardware acceptance.
    Gate: tests + format + clippy + actual compiled CLI conversion/export and desktop startup.
 
