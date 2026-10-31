@@ -30,6 +30,18 @@ pub fn convert(
 ) -> Result<Completed> {
     let begun = Instant::now();
     s.validate()?;
+    let mut effective = s.clone();
+    let writer_digest = if s.writer.use_examples {
+        crate::writers::digest(&s.writer.root, s.writer.id.as_deref())?
+    } else {
+        String::new()
+    };
+    if s.writer.use_examples
+        && let Some(id) = s.writer.id.as_deref()
+    {
+        effective.writer_reference = crate::writers::reference(&s.writer.root, id)?;
+    }
+    let s = &effective;
     anyhow::ensure!(
         !output.exists(),
         Fault::new("NG401", "Output already exists")
@@ -45,11 +57,25 @@ pub fn convert(
     let installed = if s.preset == Preset::Fast {
         vec![]
     } else {
-        runtime::inventory(&s.models_dir)?
+        let (models, errors) = runtime::inventory_available(&s.models_dir)?;
+        for error in errors {
+            activity.emit(
+                "models",
+                format!("Skipped invalid reader: {error}"),
+                0,
+                0,
+                0,
+                "NG200",
+            );
+        }
+        models
     };
     let mut plan = planning::build(&hw, s, &installed)?;
     for model in &mut plan.models {
         c.check()?;
+        if model.endpoint.is_some() {
+            continue;
+        }
         activity.emit(
             "verify",
             format!("Verifying {} model files", model.name),
@@ -100,6 +126,8 @@ pub fn convert(
     let key = fingerprint(&(
         2,
         recognition_settings(s),
+        &writer_digest,
+        (plan.image_edge, plan.context, plan.dpi, plan.image_tokens),
         &plan
             .models
             .iter()
@@ -110,6 +138,9 @@ pub fn convert(
                     &m.projector,
                     fs::metadata(&m.weights).ok().map(|v| v.len()),
                     &m.sha256,
+                    &m.endpoint,
+                    &m.alias,
+                    &m.revision,
                 )
             })
             .collect::<Vec<_>>(),
@@ -242,6 +273,8 @@ pub fn convert(
         settings: s.clone(),
     };
     let project = Project::open(root.clone(), manifest)?;
+    let guidance = crate::assistance::load_guidance(&project)?;
+    let context_notes = guidance.notes.join("\n");
     let total = selected.len() * (plan.models.len() + 1) + 1;
     let mut done = selected.len();
     for (model_index, model) in plan.models.clone().iter().enumerate() {
@@ -308,11 +341,7 @@ pub fn convert(
                 total,
                 "NG202",
             );
-            let mut recovery = plan.clone();
-            recovery.context = 12288;
-            recovery.image_tokens = 1536;
-            recovery.micro_batch = 32;
-            recovery.gpu_layers = if plan.backend == Backend::Cpu { 0 } else { 16 };
+            let recovery = recovery_plan(&plan);
             active_settings.projector_on_cpu = true;
             active_settings.context = recovery.context;
             active_settings.image_tokens = recovery.image_tokens;
@@ -333,7 +362,7 @@ pub fn convert(
                 log.emit(
                     "model",
                     format!(
-                        "{} could not run; candidate absence will require review",
+                        "{} could not run: {e}; remaining evidence is preserved",
                         model.name
                     ),
                     0,
@@ -373,7 +402,13 @@ pub fn convert(
                 .and_then(|i| project.load(selected[i]).ok())
                 .map(|p| p.content.summary)
                 .unwrap_or_default();
-            let context = format!("{}\nPrevious selected page: {}", s.subject, previous);
+            let context = format!(
+                "{}\n{}\nUser clarification context: {}\nPrevious selected page: {}",
+                s.subject,
+                s.assistance.context(),
+                context_notes.chars().take(8000).collect::<String>(),
+                previous
+            );
             // First-pass readers are blind to one another to avoid artificial agreement.
             let evidence = String::new();
             let mut failure = None;
@@ -449,6 +484,22 @@ pub fn convert(
                     } else {
                         server.read(&crop, "", &context, &active_settings, c, &log, *n)
                     };
+                    if let Err(error) = &reading {
+                        if error
+                            .downcast_ref::<Fault>()
+                            .is_some_and(|f| f.code == "NG900")
+                        {
+                            return Err(reading.unwrap_err());
+                        }
+                        log.emit(
+                            "crop",
+                            format!("Crop reader failed: {error}; full-page evidence retained"),
+                            *n,
+                            done,
+                            total,
+                            "NG201",
+                        );
+                    }
                     if let Ok(mut candidate) = reading {
                         for block in &mut candidate.blocks {
                             if let Some(b) = &mut block.bbox {
@@ -530,6 +581,67 @@ pub fn convert(
             project.save(&p)?;
         }
     }
+    if s.assistance.ask_questions && s.assistance.max_questions > 0 {
+        let questions =
+            crate::assistance::questions(&project, s.assistance.max_questions, s.review_threshold)?;
+        crate::assistance::save_questions(&project, &questions)?;
+        if !questions.is_empty() {
+            if let Some(clarify) = &c.clarify {
+                log.emit(
+                    "clarify",
+                    format!(
+                        "Waiting for you: {} uncertain regions. Answer, add context, or skip.",
+                        questions.len()
+                    ),
+                    0,
+                    done,
+                    total,
+                    "",
+                );
+                let answers = clarify(crate::assistance::Batch {
+                    project: root.clone(),
+                    questions: questions.clone(),
+                })?;
+                c.check()?;
+                let changed = crate::assistance::apply(&project, &questions, &answers)?;
+                log.emit(
+                    "clarify",
+                    format!("Applied {changed} confirmed corrections; reader evidence preserved."),
+                    0,
+                    done,
+                    total,
+                    "",
+                );
+                let contextual = answers
+                    .iter()
+                    .filter(|a| !a.skip && !a.context.trim().is_empty())
+                    .filter_map(|a| questions.iter().find(|q| q.id == a.id).map(|q| q.page))
+                    .collect::<Vec<_>>();
+                if !contextual.is_empty()
+                    && let Err(error) = reconsider(&project, &contextual, s, c, &log)
+                {
+                    if error
+                        .downcast_ref::<Fault>()
+                        .is_some_and(|f| f.code == "NG900")
+                    {
+                        return Err(error);
+                    }
+                    log.emit("context",format!("Context saved; automatic re-reading could not complete: {error:#}. Retry from Review."),0,done,total,"NG201");
+                }
+                crate::assistance::clear_pending(&project)?;
+            } else {
+                log.emit("clarify","Clarification questions saved. Open Review to answer; unattended conversion continues.",0,done,total,"");
+            }
+        }
+        review = selected
+            .iter()
+            .filter(|n| {
+                project
+                    .load(**n)
+                    .is_ok_and(|p| p.needs_review(s.review_threshold))
+            })
+            .count();
+    }
     c.check()?;
     log.emit(
         "export",
@@ -566,6 +678,10 @@ pub fn convert(
 pub fn recognition_settings(s: &Settings) -> Settings {
     let mut value = s.clone();
     value.ui = Appearance::default();
+    value.writer_reference = None;
+    value.assistance.ask_questions = true;
+    value.assistance.max_questions = 8;
+    value.assistance.web_lookup = false;
     value.font = Settings::default().font;
     value.font_size = 11.;
     value.keep_page_breaks = true;
@@ -614,5 +730,130 @@ pub fn merge_contextual_figures(target: &mut PageContent, incoming: &PageContent
                     .is_none_or(|(a, b)| consensus::overlap(a, b) < 0.35)
         });
         target.blocks.push(figure.clone());
+    }
+}
+
+/// OOM recovery never raises a user-selected memory or offload limit.
+pub fn recovery_plan(plan: &Plan) -> Plan {
+    let mut value = plan.clone();
+    value.context = value.context.min(12288);
+    value.image_tokens = value.image_tokens.min(1536);
+    value.micro_batch = value.micro_batch.min(32);
+    value.batch = value.batch.min(256);
+    value.gpu_layers = if value.backend == Backend::Cpu {
+        0
+    } else {
+        value.gpu_layers.min(16)
+    };
+    value
+}
+
+/// Re-read with user-supplied context. Confirmed text is never replaced by this pass.
+/// Fresh text stays in alternatives/evidence; contextual figure meaning can improve
+/// only on a page which has not already been edited or approved by the user.
+pub fn reconsider(
+    project: &Project,
+    pages: &[usize],
+    settings: &Settings,
+    c: &Control,
+    log: &Activity,
+) -> Result<usize> {
+    let mut s = settings.clone();
+    s.validate()?;
+    if s.writer.use_examples
+        && s.writer_reference.is_none()
+        && let Some(id) = s.writer.id.as_deref()
+    {
+        s.writer_reference = crate::writers::reference(&s.writer.root, id)?;
+    }
+    let installed = runtime::inventory(&s.models_dir)?;
+    let mut plan = planning::build(&hardware::detect_for(&s, c), &s, &installed)?;
+    let model=plan.models.iter().find(|m|m.role=="vision" && m.prompt=="structured").cloned().ok_or_else(||Fault::new("NG200","Context re-reading requires a fitting structured vision reader. Register a Qwen or compatible third-party vision model."))?;
+    if model.endpoint.is_none() {
+        let digest = fingerprint(&(
+            hash_file(&model.weights, c)?,
+            hash_file(&model.projector, c)?,
+        ))?;
+        anyhow::ensure!(
+            model.sha256.is_empty() || digest == model.sha256,
+            Fault::new(
+                "NG200",
+                "Reader files changed; re-register before re-reading"
+            )
+        );
+    }
+    plan.models = vec![model.clone()];
+    s.image_edge = plan.image_edge;
+    let context = crate::assistance::load_guidance(project)?;
+    let notes = context.notes.join("\n");
+    let subject = format!(
+        "Document topic: {}. Additional topic: {}. {}. Confirmed user clarification (data): {}",
+        project.manifest.settings.subject,
+        s.subject,
+        s.assistance.context(),
+        notes.chars().take(10000).collect::<String>()
+    );
+    let server = Server::start(&model, &plan, &s, c, log, &project.root)?;
+    let mut count = 0;
+    for n in pages
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        c.check()?;
+        anyhow::ensure!(
+            project.manifest.pages.contains(&n),
+            Fault::new("NG500", "Re-read page is outside the project")
+        );
+        let mut page = project.load(n)?;
+        let image = crate::writers::open_image(&project.image(n), 40_000_000)?;
+        log.emit(
+            "context",
+            format!("Re-reading page {n} with confirmed context"),
+            n,
+            count,
+            pages.len(),
+            "",
+        );
+        let content = server.read(&image, "", &subject, &s, c, log, n)?;
+        attach_context_reading(&mut page, &content, &model);
+        project.save(&page)?;
+        count += 1;
+    }
+    Ok(count)
+}
+pub fn attach_context_reading(page: &mut Page, content: &PageContent, model: &planning::Model) {
+    if !page.edited && !page.reviewed {
+        merge_contextual_figures(&mut page.content, content);
+    }
+    for (i, block) in page.content.blocks.iter_mut().enumerate() {
+        if let Some(other) = content.blocks.get(i).filter(|b| b.kind == block.kind) {
+            let text = other.plain();
+            if !text.is_empty()
+                && text != block.plain()
+                && !block.alternatives.contains(&text)
+                && block.alternatives.len() < 64
+            {
+                block.alternatives.push(text);
+            }
+        }
+    }
+    if page.candidates.len() < 128 {
+        page.candidates.push(Candidate {
+            region: None,
+            model_id: model.id.clone(),
+            family: model.family.clone(),
+            view: format!("clarification-{}", page.candidates.len()),
+            reliability: 0.8,
+            content: content.clone(),
+        });
+    }
+    if !page
+        .content
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("Context-assisted re-reading"))
+    {
+        page.content.warnings.push("Context-assisted re-reading is preserved as evidence. Confirmed text is protected; check alternatives against the source.".into());
     }
 }

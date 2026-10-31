@@ -40,6 +40,21 @@ impl Fault {
             }
             "NG401" => "Choose a new output filename; existing files are protected.",
             "NG500" => "Restore matching input/settings/models or start a new project.",
+            "NG610" => {
+                "Choose a valid writer and a tight crop containing visible handwriting. Label only confirmed examples."
+            }
+            "NG620" => {
+                "Label individual English letters first, then export to a new font-pack filename."
+            }
+            "NG630" => {
+                "Reopen the source block, confirm its text, and save a shorter clarification."
+            }
+            "NG640" => {
+                "Enable public lookup and enter a topic; check the connection or continue offline."
+            }
+            "NG650" => {
+                "Check model metadata, available disk space and the publisher revision. The active version is preserved."
+            }
             "NG900" => "Completed work is saved. Resume the same input and settings.",
             _ => "Open the local activity log for the stage and error code.",
         }
@@ -112,6 +127,10 @@ pub struct Settings {
     pub endpoint: String,
     pub external_server: bool,
     pub subject: String,
+    pub writer: crate::assistance::WriterOptions,
+    pub assistance: crate::assistance::Options,
+    #[serde(skip)]
+    pub writer_reference: Option<crate::writers::Reference>,
     pub deskew: bool,
     pub auto_rotate: bool,
     pub preserve_figures: bool,
@@ -171,6 +190,9 @@ impl Default for Settings {
             endpoint: "http://127.0.0.1:18745".into(),
             external_server: false,
             subject: String::new(),
+            writer: Default::default(),
+            assistance: Default::default(),
+            writer_reference: None,
             deskew: true,
             auto_rotate: true,
             preserve_figures: true,
@@ -315,6 +337,14 @@ impl Settings {
         {
             return bad("Invalid model allowlist");
         }
+        self.assistance.validate()?;
+        anyhow::ensure!(
+            self.writer
+                .id
+                .as_deref()
+                .is_none_or(crate::writers::valid_id),
+            Fault::new("NG102", "Invalid writer profile ID")
+        );
         local_endpoint(&self.endpoint)?;
         Ok(())
     }
@@ -365,6 +395,9 @@ impl BoxRect {
         }
     }
     pub fn pixels(&self, w: u32, h: u32) -> (u32, u32, u32, u32) {
+        if w == 0 || h == 0 {
+            return (0, 0, 0, 0);
+        }
         let x = (self.left * w as f32) as u32;
         let y = (self.top * h as f32) as u32;
         (
@@ -426,7 +459,10 @@ impl Block {
         anyhow::ensure!(
             self.text.len() < 120000
                 && self.description.len() < 24000
-                && self.interpretation.len() < 24000,
+                && self.interpretation.len() < 24000
+                && self.alternatives.len() <= 64
+                && self.alternatives.iter().all(|s| s.len() < 120000)
+                && self.rows.iter().flatten().map(String::len).sum::<usize>() < 2_000_000,
             Fault::new("NG201", "Oversized content")
         );
         if let Some(b) = &self.bbox {
@@ -486,6 +522,12 @@ pub struct PageContent {
 }
 impl PageContent {
     pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.summary.len() <= 24000
+                && self.warnings.len() <= 1000
+                && self.warnings.iter().all(|v| v.len() <= 8000),
+            Fault::new("NG201", "Oversized reader summary or warnings")
+        );
         anyhow::ensure!(
             self.blocks.len() <= 500 && self.warnings.len() <= 200,
             Fault::new("NG201", "Excessive page data")

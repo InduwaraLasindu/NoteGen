@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "notegen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2566,6 +2566,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "ttf-parser",
  "unicode-normalization",
  "zip",
 ]

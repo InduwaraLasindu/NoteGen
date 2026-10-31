@@ -25,6 +25,17 @@ foreach($id in @('glm-ocr','lighton3-1b','qwen35-2b')){
 $settings=Join-Path $smoke 'smoke-settings.json'
 Push-Location $smoke
 try{
+ & ./notegen-cli.exe check-update glm-ocr | Out-File './publisher-update-metadata.json' -Encoding utf8
+ if($LASTEXITCODE -ne 0){throw 'Real publisher update metadata validation failed'}
+ # Exercise the third-party managed-reader registration through the real native pipeline.
+ $custom=Get-Content './models/glm-ocr.notegen.json' -Raw | ConvertFrom-Json -AsHashtable
+ $custom.id='custom-glm';$custom.name='Custom local GLM reader';$custom.rank=300;$custom.alias='stale-service-alias'
+ [IO.File]::WriteAllText((Join-Path $smoke 'custom-reader.json'),($custom|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
+ & ./notegen-cli.exe register-reader './custom-reader.json'
+ if($LASTEXITCODE -ne 0){throw 'Actual custom GGUF registration failed'}
+ $registered=Get-Content './models/custom-glm.notegen.json' -Raw | ConvertFrom-Json
+ if($registered.alias){throw 'Managed reader retained an incompatible external service alias'}
+
  & ./notegen-cli.exe defaults -o $settings
  if($LASTEXITCODE -ne 0){throw 'CLI defaults failed'}
  $s=Get-Content $settings -Raw | ConvertFrom-Json
@@ -39,3 +50,4 @@ try{
  $readers=@($page.candidates | Where-Object view -EQ 'full' | ForEach-Object family | Sort-Object -Unique)
  if($readers.Count -lt 4){throw "Expected Tesseract plus three native AI families; got $($readers -join ',')"}
 }finally{Pop-Location}
+

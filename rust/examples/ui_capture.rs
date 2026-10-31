@@ -86,8 +86,53 @@ fn main() -> eframe::Result {
             let mut state = Workspace::default();
             state.settings.preset = Preset::Fast;
             state.settings.ui.reduced_motion = mode != "motion";
+            if mode == "writers" {
+                state.settings.writer.root = "build/ui-demo-writers".into();
+                let profile = notegen::writers::create(&state.settings.writer.root, "Avery (demo)")
+                    .expect("create demo writer");
+                let bytes = [
+                    "C:/Windows/Fonts/arial.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                ]
+                .into_iter()
+                .find_map(|p| std::fs::read(p).ok())
+                .expect("QA system font");
+                let font = ab_glyph::FontArc::try_from_vec(bytes).unwrap();
+                for ch in "Aaersti025".chars() {
+                    let mut im = image::RgbImage::from_pixel(100, 120, image::Rgb([255, 255, 255]));
+                    imageproc::drawing::draw_text_mut(
+                        &mut im,
+                        image::Rgb([0, 0, 0]),
+                        10,
+                        10,
+                        90.,
+                        &font,
+                        &ch.to_string(),
+                    );
+                    notegen::writers::add_example(
+                        &state.settings.writer.root,
+                        &profile.id,
+                        &image::DynamicImage::ImageRgb8(im),
+                        notegen::types::BoxRect::full(),
+                        &ch.to_string(),
+                        true,
+                        "Synthetic UI demonstration",
+                    )
+                    .expect("demo glyph");
+                }
+                state.settings.writer.id = Some(profile.id);
+            }
             let mut app = Desktop::new(state);
             app.hardware = Some(hardware::detect());
+            if mode == "studio" {
+                app.studio_open(0);
+            }
+            if mode == "writers" {
+                app.studio_open(1);
+            }
+            if mode == "models" {
+                app.studio_open(2);
+            }
             if mode == "advanced" {
                 app.advanced_open();
             }

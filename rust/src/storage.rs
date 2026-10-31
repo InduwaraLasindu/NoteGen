@@ -13,10 +13,13 @@ use std::{
     time::Duration,
 };
 
+pub type Clarifier =
+    Arc<dyn Fn(crate::assistance::Batch) -> Result<Vec<crate::assistance::Answer>> + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct Control {
     pub cancelled: Arc<AtomicBool>,
     pub paused: Arc<AtomicBool>,
+    pub clarify: Option<Clarifier>,
 }
 impl Control {
     pub fn check(&self) -> Result<()> {
@@ -139,6 +142,20 @@ pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     f.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
+    let mut file = fs::File::open(path)?;
+    anyhow::ensure!(
+        file.metadata()?.len() <= limit,
+        Fault::new("NG500", "JSON file exceeds its size limit")
+    );
+    let mut bytes = Vec::new();
+    (&mut file).take(limit + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= limit,
+        Fault::new("NG500", "JSON file exceeds its size limit")
+    );
+    Ok(serde_json::from_slice(&bytes)?)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub schema: u32,
@@ -158,7 +175,7 @@ impl Project {
         fs::create_dir_all(&root)?;
         let p = root.join("project.json");
         if p.exists() {
-            let old: Manifest = serde_json::from_reader(fs::File::open(&p)?)?;
+            let old: Manifest = read_json(&p, 1_000_000)?;
             anyhow::ensure!(
                 old.schema == manifest.schema
                     && old.input_sha256 == manifest.input_sha256
@@ -172,11 +189,22 @@ impl Project {
         Ok(Self { root, manifest })
     }
     pub fn read(root: PathBuf) -> Result<Self> {
-        let m: Manifest = serde_json::from_reader(fs::File::open(root.join("project.json"))?)?;
+        let m: Manifest = read_json(&root.join("project.json"), 1_000_000)?;
         anyhow::ensure!(
             m.schema == 2,
             Fault::new("NG500", "Unsupported project schema")
         );
+        anyhow::ensure!(
+            m.pages.len() <= 3000
+                && m.pages.iter().all(|n| (1..=3000).contains(n))
+                && m.pages
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    == m.pages.len(),
+            Fault::new("NG500", "Invalid project page list")
+        );
+        m.settings.validate()?;
         Ok(Self { root, manifest: m })
     }
     pub fn image(&self, n: usize) -> PathBuf {
@@ -192,7 +220,7 @@ impl Project {
         } else {
             self.page_path(n)
         };
-        let p: Page = serde_json::from_reader(fs::File::open(path)?)?;
+        let p: Page = read_json(&path, 32_000_000)?;
         anyhow::ensure!(
             p.page == n && p.image == format!("page-{n:05}.png"),
             Fault::new("NG500", "Checkpoint page or source path mismatch")
@@ -201,6 +229,10 @@ impl Project {
         Ok(p)
     }
     pub fn save(&self, p: &Page) -> Result<()> {
+        anyhow::ensure!(
+            self.manifest.pages.contains(&p.page) && p.image == format!("page-{:05}.png", p.page),
+            Fault::new("NG500", "Checkpoint page or source path mismatch")
+        );
         p.content.validate()?;
         let path = if p.edited || p.reviewed {
             self.root.join(format!("page-{:05}.edits.json", p.page))

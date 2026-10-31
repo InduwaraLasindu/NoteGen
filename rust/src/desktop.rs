@@ -115,7 +115,15 @@ fn evidence_label(page: &Page) -> String {
         ),
     }
 }
+#[path = "studio.rs"]
+mod studio;
+
 enum Message {
+    Studio(studio::StudioMessage),
+    Clarify(
+        crate::assistance::Batch,
+        mpsc::Sender<Vec<crate::assistance::Answer>>,
+    ),
     Event(Event),
     Complete(Box<Completed>),
     Failed(String, String),
@@ -132,6 +140,9 @@ struct Review {
     dirty: bool,
     raw: String,
     raw_open: bool,
+    crop_mode: bool,
+    crop_start: Option<egui::Pos2>,
+    crop: Option<BoxRect>,
 }
 impl Review {
     fn load(project: Project, index: usize, ctx: &egui::Context) -> Result<Self> {
@@ -141,20 +152,22 @@ impl Review {
             .get(index)
             .ok_or_else(|| Fault::new("NG500", "Page does not exist"))?;
         let page = project.load(n)?;
-        let texture = image::open(project.image(n)).ok().map(|im| {
-            let limit = ctx.input(|i| i.max_texture_side).min(2048) as u32;
-            let rgba = im
-                .thumbnail(im.width().min(limit), im.height().min(limit))
-                .to_rgba8();
-            ctx.load_texture(
-                format!("{}:{n}", project.root.display()),
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [rgba.width() as usize, rgba.height() as usize],
-                    rgba.as_raw(),
-                ),
-                egui::TextureOptions::LINEAR,
-            )
-        });
+        let texture = crate::writers::open_image(&project.image(n), 40_000_000)
+            .ok()
+            .map(|im| {
+                let limit = ctx.input(|i| i.max_texture_side).min(2048) as u32;
+                let rgba = im
+                    .thumbnail(im.width().min(limit), im.height().min(limit))
+                    .to_rgba8();
+                ctx.load_texture(
+                    format!("{}:{n}", project.root.display()),
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [rgba.width() as usize, rgba.height() as usize],
+                        rgba.as_raw(),
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
         let raw = serde_json::to_string_pretty(&page.content)?;
         Ok(Self {
             project,
@@ -165,10 +178,14 @@ impl Review {
             dirty: false,
             raw,
             raw_open: false,
+            crop_mode: false,
+            crop_start: None,
+            crop: None,
         })
     }
 }
 pub struct Desktop {
+    studio: studio::Studio,
     pub state: Workspace,
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
@@ -208,7 +225,9 @@ impl Desktop {
         let (tx, rx) = mpsc::channel();
         let draft = state.settings.clone();
         let raw = serde_json::to_string_pretty(&draft).unwrap_or_default();
+        let studio = studio::Studio::new(&state.settings);
         Self {
+            studio,
             state,
             tx,
             rx,
@@ -262,8 +281,15 @@ impl Desktop {
         let s = self.state.settings.clone();
         thread::spawn(move || {
             let h = hardware::detect_for(&s, &Control::default());
-            let (models, error) = match runtime::inventory(&s.models_dir) {
-                Ok(m) => (m, None),
+            let (models, error) = match runtime::inventory_available(&s.models_dir) {
+                Ok((m, e)) => (
+                    m,
+                    if e.is_empty() {
+                        None
+                    } else {
+                        Some(e.join("; "))
+                    },
+                ),
                 Err(e) => (vec![], Some(e.to_string())),
             };
             let _ = tx.send(Message::Hardware(h, models, error));
@@ -274,6 +300,11 @@ impl Desktop {
         for _ in 0..500 {
             let Ok(msg) = self.rx.try_recv() else { break };
             match msg {
+                Message::Studio(v) => self.studio_message(v, ctx),
+                Message::Clarify(batch, reply) => {
+                    self.studio.pending = Some(studio::Pending::new(batch, Some(reply)));
+                    self.stage = "Waiting for your clarification".into();
+                }
                 Message::Event(e) => {
                     if e.total > 0 {
                         self.progress = (e.done as f32 / e.total as f32).clamp(0., 1.);
@@ -319,6 +350,8 @@ impl Desktop {
                     self.finished();
                 }
                 Message::Failed(code, detail) => {
+                    self.busy_setup = false;
+                    self.studio.pending = None;
                     let cancelled = code == "NG900";
                     if let Some(i) = self.active.take() {
                         self.state.queue[i].status = if cancelled {
@@ -398,6 +431,27 @@ impl Desktop {
         let output = output_name(&input, &folder);
         let s = self.state.settings.clone();
         self.control = Control::default();
+        let cancelled = self.control.cancelled.clone();
+        let questions = self.tx.clone();
+        let question_ctx = ctx.clone();
+        self.control.clarify = Some(Arc::new(move |batch| {
+            let (reply, receiver) = mpsc::channel();
+            questions
+                .send(Message::Clarify(batch, reply))
+                .map_err(|_| Fault::new("NG900", "Clarification window closed"))?;
+            question_ctx.request_repaint();
+            loop {
+                anyhow::ensure!(
+                    !cancelled.load(Ordering::Relaxed),
+                    Fault::new("NG900", "Cancelled while waiting for clarification")
+                );
+                match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(a) => return Ok(a),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(_) => return Ok(vec![]),
+                }
+            }
+        }));
         let c = self.control.clone();
         let tx = self.tx.clone();
         let repaint = ctx.clone();
@@ -534,6 +588,7 @@ impl Desktop {
                     ui.add_enabled(self.worker.is_none(),egui::TextEdit::singleline(&mut self.state.settings.page_range).hint_text("All · e.g. 1-4, 8").desired_width(145.));
                 }
                 );
+                self.context_bar(ui);
                 ui.add_space(20.);
                 ui.horizontal(|ui|{
                     let ready=self.state.next().is_some() && self.worker.is_none();
@@ -601,6 +656,7 @@ impl Desktop {
         );
         self.advanced_ui(&ctx);
         self.review_ui(&ctx);
+        self.studio_ui(&ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if let Some(delay) = motion::repaint_delay(
             &self.state.settings.ui,
@@ -1241,6 +1297,21 @@ impl Desktop {
     }
     fn appearance_controls(&mut self, ui: &mut egui::Ui) {
         let a = &mut self.draft.ui;
+        ui.horizontal_wrapped(|ui| {
+            for (name, dark, accent, background) in [
+                ("Midnight", true, [109, 208, 234], [13, 19, 29]),
+                ("Jade", true, [103, 224, 173], [13, 26, 25]),
+                ("Amethyst", true, [191, 165, 255], [22, 18, 33]),
+                ("Paper", false, [24, 120, 155], [240, 245, 248]),
+                ("Warm", false, [171, 104, 51], [247, 242, 234]),
+            ] {
+                if ui.button(name).clicked() {
+                    a.dark = dark;
+                    a.accent = accent;
+                    a.background = background;
+                }
+            }
+        });
         ui.checkbox(&mut a.dark, "Dark appearance");
         ui.horizontal(|ui| {
             ui.label("Accent");
@@ -1285,6 +1356,7 @@ impl Desktop {
         let mut next = None;
         let mut export = false;
         egui::Window::new("Review & correct").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).resizable(true).show(ctx,|ui|{
+            if self.worker.is_some(){ui.disable();}
             ui.horizontal(|ui|{
                 ui.strong(format!("Page {} / {}",r.page.page,r.project.manifest.pages.len()));
                 if ui.add_enabled(r.index>0 && !r.dirty,egui::Button::new("← Previous")).clicked(){
@@ -1300,13 +1372,34 @@ impl Desktop {
             }
             );
             ui.separator();
+            ui.horizontal_wrapped(|ui|{
+                ui.toggle_value(&mut r.crop_mode,"Label handwriting / context");
+                if r.crop_mode{ui.small("Drag a tight box around a letter, word or picture.");}
+                if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Clarification inbox")).clicked(){
+                    match crate::assistance::questions(&r.project,32,self.state.settings.review_threshold){
+                        Ok(q) if !q.is_empty()=>self.studio.pending=Some(studio::Pending::new(crate::assistance::Batch{project:r.project.root.clone(),questions:q},None)),
+                        Ok(_)=>self.notice="No pending questions. Label any other source region manually.".into(),Err(e)=>self.review_error=e.to_string()
+                    }
+                }
+                if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Re-read with context")).clicked(){self.reconsider_review(&r.project,ctx);}
+            });
             ui.columns(2,|cols|{
                 egui::ScrollArea::both().id_salt("source").max_height(530.).show(&mut cols[0],|ui|{
                     if let Some(texture)=&r.texture {
                         let size=texture.size_vec2();
                         let width=ui.available_width().max(200.);
-                        let response=ui.add(egui::Image::new((texture.id(),size)).fit_to_exact_size(Vec2::new(width,width*size.y/size.x)));
+                        let response=ui.add(egui::Image::new((texture.id(),size)).fit_to_exact_size(Vec2::new(width,width*size.y/size.x)).sense(if r.crop_mode{egui::Sense::drag()}else{egui::Sense::hover()}));
                         let rect=response.rect;
+                        if r.crop_mode{
+                            if response.drag_started(){r.crop_start=response.interact_pointer_pos();}
+                            if (response.dragged() || response.drag_stopped()) && let (Some(start),Some(end))=(r.crop_start,response.interact_pointer_pos()){
+                                    let area=egui::Rect::from_two_pos(start,end).intersect(rect);
+                                    let box_rect=BoxRect{left:((area.left()-rect.left())/rect.width()).clamp(0.,1.),top:((area.top()-rect.top())/rect.height()).clamp(0.,1.),right:((area.right()-rect.left())/rect.width()).clamp(0.,1.),bottom:((area.bottom()-rect.top())/rect.height()).clamp(0.,1.)};
+                                    if box_rect.valid(){r.crop=Some(box_rect);}
+                            }
+                            if let Some(b)=&r.crop{let selected=egui::Rect::from_min_max(rect.min+Vec2::new(b.left*rect.width(),b.top*rect.height()),rect.min+Vec2::new(b.right*rect.width(),b.bottom*rect.height()));ui.painter().rect_filled(selected,2,self.accent().gamma_multiply(0.12));ui.painter().rect_stroke(selected,2,egui::Stroke::new(2.,self.accent()),egui::StrokeKind::Inside);}
+                            if response.drag_stopped() && let Some(region)=r.crop.take(){self.prepare_teach(&r,region,ctx);r.crop_start=None;r.crop_mode=false;}
+                        }
                         for(i,b)in r.page.content.blocks.iter().enumerate(){
                             if let Some(b)=&b.bbox{
                                 let region=egui::Rect::from_min_max(egui::pos2(rect.left()+b.left*rect.width(),rect.top()+b.top*rect.height()),egui::pos2(rect.left()+b.right*rect.width(),rect.top()+b.bottom*rect.height()));
@@ -1319,7 +1412,7 @@ impl Desktop {
                                 else{
                                     Color32::from_rgba_unmultiplied(120,160,180,100)}
                                 ),egui::StrokeKind::Inside);
-                                if ui.interact(region,egui::Id::unique(("region",i)),egui::Sense::click()).clicked(){
+                                if !r.crop_mode && ui.interact(region,egui::Id::unique(("region",i)),egui::Sense::click()).clicked(){
                                     r.selected=i;
                                 }
                             }
@@ -1541,6 +1634,17 @@ impl Desktop {
             s.visuals.selection.bg_fill = accent.gamma_multiply(0.25);
             s.visuals.selection.stroke = egui::Stroke::new(1., accent);
             s.animation_time = motion::transition(&self.state.settings.ui);
+            let radius = egui::CornerRadius::same(self.state.settings.ui.rounding);
+            for widget in [
+                &mut s.visuals.widgets.noninteractive,
+                &mut s.visuals.widgets.inactive,
+                &mut s.visuals.widgets.hovered,
+                &mut s.visuals.widgets.active,
+                &mut s.visuals.widgets.open,
+            ] {
+                widget.corner_radius = radius;
+            }
+            s.visuals.window_corner_radius = radius;
         });
     }
     fn logo(&self, ui: &mut egui::Ui) {
@@ -1789,6 +1893,11 @@ fn code_static(s: &str) -> &'static str {
         "NG400" => "NG400",
         "NG401" => "NG401",
         "NG500" => "NG500",
+        "NG610" => "NG610",
+        "NG620" => "NG620",
+        "NG630" => "NG630",
+        "NG640" => "NG640",
+        "NG650" => "NG650",
         "NG900" => "NG900",
         _ => "NG500",
     }
@@ -2052,5 +2161,65 @@ mod acceptance {
         assert_eq!(app.state.queue[0].status, JobStatus::Failed);
         assert_eq!(app.error_code, "NG400");
         assert!(app.worker.is_none());
+    }
+}
+
+#[cfg(test)]
+mod studio_acceptance {
+    use super::*;
+    fn draw(app: &mut Desktop, ctx: &egui::Context) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200., 950.),
+                )),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        assert!(!output.shapes.is_empty());
+        output.textures_delta.clear();
+    }
+    #[test]
+    fn studio_tabs_writer_coverage_and_clarification_render_with_reduced_motion() {
+        let t = tempfile::tempdir().unwrap();
+        let mut state = Workspace::default();
+        state.settings.writer.root = t.path().join("writers");
+        state.settings.ui.reduced_motion = true;
+        let p = crate::writers::create(&state.settings.writer.root, "Test writer").unwrap();
+        state.settings.writer.id = Some(p.id);
+        let mut app = Desktop::new(state);
+        let ctx = egui::Context::default();
+        for tab in 0..4 {
+            app.studio_open(tab);
+            draw(&mut app, &ctx);
+            draw(&mut app, &ctx);
+        }
+        let batch = crate::assistance::Batch {
+            project: t.path().into(),
+            questions: vec![crate::assistance::Question {
+                id: "q1".into(),
+                page: 1,
+                block: 0,
+                field: "text".into(),
+                prompt: "What is this word?".into(),
+                reading: "[illegible]".into(),
+                alternatives: vec!["river".into()],
+                region: None,
+                image: t.path().join("missing.png"),
+                block_digest: "test".into(),
+            }],
+        };
+        let (tx, rx) = mpsc::channel();
+        app.studio.pending = Some(studio::Pending::new(batch, Some(tx)));
+        draw(&mut app, &ctx);
+        draw(&mut app, &ctx);
+        // Dropping/closing an unanswered dialog disconnects the reply channel cleanly.
+        app.studio.pending.take();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
     }
 }

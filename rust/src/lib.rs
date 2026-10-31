@@ -1,7 +1,10 @@
+pub mod assistance;
 pub mod consensus;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+pub mod fontpack;
 pub mod hardware;
+pub mod models;
 pub mod motion;
 pub mod parsing;
 pub mod pipeline;
@@ -11,3 +14,4 @@ pub mod scan;
 pub mod storage;
 pub mod types;
 pub mod word;
+pub mod writers;

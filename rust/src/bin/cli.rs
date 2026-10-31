@@ -16,6 +16,51 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Doctor,
+    RegisterReader {
+        spec: PathBuf,
+    },
+    CheckUpdate {
+        id: String,
+    },
+    UpdateModel {
+        id: String,
+    },
+    Writers,
+    AddWriter {
+        name: String,
+    },
+    Teach {
+        writer: String,
+        image: PathBuf,
+        label: String,
+        #[arg(long)]
+        glyph: bool,
+    },
+    FontPack {
+        writer: String,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long)]
+        family: Option<String>,
+    },
+    ExportWriter {
+        writer: String,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    ImportWriter {
+        input: PathBuf,
+    },
+    Questions {
+        project: PathBuf,
+    },
+    Clarify {
+        project: PathBuf,
+        answers: PathBuf,
+    },
+    Reconsider {
+        project: PathBuf,
+    },
     Plan {
         #[arg(long)]
         catalog: bool,
@@ -85,6 +130,103 @@ fn run() -> Result<()> {
         })),
     };
     match args.command {
+        Action::RegisterReader { spec } => {
+            let model = read_json(&spec, 100_000)?;
+            let m = notegen::models::save_custom(&s.models_dir, model, &c)?;
+            println!("Registered {}", m.id);
+        }
+        Action::CheckUpdate { id } => {
+            let model = runtime::inventory(&s.models_dir)?
+                .into_iter()
+                .find(|m| m.id == id)
+                .ok_or_else(|| Fault::new("NG650", "Reader is not registered"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&notegen::models::check(&model, &c)?)?
+            );
+        }
+        Action::UpdateModel { id } => {
+            let model = runtime::inventory(&s.models_dir)?
+                .into_iter()
+                .find(|m| m.id == id)
+                .ok_or_else(|| Fault::new("NG650", "Reader is not registered"))?;
+            let update = notegen::models::check(&model, &c)?;
+            let installed = notegen::models::install(&s.models_dir, &model, &update, &c, &log)?;
+            println!("Activated {} at {}", installed.id, installed.revision);
+        }
+        Action::Writers => println!(
+            "{}",
+            serde_json::to_string_pretty(&notegen::writers::list(&s.writer.root)?)?
+        ),
+        Action::AddWriter { name } => println!(
+            "{}",
+            serde_json::to_string_pretty(&notegen::writers::create(&s.writer.root, &name)?)?
+        ),
+        Action::Teach {
+            writer,
+            image,
+            label,
+            glyph,
+        } => {
+            let image = notegen::writers::open_image(&image, 40_000_000)?;
+            let p = notegen::writers::add_example(
+                &s.writer.root,
+                &writer,
+                &image,
+                BoxRect::full(),
+                &label,
+                glyph,
+                "CLI confirmed example",
+            )?;
+            println!("Saved example for {} (revision {})", p.name, p.revision);
+        }
+        Action::FontPack {
+            writer,
+            output,
+            family,
+        } => {
+            let mut options = notegen::fontpack::FontOptions::default();
+            if let Some(family) = family {
+                options.family = family;
+            }
+            let n = notegen::fontpack::export(&s.writer.root, &writer, &output, &options, &c)?;
+            println!("Exported {n} glyphs: {}", output.display());
+        }
+        Action::ExportWriter { writer, output } => {
+            notegen::writers::export_profile(&s.writer.root, &writer, &output, &c)?
+        }
+        Action::ImportWriter { input } => println!(
+            "{}",
+            serde_json::to_string_pretty(&notegen::writers::import_profile(
+                &s.writer.root,
+                &input,
+                &c
+            )?)?
+        ),
+        Action::Questions { project } => {
+            let project = Project::read(project)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&notegen::assistance::questions(
+                    &project,
+                    32,
+                    s.review_threshold
+                )?)?
+            );
+        }
+        Action::Clarify { project, answers } => {
+            let project = Project::read(project)?;
+            let questions = notegen::assistance::questions(&project, 32, s.review_threshold)?;
+            let answers: Vec<notegen::assistance::Answer> = read_json(&answers, 4_000_000)?;
+            println!(
+                "Applied {} corrections",
+                notegen::assistance::apply(&project, &questions, &answers)?
+            );
+        }
+        Action::Reconsider { project } => {
+            let project = Project::read(project)?;
+            pipeline::reconsider(&project, &project.manifest.pages, &s, &c, &log)?;
+        }
         Action::Doctor => {
             let h = hardware::detect_for(&s, &c);
             println!("{}", serde_json::to_string_pretty(&h)?);

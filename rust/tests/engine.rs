@@ -679,6 +679,35 @@ fn live_model() {
             "Vision reader must preserve and explain the bar chart"
         );
     }
+    if model.role == "vision" {
+        let profiles = root.join("writers");
+        let profile = notegen::writers::create(&profiles, "QA writer").unwrap();
+        let source = DynamicImage::ImageRgb8(fixture());
+        // This labelled crop is deliberately separate from the source in the request.
+        notegen::writers::add_example(
+            &profiles,
+            &profile.id,
+            &source,
+            BoxRect {
+                left: 0.05,
+                top: 0.08,
+                right: 0.80,
+                bottom: 0.13,
+            },
+            "Revenue is 1250 in October.",
+            false,
+            "Synthetic test fixture",
+        )
+        .unwrap();
+        s.writer_reference = notegen::writers::reference(&profiles, &profile.id).unwrap();
+        let with_memory=server.read(&source,"","Accounting worksheet; use the separate confirmed writer example as shape guidance only.",&s,&Control::default(),&log,1).unwrap();
+        assert!(
+            with_memory.plain().contains("1250"),
+            "{}",
+            with_memory.plain()
+        );
+        atomic_json(&root.join("writer-assisted.json"), &with_memory).unwrap();
+    }
     let table_image = DynamicImage::ImageRgb8(fixture()).crop_imm(45, 295, 815, 215);
     let table = server
         .read_table(
@@ -1052,4 +1081,54 @@ fn raw_reader_evidence_is_retained_with_safe_unique_names() {
             .iter()
             .any(|p| fs::read_to_string(p).unwrap() == "bad box 900")
     );
+}
+
+#[test]
+fn completed_stream_without_final_newline_is_accepted() {
+    let body = format!(
+        "data: {}\n\ndata: {}",
+        serde_json::json!({"choices":[{"delta":{"content":"Confirmed r"}}]}),
+        serde_json::json!({"choices":[{"finish_reason":"stop"}]})
+    );
+    let (url, thread) = serve(body, "200 OK", 0);
+    assert_eq!(
+        runtime::chat(
+            &url,
+            serde_json::json!({}),
+            &Settings::default(),
+            &Control::default(),
+            &Activity::default(),
+            1
+        )
+        .unwrap(),
+        "Confirmed r"
+    );
+    thread.join().unwrap();
+}
+#[test]
+fn recovery_never_increases_manual_resource_limits() {
+    let settings = Settings {
+        context: 4096,
+        image_tokens: 512,
+        batch: 64,
+        micro_batch: 16,
+        gpu_layers: 0,
+        ..Default::default()
+    };
+    let hardware = notegen::hardware::Hardware {
+        logical_cores: 4,
+        free_ram_mib: 16000,
+        ram_mib: 32000,
+        ..Default::default()
+    };
+    let plan = planning::build(&hardware, &settings, &[]).unwrap();
+    let retry = notegen::pipeline::recovery_plan(&plan);
+    assert!(
+        retry.context <= plan.context
+            && retry.image_tokens <= plan.image_tokens
+            && retry.batch <= plan.batch
+            && retry.micro_batch <= plan.micro_batch
+    );
+    assert_eq!(retry.gpu_layers, 0);
+    assert_eq!(BoxRect::full().pixels(0, 0), (0, 0, 0, 0));
 }

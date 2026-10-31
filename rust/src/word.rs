@@ -190,7 +190,7 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
                 "table" => body.write_all(table(b).as_bytes())?,
                 "figure" if project.manifest.settings.preserve_figures => {
                     let path = safe_image(&project.root, &page.image)?;
-                    let im = image::open(path)?;
+                    let im = crate::writers::open_image(&path, 40_000_000)?;
                     let (l, t, r, d) = b.bbox.as_ref().unwrap().pixels(im.width(), im.height());
                     let crop = im
                         .crop_imm(l, t, r - l, d - t)

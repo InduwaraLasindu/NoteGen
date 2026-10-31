@@ -11,7 +11,7 @@ Python is not needed to run the current app.
 
 [Windows installer](https://github.com/InduwaraLasindu/NoteGen/releases/latest)
 · [Portable builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
-· [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
+· [Studio guide](docs/STUDIO.md) · [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
 
 [Download NoteGen-Setup-0.2.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.2.0/NoteGen-Setup-0.2.0.exe)
 (about 61 MB), run it, and follow the wizard. It installs for your Windows account,
@@ -35,8 +35,8 @@ Portable ZIPs remain available under the latest successful **Rust verification**
 
 Setup selects models for actual free memory, downloads pinned revisions, verifies SHA256
 and registers them. Models are separate, potentially large downloads. Once installed,
-conversion uses only local files and loopback HTTP. There is no cloud fallback, API key
-or document upload.
+conversion uses only local files and loopback HTTP. Optional public-topic lookup sends only
+the query you type, after explicit opt-in. There is no cloud conversion fallback or document upload.
 
 ## Features
 
@@ -54,7 +54,12 @@ or document upload.
 | Review | Side-by-side source boxes, editable text/cells/diagram explanations, reader evidence, validated page JSON and persistent human corrections |
 | Minimal native UI | Scanning-page motion graphic, orbiting accents, eased hover/preset transitions, progress sheen, completion check and animated drawers/windows; configurable in Advanced |
 | Appearance controls | Light/dark, accent/background, scale, corners, speed, transition timing, orbit density, active/idle FPS, glow and reduced motion; live appearance preview while converting |
-| Offline CLI | Diagnostics, hardware plan, registration, conversion, project inspection, native export and re-export |
+| Clarification | Source crops, exact word/number/cell corrections, contextual questions, skip/defer, and a protected local re-reading pass |
+| Writer profiles | Named people, confirmed glyph/word memory, visual reference sheets, revision-aware caches, forget/delete, and profile ZIP import/export |
+| Personal fonts | Real installable TTF, SVG glyphs, averaged confirmed letter samples, coverage report and preview; missing letters are reported |
+| Third-party readers | Custom GGUF/projector pairs or loopback OpenAI-compatible vision services; explicit publisher update checks, SHA256-pinned activation and rollback |
+| Optional public context | User-typed Wikipedia lookup, source-linked excerpts and explicit attachment; no scan/OCR/profile uploads |
+| Offline CLI | Diagnostics, plans, model registration/updates, profiles/fonts, clarification, conversion, inspection and native export |
 
 Windows UI rendering uses wgpu/Direct3D or Vulkan; AI uses CUDA/Vulkan through llama.cpp.
 Actual offloaded layers are recorded in the native startup log. PDF rendering, Tesseract,
@@ -112,3 +117,4 @@ cargo run --locked --features desktop --bin NoteGen
 Tests require Tesseract and PDFium; set NOTEGEN_PDFIUM to the native library.
 [Development](CONTRIBUTING.md). The [Python predecessor](legacy/python) is archived and
 is not part of the Rust release. NoteGen is MIT-licensed; dependency/model terms apply.
+

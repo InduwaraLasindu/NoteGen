@@ -20,6 +20,14 @@ pub struct Model {
     pub projector: PathBuf,
     #[serde(default)]
     pub sha256: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub alias: String,
+    #[serde(default)]
+    pub revision: String,
+    #[serde(default)]
+    pub hub: Option<crate::models::Hub>,
 }
 pub fn catalog() -> Vec<Model> {
     serde_json::from_str(include_str!("../catalog.json")).expect("compiled model catalog")
@@ -87,8 +95,11 @@ pub fn build(hw: &Hardware, s: &Settings, models: &[Model]) -> Result<Plan> {
         .iter()
         .filter(|m| {
             (s.automatic_models || s.model_ids.contains(&m.id))
-                && m.weights_mib + 512 <= ram_budget
-                && if backend == Backend::Cpu {
+                && (!s.require_acceleration || m.endpoint.is_none())
+                && (m.endpoint.is_some() || m.weights_mib + 512 <= ram_budget)
+                && if m.endpoint.is_some() {
+                    true
+                } else if backend == Backend::Cpu {
                     m.weights_mib <= 6500
                 } else {
                     m.resident_mib <= vram_budget
@@ -126,7 +137,10 @@ pub fn build(hw: &Hardware, s: &Settings, models: &[Model]) -> Result<Plan> {
         notes.push("Insufficient compatible model diversity. Results will be flagged for review; no fictitious ensemble agreement.".into());
     }
     if backend == Backend::Cpu {
-        notes.push("No NVIDIA GPU detected: CPU inference uses native SIMD. No GPU acceleration is claimed.".into());
+        notes.push(
+            "CPU backend selected: inference uses native SIMD. No AI GPU acceleration is claimed."
+                .into(),
+        );
     }
     Ok(Plan {
         backend,
