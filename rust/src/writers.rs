@@ -160,11 +160,14 @@ pub fn normalize(image: &DynamicImage, width: u32, height: u32) -> Result<GrayIm
     );
     let mut gray = image.thumbnail(2048, 2048).to_luma8();
     let (w, h) = gray.dimensions();
-    let edge_mean = (0..w)
+    let perimeter = (0..w)
         .map(|x| gray[(x, 0)][0] as u64 + gray[(x, h - 1)][0] as u64)
         .sum::<u64>()
-        / (2 * w as u64);
-    if edge_mean < 128 {
+        + (0..h)
+            .map(|y| gray[(0, y)][0] as u64 + gray[(w - 1, y)][0] as u64)
+            .sum::<u64>();
+    let edge_mean = perimeter / (2 * (w as u64 + h as u64)).max(1);
+    if edge_mean < 96 {
         image::imageops::invert(&mut gray);
     }
     let mut hist = [0u64; 256];

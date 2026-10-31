@@ -209,8 +209,10 @@ pub fn select(candidates: &[Candidate], minimum: usize, threshold: f64) -> (Page
             .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
             .map(|t| {
                 t.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != ',')
+                    .trim_matches(['.', ','])
                     .to_owned()
             })
+            .filter(|t| !t.is_empty())
             .collect()
     };
     let expected = numbers(&chosen.content.plain());

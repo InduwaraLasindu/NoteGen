@@ -1,0 +1,8 @@
+{
+  "name": "NoteGen Studio",
+  "description": "Adaptive document & handwriting recognition studio with ensemble OCR consensus, interactive clarification prompts, writer handwriting profiles, personal TrueType font pack export, 3rd-party model management, and editable Word export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -118,10 +118,10 @@ pub fn questions(project: &Project, limit: usize, threshold: f32) -> Result<Vec<
             if out.len() >= limit {
                 return Ok(out);
             }
+            let digest = fingerprint(block)?;
+            let qid = format!("p{n}-b{index}-{}", &digest[..10]);
             if answered.answers.iter().any(|a| {
-                !a.skip
-                    && !a.replacement.trim().is_empty()
-                    && a.id.starts_with(&format!("p{n}-b{index}-"))
+                !a.skip && !a.replacement.trim().is_empty() && a.id == qid
             }) {
                 continue;
             }
@@ -170,9 +170,8 @@ pub fn questions(project: &Project, limit: usize, threshold: f32) -> Result<Vec<
                 };
                 ("text".into(), reading, prompt.into())
             };
-            let digest = fingerprint(block)?;
             out.push(Question {
-                id: format!("p{n}-b{index}-{}", &digest[..10]),
+                id: qid,
                 page: *n,
                 block: index,
                 field,
