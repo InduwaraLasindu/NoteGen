@@ -2,7 +2,7 @@ name: Rust verification and Windows executable
 on:
   push:
     branches: [main]
-    paths-ignore: ['legacy/**', 'docs/**', 'README.md', 'CONTRIBUTING.md', 'THIRD_PARTY_NOTICES.md']
+    paths: ['Cargo.toml', 'Cargo.lock', 'rust/**', 'scripts/Build-Windows.ps1', 'scripts/Setup-Runtime.ps1', 'scripts/Install-Models.ps1', 'scripts/Smoke-AI.ps1', '.github/workflows/verify-and-build.yml']
   pull_request:
   workflow_dispatch:
 permissions:
