@@ -117,7 +117,8 @@ invalidate recognition. Existing output files are protected.
 
 Install Rust 1.99.1 MSVC and Microsoft C++ Build Tools. Build the GUI/CLI with
 cargo build --locked --release --features desktop --bins.
-Run scripts/Build-Windows.ps1 with Tesseract installed to package the app.
+Use PowerShell 7 or newer to run scripts/Build-Windows.ps1 with Tesseract installed to
+package the app. Its license inventory preserves case-sensitive Cargo metadata keys.
 CI tests native scans on Linux/Windows, verifies the CPU runtime installer, checks
 packaged Word/table output and starts the executable extracted from its ZIP.
 

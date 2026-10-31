@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 [CmdletBinding()]
 param([switch]$SkipBuild)
 $ErrorActionPreference='Stop'
@@ -33,8 +34,9 @@ if(-not(Test-Path "$tess/tesseract.exe")){$tess=(Get-Command tesseract.exe -Erro
 if(-not(Test-Path "$tess/tessdata")){throw 'Tesseract installation folder must contain tessdata; a command shim cannot be bundled.'}
 Copy-Item "$tess/*" "$package/runtime/tesseract" -Recurse -Force
 Get-ChildItem "$package/runtime/tesseract/tessdata" -Filter '*.traineddata' | Where-Object Name -NotIn @('eng.traineddata','osd.traineddata') | Remove-Item
-$metadata=& cargo metadata --locked --all-features --format-version 1 | ConvertFrom-Json
+$metadataJson=& cargo metadata --locked --all-features --format-version 1
 if($LASTEXITCODE -ne 0){throw 'Cargo metadata failed'}
+$metadata=$metadataJson | ConvertFrom-Json -AsHashtable
 $records=foreach($p in $metadata.packages){
  if($p.source){
   $destination="$package/licenses/$($p.name)-$($p.version)"

@@ -78,6 +78,14 @@ Windows builds release executables, verifies native runtime installation, packag
 required printed-OCR dependencies/licenses, and checks a raster PDF through the packaged
 CLI for 1250 plus a real Word table. It starts the desktop extracted from the portable ZIP.
 
+The first motion run passed all Windows AI checks, including all three real adapters
+and the Maximum Accuracy pipeline (585.91 seconds on that CPU runner), then exposed a
+packaging-only PowerShell JSON case-collision in transitive dependency metadata. The
+packager now uses a case-sensitive hashtable and explicitly requires PowerShell 7.
+Its production license-inventory block was exercised against all 581 actual Cargo
+packages in PowerShell 7.6.9; both `USB` and `usb` remain distinct and license files
+were collected successfully. Full Windows ZIP/startup status remains an Actions gate.
+
 Screenshots show the actual Rust app in the test machine's CPU mode. They do not depict
 an RTX machine or fabricated performance telemetry.
 
