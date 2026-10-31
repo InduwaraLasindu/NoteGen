@@ -12,7 +12,12 @@ Python is not needed to run the current app.
 [Windows builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 · [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
 
-Choose the latest **successful Rust workflow**, then download **NoteGen-Rust-Windows-x64**
+[Download the verified Windows build — 31 October 2026](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803/artifacts/13031096506)
+(about 86 MB). The [verification run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803) passed on Windows and Linux;
+65 ordinary tests per platform, real CPU AI conversion and extracted-ZIP desktop startup
+are recorded in [Verification](docs/TESTING.md). AI model weights are separate downloads.
+
+For subsequent builds, choose the latest **successful Rust workflow**, then download **NoteGen-Rust-Windows-x64**
 under Artifacts. Extract the outer artifact and portable ZIP inside it. English printed
 OCR and Word export work immediately. For AI, run inside the extracted NoteGen folder:
 

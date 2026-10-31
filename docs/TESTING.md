@@ -4,6 +4,21 @@ Implemented behavior, mocked/protocol tests and physical quality evidence are se
 Use [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 for exact Windows/Linux results, native visual evidence and the executable download.
 
+## Verified build — 31 October 2026
+
+[Windows/Linux run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803) at source commit
+[`1dd2606`](https://github.com/InduwaraLasindu/NoteGen/commit/1dd2606040305fc12c06b8396004c81485c0917b)
+passed: **65 ordinary tests on each OS**, strict fmt/clippy, native Linux desktop captures,
+Windows runtime/model installation, three explicit real-model adapter tests, Maximum
+Accuracy conversion, packaged raster-PDF OCR/table export and startup of the desktop
+extracted from the portable ZIP. The final Windows Maximum run took 541.19 seconds on
+that CPU runner. No RTX measurements are implied.
+
+[Download the verified Windows artifact](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803/artifacts/13031096506) (85,938,095 bytes;
+Actions retention through 30 November 2026). It contains the portable ZIP and its SHA256
+file. Artifact archive digest: `37956f4dd333aa61e71b242ae63ff73dafc17309c9562ca583e34477eb2c29d9`.
+This digest identifies the outer Actions artifact, not the inner portable ZIP.
+
 ## Iteration gates
 
 | Iteration | Evidence |
@@ -84,7 +99,7 @@ packaging-only PowerShell JSON case-collision in transitive dependency metadata.
 packager now uses a case-sensitive hashtable and explicitly requires PowerShell 7.
 Its production license-inventory block was exercised against all 581 actual Cargo
 packages in PowerShell 7.6.9; both `USB` and `usb` remain distinct and license files
-were collected successfully. Full Windows ZIP/startup status remains an Actions gate.
+were collected successfully. The final Windows run passed the complete ZIP and extracted-desktop startup gates.
 
 Screenshots show the actual Rust app in the test machine's CPU mode. They do not depict
 an RTX machine or fabricated performance telemetry.

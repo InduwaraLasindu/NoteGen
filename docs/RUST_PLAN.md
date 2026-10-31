@@ -26,7 +26,8 @@ are required evidence. No universal accuracy or zero-error claim is made.
    and reduced motion, queue recovery, worker failure, bounded live logs, safe output
    names and saved human corrections. Fixed texture-size handling for small adapters.
 4. Windows release, clean Linux/Windows CI, package smoke tests and hardware acceptance.
-   Gate: tests + format + clippy + actual compiled CLI conversion/export and desktop startup.
+   Gate passed 31 October 2026: 65 tests on Windows/Linux, strict format/clippy, actual
+   model inference, native ZIP conversion/table export and extracted-desktop startup.
 5. Motion polish and reader recovery. Gate passed locally: 61 ordinary tests, strict
    format/clippy, real native workspace/Advanced/review captures and motion recording.
    Includes eased interactions, scan/orbit graphics, progress sheen, completion drawing,
@@ -94,3 +95,8 @@ recovered into GitHub and the GPU lockfile/formatting were restored. CI checks t
 source and lockfile without rewriting them, runs all ordinary tests/clippy, captures
 native UI evidence, and compiles/tests the Windows ZIP.
 Final completion depends on successful Windows/Linux jobs, not an inferred build result.
+
+The final [Windows/Linux acceptance run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803) is green at source commit
+`1dd2606040305fc12c06b8396004c81485c0917b`. The [portable Windows artifact](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803/artifacts/13031096506)
+was published after every gate passed. Remaining physical RTX/corpus acceptance above
+still applies; passing these checks is not a universal accuracy or zero-error guarantee.
