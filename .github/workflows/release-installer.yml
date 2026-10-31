@@ -1,0 +1,165 @@
+name: Windows installer and GitHub Release
+on:
+  push:
+    branches: [main]
+    paths:
+      - installer/**
+      - scripts/Build-Installer.ps1
+      - scripts/Test-Installer.ps1
+      - scripts/Configure-AI.ps1
+      - .github/workflows/release-installer.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Installer release version
+        default: '0.2.0'
+        required: true
+      source_run:
+        description: Successful Rust verification workflow run
+        default: '41168595803'
+        required: true
+      source_sha:
+        description: Exact verified Rust source commit
+        default: '1dd2606040305fc12c06b8396004c81485c0917b'
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: notegen-installer
+  cancel-in-progress: false
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.payload.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ inputs.version || '0.2.0' }}
+      SOURCE_RUN: ${{ inputs.source_run || '41168595803' }}
+      SOURCE_SHA: ${{ inputs.source_sha || '1dd2606040305fc12c06b8396004c81485c0917b' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify and download the proven Rust build
+        id: payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$' -or $env:SOURCE_RUN -notmatch '^\d+$' -or $env:SOURCE_SHA -notmatch '^[a-f0-9]{40}$'){throw 'Invalid release inputs'}
+          $run=(& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN") | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0){throw 'Source workflow lookup failed'}
+          if($run.conclusion -ne 'success' -or $run.status -ne 'completed' -or $run.head_sha -ne $env:SOURCE_SHA -or $run.path -ne '.github/workflows/verify-and-build.yml'){throw 'Source build is not the expected verified Rust workflow'}
+          $artifacts=(& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/artifacts") | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0){throw 'Artifact lookup failed'}
+          $artifact=$artifacts.artifacts | Where-Object name -EQ 'NoteGen-Rust-Windows-x64' | Select-Object -First 1
+          if(-not $artifact -or $artifact.expired -or -not $artifact.digest.StartsWith('sha256:')){throw 'Verified source artifact is unavailable'}
+          if($env:SOURCE_RUN -eq '41168595803' -and $artifact.digest -ne 'sha256:37956f4dd333aa61e71b242ae63ff73dafc17309c9562ca583e34477eb2c29d9'){throw 'Pinned source artifact digest changed'}
+          & gh run download $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --name NoteGen-Rust-Windows-x64 --dir build/verified-artifact
+          if($LASTEXITCODE -ne 0){throw 'Verified artifact download failed'}
+          $zip='build/verified-artifact/NoteGen-Rust-Windows-x64.zip'
+          $expected=(Get-Content "$zip.sha256" -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          $actual=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($expected -notmatch '^[a-f0-9]{64}$' -or $actual -ne $expected){throw 'Portable ZIP checksum mismatch'}
+          Expand-Archive $zip build/installer-payload -Force
+          $manifest=@{version=$env:RELEASE_VERSION;source_run=[long]$env:SOURCE_RUN;source_sha=$env:SOURCE_SHA;source_artifact=$artifact.id;source_artifact_digest=$artifact.digest;portable_zip_sha256=$actual;installer_source_sha=$env:GITHUB_SHA}
+          $manifest | ConvertTo-Json | Set-Content build/installer-provenance.json -Encoding utf8
+          "version=$env:RELEASE_VERSION" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Install the SHA256-pinned compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $download=Join-Path $env:RUNNER_TEMP 'innosetup-7.1.1-x64.exe'
+          & curl.exe -fL --retry 2 --max-time 180 https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe -o $download
+          if($LASTEXITCODE -ne 0){throw 'Compiler download failed'}
+          if((Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant() -ne '8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0'){throw 'Compiler checksum mismatch'}
+          $compilerDir=Join-Path $env:RUNNER_TEMP 'NoteGen-InnoSetup'
+          $process=Start-Process $download -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',('/DIR="{0}"' -f $compilerDir)) -PassThru -Wait
+          if($process.ExitCode -ne 0 -or -not(Test-Path "$compilerDir/ISCC.exe")){throw "Compiler setup failed: $($process.ExitCode)"}
+          "NOTEGEN_ISCC=$compilerDir/ISCC.exe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Check the shipped PowerShell entry points
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($file in @('scripts/Build-Installer.ps1','scripts/Test-Installer.ps1','scripts/Configure-AI.ps1')){
+            $tokens=$null;$errors=$null
+            [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file),[ref]$tokens,[ref]$errors) | Out-Null
+            if($errors.Count){throw ($errors | Out-String)}
+          }
+      - name: Compile the installer
+        shell: pwsh
+        run: ./scripts/Build-Installer.ps1 -Payload ./build/installer-payload/NoteGen -Compiler $env:NOTEGEN_ISCC -Version $env:RELEASE_VERSION
+      - name: Install, launch, upgrade and uninstall the actual EXE
+        shell: pwsh
+        run: ./scripts/Test-Installer.ps1 -Installer "./dist/installer/NoteGen-Setup-$env:RELEASE_VERSION.exe" -Version $env:RELEASE_VERSION
+      - name: Seal the tested release manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $manifest=Get-Content build/installer-provenance.json -Raw | ConvertFrom-Json -AsHashtable
+          $exe="dist/installer/NoteGen-Setup-$env:RELEASE_VERSION.exe"
+          $manifest.installer_sha256=(Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest.installer_bytes=(Get-Item $exe).Length
+          $manifest.app_sha256=(Get-FileHash build/installer-payload/NoteGen/NoteGen.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest.validation=@(Get-Content build/installer-evidence/passed.txt)
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content dist/installer/installer-manifest.json -Encoding utf8
+          @"
+          Install NoteGen directly on Windows 10/11 x64-compatible systems.
+
+          Download **NoteGen-Setup-$env:RELEASE_VERSION.exe** below and run the wizard.
+          Installation is per user and does not require administrator rights. Start menu
+          shortcuts and an optional desktop shortcut are included. Uninstall from Windows
+          Settings; user models and document data are preserved.
+
+          English printed OCR and Word export work immediately. For AI, choose
+          **NoteGen → Set up local AI** in the Start menu. Runtime and model downloads are
+          separate, selected for available RAM/VRAM, and verified before use. Conversion
+          remains local. No Python or Rust installation is needed.
+
+          Validation: actual Windows install, native dependencies, GUI launch, Word export,
+          same-version upgrade/reinstall, shortcut registration and uninstall/data preservation.
+          The executable payload is the exact Rust build from successful run $env:SOURCE_RUN
+          at commit $env:SOURCE_SHA, with 65 tests per OS and real CPU model conversion checks.
+          Actual RTX performance and broad difficult-handwriting accuracy remain unmeasured.
+
+          The installer is unsigned. SHA256 and provenance are included with the assets.
+          [Usage and AI setup](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/INSTALLER.md)
+          "@ | Set-Content dist/installer/release-notes.md -Encoding utf8
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: NoteGen-Windows-Installer-${{ steps.payload.outputs.version }}
+          path: dist/installer/*
+          retention-days: 30
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: Installer-validation-evidence
+          path: build/installer-evidence/*
+          if-no-files-found: ignore
+          retention-days: 30
+  publish:
+    needs: installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.installer.outputs.version }}
+    steps:
+      - name: Download only the tested installer assets
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "NoteGen-Windows-Installer-$RELEASE_VERSION" --dir dist
+      - name: Verify installer hash and publish a GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check "NoteGen-Setup-$RELEASE_VERSION.exe.sha256"
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'This release version already exists; use a new version instead of replacing published binaries.'
+            exit 1
+          fi
+          gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Windows installer" --notes-file release-notes.md --draft
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
