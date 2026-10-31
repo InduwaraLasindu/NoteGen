@@ -1,0 +1,49 @@
+{
+  "dataset": "Teklia/IAM-line",
+  "split": "test",
+  "row": 0,
+  "model_ids": [
+    "tesseract",
+    "lighton3-1b",
+    "qwen35-2b",
+    "glm-ocr"
+  ],
+  "readers": [
+    {
+      "family": "tesseract",
+      "normalized_lexical_char_edits": 36,
+      "reference_chars": 69
+    },
+    {
+      "family": "lighton3",
+      "normalized_lexical_char_edits": 0,
+      "reference_chars": 69
+    },
+    {
+      "family": "qwen35",
+      "normalized_lexical_char_edits": 0,
+      "reference_chars": 69
+    },
+    {
+      "family": "glm",
+      "normalized_lexical_char_edits": 0,
+      "reference_chars": 69
+    }
+  ],
+  "selected_lexical_char_edits": 0,
+  "normalization": "NFKC, casefold, alphanumeric only; punctuation/spacing/case are excluded, not standard CER",
+  "seconds": 91.64,
+  "review_required": true,
+  "warnings": [
+    "OCR returned no source grounding; compare reading order and diagrams with the scan.",
+    "Independent readers disagree. Selected an existing reading; alternatives are preserved for review.",
+    "Numeric disagreement: check every conflicting amount, date, unit or equation against the scan.",
+    "Difficult-region crop readings are preserved in evidence. Review conflicting regions."
+  ],
+  "source": "https://huggingface.co/datasets/Teklia/IAM-line",
+  "source_file_sha256": "2b7c98bbd7c5d1a566b5fdee8b19dd5f2b83392f60e31ca29a49ca402d9b23da",
+  "fixture": "Original sample on a white raster canvas, written as a 150 DPI image-only PDF; deskew/orientation disabled for the line crop.",
+  "runtime": "llama.cpp b11998 native Ubuntu x64 CPU build",
+  "inference_threads": 8,
+  "limits": "One public line; unknown training overlap; not a handwriting corpus benchmark. No measured RTX performance or broad accuracy claim."
+}

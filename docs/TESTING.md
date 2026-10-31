@@ -57,6 +57,18 @@ These demonstrate native inference/adapters on synthetic print, tables and one s
 chart. They do not measure broad handwriting accuracy or diagram understanding. Model revisions/SHA256 are in
 rust/downloads.json. Large model tests are opt-in and were invoked explicitly.
 
+### Public handwriting sanity check
+
+A real English handwritten line from [Teklia/IAM-line](https://huggingface.co/datasets/Teklia/IAM-line),
+test split row 0, was rasterized into a PDF and converted with the release CLI in Maximum
+Accuracy on CPU. LightOnOCR-3 1B, Qwen3.5 2B and GLM-OCR each matched all reference letters
+and digits after NFKC normalization, case folding and removal of punctuation/spacing.
+The printed Tesseract baseline had 36 edits over the 69 normalized reference characters.
+This is a limited lexical comparison, **not standard CER** and not a broad accuracy score.
+The seven readings, disagreement warnings and review requirement were retained; Word
+export completed in 91.64 seconds. Possible training overlap is unknown. The source image
+is not bundled. Its digest and reproducibility metadata are in [the QA record](QA_2026-10-31.json).
+
 ## CI/package verification
 
 Both operating systems install PDFium/Tesseract, run Rust format, clippy with all
