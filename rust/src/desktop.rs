@@ -499,7 +499,8 @@ impl Desktop {
                     for (preset,title,help) in [(Preset::Fast,"Fast","Printed OCR, no AI"),(Preset::Balanced,"Balanced","Local OCR and vision readers"),(Preset::Accuracy,"Accuracy","Strongest fitting OCR and vision models"),(Preset::Maximum,"Maximum accuracy","Independent readers plus difficult-region retries; slower")] {
                         let amount=ui.ctx().animate_bool_with_time(egui::Id::unique(format!("preset-{preset:?}")),self.state.settings.preset==preset,motion::transition(&self.state.settings.ui));
                         let fill=self.surface().lerp_to_gamma(self.accent(),0.20*amount);
-                        let response=ui.add(egui::Button::new(title).selected(self.state.settings.preset==preset).fill(fill).min_size(Vec2::new(118.,38.))).on_hover_text(help);
+                        let allowed=self.worker.is_none() && !(self.state.settings.handwriting && preset==Preset::Fast);
+                        let response=ui.add_enabled(allowed,egui::Button::new(title).selected(self.state.settings.preset==preset).fill(fill).min_size(Vec2::new(118.,38.))).on_hover_text(help).on_disabled_hover_text("Fast is printed OCR only. Disable handwriting to use Fast; settings are locked during conversion.");
                         self.hover_ring(ui,&response,&format!("hover-{preset:?}"));
                         if response.clicked() && self.worker.is_none(){self.state.settings.preset=preset;ctx.request_repaint();}
                     }
@@ -507,7 +508,10 @@ impl Desktop {
                 );
                 ui.add_space(10.);
                 ui.horizontal_wrapped(|ui|{
-                    ui.add_enabled(self.worker.is_none(),egui::Checkbox::new(&mut self.state.settings.handwriting,"Handwritten / difficult scan"));
+                    let changed=ui.add_enabled(self.worker.is_none(),egui::Checkbox::new(&mut self.state.settings.handwriting,"Handwritten / difficult scan")).changed();
+                    if changed && self.state.settings.handwriting && self.state.settings.preset==Preset::Fast {
+                        self.state.settings.preset=Preset::Accuracy;
+                    }
                     ui.add_space(12.);
                     ui.label("Pages");
                     ui.add_enabled(self.worker.is_none(),egui::TextEdit::singleline(&mut self.state.settings.page_range).hint_text("All · e.g. 1-4, 8").desired_width(145.));

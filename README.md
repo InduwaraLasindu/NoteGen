@@ -32,7 +32,7 @@ or document upload.
 | Capability | Behavior |
 |---|---|
 | Adaptive hardware | CPU/SIMD, RAM and CUDA/Vulkan discovery; strongest fitting installed readers; memory re-admission before model load |
-| Four presets | Fast printed OCR; Balanced with selective vision; Accuracy on every page; Maximum Accuracy with independent families and difficult-region crop retries |
+| Four presets | Fast printed OCR without loading/checksumming AI assets; Balanced with selective vision; Accuracy on every page; Maximum Accuracy with independent families and difficult-region crop retries |
 | Print and handwriting | Tesseract baseline, LightOnOCR-3 / GLM-OCR specialists and Qwen vision; original source and all alternative readings retained |
 | Ensemble decisions | Weighted medoid selects an observed transcript; duplicate models/crops do not count as independent agreement; numeric conflicts require review |
 | Tables | Native ruled-grid recovery and HTML/Markdown/JSON tables; real Word cells, merges and repeated headers |
@@ -79,7 +79,7 @@ conversions. Setup pins runtime b11998 and immutable model revisions/checksums.
 Real PDFium/Tesseract conversion and actual GLM-OCR/LightOnOCR-3/Qwen3.5 2B CPU inference have
 been exercised on a raster-only printed scan and accounting table. Tests cover model
 protocols, faults/cancellation, memory profiles, consensus, persistence, Word structure
-and native desktop rendering. The motion iteration passes 61 ordinary Rust tests,
+and native desktop rendering. The current source passes 64 ordinary Rust tests,
 format and clippy locally. Windows/Linux CI compiles the executables and smoke-tests
 the portable package. See [exact evidence and limits](docs/TESTING.md).
 

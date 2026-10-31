@@ -428,6 +428,92 @@ fn registry_checks_gguf_and_local_manifest() {
     assert!(runtime::inventory(&t.path().join("models")).is_err());
 }
 #[test]
+fn cli_retains_handwriting_requested_by_the_settings_file() {
+    let t = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        preset: Preset::Balanced,
+        handwriting: true,
+        ..Default::default()
+    };
+    let config = t.path().join("settings.json");
+    atomic_json(&config, &settings).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_notegen-cli"))
+        .arg("--settings")
+        .arg(&config)
+        .arg("convert")
+        .arg(t.path().join("scan.pdf"))
+        .args(["--preset", "fast", "-o"])
+        .arg(t.path().join("out.docx"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("NG102") && error.contains("Handwriting"),
+        "{error}"
+    );
+}
+#[test]
+fn fast_ignores_broken_ai_assets_but_selected_readers_require_integrity() {
+    let t = tempfile::tempdir().unwrap();
+    let source = t.path().join("scan.pdf");
+    pdf(&source, &fixture());
+    let weights = t.path().join("weights.gguf");
+    let projector = t.path().join("projector.gguf");
+    fs::write(&weights, b"GGUFbefore").unwrap();
+    fs::write(&projector, b"GGUFprojector").unwrap();
+    let models = t.path().join("models");
+    runtime::register(&models, "glm-ocr", &weights, &projector).unwrap();
+    fs::write(&weights, b"GGUFchanged").unwrap();
+    let mut settings = Settings {
+        preset: Preset::Fast,
+        backend: Backend::Cpu,
+        models_dir: models.clone(),
+        pdfium: pdfium(),
+        auto_rotate: false,
+        dpi: 150,
+        ..Default::default()
+    };
+    let fast = notegen::pipeline::convert(
+        &source,
+        &t.path().join("fast.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    assert!(
+        fast.project
+            .load(1)
+            .unwrap()
+            .content
+            .plain()
+            .contains("1250")
+    );
+    assert!(fast.plan.models.is_empty());
+    settings.preset = Preset::Accuracy;
+    let error = notegen::pipeline::convert(
+        &source,
+        &t.path().join("ai.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("NG200"));
+    assert!(error.to_string().contains("checksum changed"));
+    fs::write(models.join("glm-ocr.notegen.json"), b"broken registry").unwrap();
+    settings.preset = Preset::Fast;
+    notegen::pipeline::convert(
+        &source,
+        &t.path().join("fast-again.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+}
+#[test]
 fn pdf_bounds_and_real_tesseract_pipeline() {
     let library = pdfium();
     assert!(

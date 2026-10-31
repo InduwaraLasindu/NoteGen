@@ -143,7 +143,7 @@ fn run() -> Result<()> {
                     }
                 };
             }
-            s.handwriting = handwriting;
+            s.handwriting |= handwriting;
             if let Some(p) = pages {
                 s.page_range = p;
             }

@@ -99,6 +99,28 @@ fn overrides_are_respected_and_validated() {
     }
 }
 #[test]
+fn handwriting_cannot_silently_use_the_printed_only_preset() {
+    for preset in [
+        Preset::Fast,
+        Preset::Balanced,
+        Preset::Accuracy,
+        Preset::Maximum,
+    ] {
+        let s = Settings {
+            preset,
+            handwriting: true,
+            ..Default::default()
+        };
+        if preset == Preset::Fast {
+            let e = s.validate().unwrap_err();
+            assert!(e.to_string().contains("NG102"));
+            assert!(e.to_string().contains("Handwriting"));
+        } else {
+            s.validate().unwrap();
+        }
+    }
+}
+#[test]
 fn malicious_endpoints_blocked() {
     for u in [
         "https://example.com:8",

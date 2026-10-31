@@ -41,8 +41,14 @@ pub fn convert(
         Fault::new("NG100", "Choose a PDF input")
     );
     let hw = hardware::detect_for(s, c);
-    let mut installed = runtime::inventory(&s.models_dir)?;
-    for model in &mut installed {
+    // Printed OCR must not depend on (or scan gigabytes of) unrelated AI assets.
+    let installed = if s.preset == Preset::Fast {
+        vec![]
+    } else {
+        runtime::inventory(&s.models_dir)?
+    };
+    let mut plan = planning::build(&hw, s, &installed)?;
+    for model in &mut plan.models {
         c.check()?;
         activity.emit(
             "verify",
@@ -67,7 +73,6 @@ pub fn convert(
         }
         model.sha256 = digest;
     }
-    let mut plan = planning::build(&hw, s, &installed)?;
     if s.preset != Preset::Fast && (s.handwriting || s.preset != Preset::Balanced) {
         anyhow::ensure!(
             !plan.models.is_empty(),

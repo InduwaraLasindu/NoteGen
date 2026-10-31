@@ -47,6 +47,7 @@ No account or permanent execution-policy change is needed. Specific model select
 1. Choose/drop PDFs, an output folder and optional page range (1-4,8).
 2. Choose Fast, Balanced, Accuracy or Maximum accuracy. Enable handwriting for
    handwritten pages. Maximum trades time for additional independent readings/crops.
+   Enabling handwriting from Fast selects Accuracy; Fast is printed OCR only.
 3. Convert and open Live activity. Pause acts at safe checkpoints; cancellation
    also aborts an active inference request. Completed evidence remains on disk.
 4. Open Review results. Compare source boxes with transcripts; edit text, table cells,
@@ -64,7 +65,9 @@ timeout, rendering/crops, agreement/review thresholds, sampling/seed, languages,
 preprocessing and Word typography. Zero means adaptive where labeled. Models supports
 automatic or manual selection, GGUF registration and runtime paths. All parameters
 exposes validated JSON; settings import/export is supported. Appearance controls theme,
-colors, scale, motion, FPS, rounding, compact spacing and reduced motion.
+colors, scale, rounding and compact spacing. Motion controls include scan/orbit graphics,
+speed, transition timing, density, glow, active/idle FPS and reduced motion. Preview
+appearance while a conversion runs; changing recognition parameters waits for the job.
 
 Require verified acceleration to fail explicitly if model layers did not offload.
 The UI renderer and AI backend are independent. CPU stages still use CPU resources.

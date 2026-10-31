@@ -13,8 +13,9 @@ for exact Windows/Linux results, native visual evidence and the executable downl
 | 3 | 39 tests with all features/targets + format/clippy: Advanced tabs, text/table/figure review, light/dark/reduced motion, queue/worker lifecycle, bounded logs, human corrections |
 | 4 | Additional real-model mixed-format regression, CPU-only isolation, manual selection, Balanced scheduling and draft-save protection; Windows/Linux/package gates in CI |
 | 5 | 61 ordinary tests + format/clippy locally: motion/reduced-motion render comparisons, animation timing and frame budgets, backward-compatible appearance settings, invalid AI grounding recovery and raw response evidence |
+| 6 | 64 ordinary tests + format/clippy locally: Fast conversion with damaged/invalid unused AI registrations, selected-reader checksum rejection, handwriting/preset validation and CLI settings preservation |
 
-The recovered source passes all 61 ordinary tests with all features/targets on Linux,
+The current source passes all 64 ordinary tests with all features/targets on Linux,
 plus strict format and clippy checks. The native desktop was started under an authenticated
 virtual X display; workspace, Advanced and review were captured, and the actual scanning
 graphic was recorded for four seconds. The screenshot harness decodes its output before

@@ -230,6 +230,11 @@ impl Default for Appearance {
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         let bad = |message| Err(Fault::new("NG102", message).into());
+        if self.handwriting && self.preset == Preset::Fast {
+            return bad(
+                "Handwriting requires Balanced, Accuracy or Maximum Accuracy. Fast is printed OCR only.",
+            );
+        }
         if self.dpi != 0 && !(100..=600).contains(&self.dpi) {
             return bad("DPI must be 0 (auto) or 100–600");
         }
