@@ -13,9 +13,9 @@ for exact Windows/Linux results, native visual evidence and the executable downl
 | 3 | 39 tests with all features/targets + format/clippy: Advanced tabs, text/table/figure review, light/dark/reduced motion, queue/worker lifecycle, bounded logs, human corrections |
 | 4 | Additional real-model mixed-format regression, CPU-only isolation, manual selection, Balanced scheduling and draft-save protection; Windows/Linux/package gates in CI |
 | 5 | 61 ordinary tests + format/clippy locally: motion/reduced-motion render comparisons, animation timing and frame budgets, backward-compatible appearance settings, invalid AI grounding recovery and raw response evidence |
-| 6 | 64 ordinary tests + format/clippy locally: Fast conversion with damaged/invalid unused AI registrations, selected-reader checksum rejection, handwriting/preset validation and CLI settings preservation |
+| 6 | 65 ordinary tests + format/clippy locally: Fast conversion with damaged/invalid unused AI registrations, selected-reader checksum rejection, handwriting/preset validation, CLI settings preservation and honest single-family agreement labels |
 
-The current source passes all 64 ordinary tests with all features/targets on Linux,
+The current source passes all 65 ordinary tests with all features/targets on Linux,
 plus strict format and clippy checks. The native desktop was started under an authenticated
 virtual X display; workspace, Advanced and review were captured, and the actual scanning
 graphic was recorded for four seconds. The screenshot harness decodes its output before
@@ -46,6 +46,12 @@ fixture. NOTEGEN_FIXTURE_DIR exports its PNG/PDF for independent package tests.
   Valid coordinates remain unchanged; malformed table structure is still rejected.
   Raw reader responses are retained separately under the local project/runtime
   `responses` directory for diagnosis, without putting document text in live log messages.
+- A release-CLI Maximum Accuracy conversion completed with Tesseract, LightOnOCR-3,
+  Qwen3.5 and GLM: four full-page families plus three crop readings. Native Word XML
+  contains the reconstructed table (1250) and two retained source images. This run
+  took 197.69 seconds on CPU with eight inference threads and a resumed printed-OCR
+  checkpoint; it is not a cold-start benchmark. Agreement was 84.0%, and source/grounding
+  warnings correctly required review. The native review capture shows this real result.
 
 These demonstrate native inference/adapters on synthetic print, tables and one simple
 chart. They do not measure broad handwriting accuracy or diagram understanding. Model revisions/SHA256 are in

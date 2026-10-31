@@ -98,6 +98,23 @@ pub fn save_review(project: &Project, page: &mut Page, approved: bool) -> Result
     page.reviewed = approved;
     project.save(page)
 }
+fn evidence_label(page: &Page) -> String {
+    let families = page
+        .candidates
+        .iter()
+        .map(|c| c.family.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    match families {
+        0 => "No reader evidence".into(),
+        1 => "Single reader family · independent agreement unavailable".into(),
+        _ => format!(
+            "Agreement {:.1}% · {families} reader families · {} readings",
+            page.agreement * 100.,
+            page.candidates.len()
+        ),
+    }
+}
 enum Message {
     Event(Event),
     Complete(Box<Completed>),
@@ -1276,7 +1293,7 @@ impl Desktop {
                 if ui.add_enabled(r.index+1<r.project.manifest.pages.len() && !r.dirty,egui::Button::new("Next →")).clicked(){
                     next=Some(r.index+1);
                 }
-                ui.small(format!("Agreement {:.1}% · {} readings",r.page.agreement*100.,r.page.candidates.len()));
+                ui.small(evidence_label(&r.page)).on_hover_text("Reader agreement is not measured accuracy. Crops from one model family do not provide independent agreement; compare uncertain content with the source.");
                 if r.dirty{
                     ui.colored_label(Color32::from_rgb(241,187,111),"Unsaved edits");
                 }
@@ -1845,6 +1862,35 @@ mod acceptance {
         );
         assert!(!result.shapes.is_empty());
         result.textures_delta.clear();
+    }
+    #[test]
+    fn single_reader_display_never_implies_independent_agreement() {
+        let mut page = Page {
+            agreement: 1.,
+            ..Default::default()
+        };
+        assert_eq!(evidence_label(&page), "No reader evidence");
+        let candidate = Candidate {
+            region: None,
+            model_id: "ocr".into(),
+            family: "one".into(),
+            view: "full".into(),
+            content: PageContent::default(),
+            reliability: 1.,
+        };
+        page.candidates.push(candidate.clone());
+        assert!(evidence_label(&page).contains("unavailable"));
+        assert!(!evidence_label(&page).contains("100"));
+        page.candidates.push(Candidate {
+            view: "crop-0".into(),
+            ..candidate.clone()
+        });
+        assert!(evidence_label(&page).contains("unavailable"));
+        page.candidates.push(Candidate {
+            family: "two".into(),
+            ..candidate
+        });
+        assert!(evidence_label(&page).contains("2 reader families"));
     }
     #[test]
     fn every_advanced_tab_renders_and_logs_are_bounded() {

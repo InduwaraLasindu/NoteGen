@@ -32,11 +32,12 @@ are required evidence. No universal accuracy or zero-error claim is made.
    Includes eased interactions, scan/orbit graphics, progress sheen, completion drawing,
    animated drawers/windows, reduced motion and focus-aware frame budgets. Real Qwen3.5
    2B full-page/crop inference passes; ungrounded AI boxes preserve source and require review.
-6. Preset isolation and handwriting safeguards. Gate passed locally: 64 ordinary tests
+6. Preset isolation and handwriting safeguards. Gate passed locally: 65 ordinary tests
    plus format/clippy. Fast skips unused AI registrations and weight hashing; AI modes
    verify the selected readers. The GUI selects Accuracy when handwriting is enabled
    from Fast, and conflicting CLI/JSON settings return NG102. CLI settings retain an
-   existing handwriting request.
+   existing handwriting request. A single reader family never displays a percentage
+   as independent agreement. A real four-family Maximum conversion and Word export passed.
 
 Every gate must pass before the following stage is declared complete. GPU quality tests
 and private handwriting corpus acceptance are distinct from mocked/protocol tests.
