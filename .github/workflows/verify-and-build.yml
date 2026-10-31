@@ -86,10 +86,6 @@ jobs:
       - name: Release Windows executables
         if: runner.os == 'Windows'
         run: cargo build --locked --release --features desktop --bins -j 2
-      - name: Real Windows OCR, vision and Maximum Accuracy inference
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/Smoke-AI.ps1
       - name: Package and test actual scanned-PDF conversion
         if: runner.os == 'Windows'
         shell: pwsh
@@ -103,6 +99,10 @@ jobs:
           Start-Sleep -Seconds 8
           if ($process.HasExited) {throw "Desktop exited: $($process.ExitCode)"}
           Stop-Process -Id $process.Id
+      - name: Real Windows OCR, vision and Maximum Accuracy inference
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/Smoke-AI.ps1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: runner.os == 'Windows'
         with:
