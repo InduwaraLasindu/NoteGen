@@ -9,23 +9,29 @@ Python is not needed to run the current app.
 
 ![Native Rust desktop](docs/images/rust-workspace.png)
 
-[Windows builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
+[Windows installer](https://github.com/InduwaraLasindu/NoteGen/releases/latest)
+· [Portable builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 · [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
 
-[Download the verified Windows build — 31 October 2026](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803/artifacts/13031096506)
-(about 86 MB). The [verification run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803) passed on Windows and Linux;
-65 ordinary tests per platform, real CPU AI conversion and extracted-ZIP desktop startup
-are recorded in [Verification](docs/TESTING.md). AI model weights are separate downloads.
+[Download NoteGen-Setup-0.2.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.2.0/NoteGen-Setup-0.2.0.exe)
+(about 61 MB), run it, and follow the wizard. It installs for your Windows account,
+adds Start menu shortcuts and an optional desktop shortcut, and includes an uninstaller.
+[Release page](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.2.0) · [Installer guide](docs/INSTALLER.md)
 
-For subsequent builds, choose the latest **successful Rust workflow**, then download **NoteGen-Rust-Windows-x64**
-under Artifacts. Extract the outer artifact and portable ZIP inside it. English printed
-OCR and Word export work immediately. For AI, run inside the extracted NoteGen folder:
+English printed OCR and Word export work immediately. For local AI, choose
+**NoteGen → Set up local AI** in the Start menu. The setup downloads the appropriate
+runtime and model weights for this PC. Restart NoteGen afterward. No Python or Rust
+installation is needed. Models and document data survive upgrades/uninstall; a selected
+CUDA/Vulkan runtime survives upgrades.
 
-~~~powershell
-.\scripts\Setup-Runtime.ps1
-.\scripts\Install-Models.ps1 -MaximumAccuracy
-.\NoteGen.exe
-~~~
+The [installer acceptance run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41185176403) passed actual installation,
+GUI launch, PDF rasterization/OCR, editable Word-table export, same-version upgrade,
+shortcut/registry registration, uninstall and data preservation. The original
+[application verification](docs/TESTING.md) passed 65 tests per OS and real CPU AI conversion.
+The release includes SHA256 and provenance files. The installer is unsigned.
+
+Portable ZIPs remain available under the latest successful **Rust verification** workflow's
+**NoteGen-Rust-Windows-x64** artifact. Extract both ZIP layers and keep the folder together.
 
 Setup selects models for actual free memory, downloads pinned revisions, verifies SHA256
 and registers them. Models are separate, potentially large downloads. Once installed,

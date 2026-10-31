@@ -1,18 +1,22 @@
 # Windows setup and usage
 
-Use Windows 10/11 x64. Download the latest successful **Rust verification and Windows
-executable** run from [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml),
-then choose **NoteGen-Rust-Windows-x64**. Extract the Actions artifact ZIP and portable
-ZIP inside it. Keep the NoteGen folder together. English print works immediately;
-the native runtime, PDFium and Tesseract accompany the unsigned executables.
+Use Windows 10 build 19041 or newer, or Windows 11, on an x64-compatible system.
+Download **[NoteGen-Setup-0.2.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.2.0/NoteGen-Setup-0.2.0.exe)** from
+[GitHub Releases](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.2.0) and run the wizard. It installs per user without
+requesting administrator rights. Launch NoteGen from the Start menu. English print,
+PDFium, Tesseract and Word export are included. See [Installer details](INSTALLER.md).
+
+For portable builds, download **NoteGen-Rust-Windows-x64** from a successful
+[Rust workflow](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
+and extract both ZIP layers.
 
 ## One-time AI setup
 
-Open PowerShell inside the extracted NoteGen folder:
+Choose **NoteGen → Set up local AI** in the Start menu. Alternatively, open PowerShell
+inside the installation folder and run:
 
 ~~~powershell
-.\scripts\Setup-Runtime.ps1 -Backend Auto
-.\scripts\Install-Models.ps1 -MaximumAccuracy
+.\scripts\Configure-AI.ps1
 .\NoteGen.exe
 ~~~
 
@@ -39,7 +43,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Setup-Runtime.ps1
 No account or permanent execution-policy change is needed. Specific model selection:
 
 ~~~powershell
-.\scripts\Install-Models.ps1 -ModelIds glm-ocr,lighton3-1b,qwen35-2b
+.\scripts\Install-Models.ps1 -Root (Get-Location).Path -ModelIds glm-ocr,lighton3-1b,qwen35-2b
 ~~~
 
 ## Convert, inspect and correct

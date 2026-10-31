@@ -100,3 +100,18 @@ The final [Windows/Linux acceptance run](https://github.com/InduwaraLasindu/Note
 `1dd2606040305fc12c06b8396004c81485c0917b`. The [portable Windows artifact](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803/artifacts/13031096506)
 was published after every gate passed. Remaining physical RTX/corpus acceptance above
 still applies; passing these checks is not a universal accuracy or zero-error guarantee.
+
+## Iteration 7 — direct Windows installer
+
+The [v0.2.0 installer](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.2.0) is published and the
+[Windows acceptance workflow](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41185176403) is green. It reuses the
+immutable verified Rust payload, bundles app-local CRT dependencies and provides a
+per-user modern installer, shortcuts, AI setup and uninstall. Tests exercise real install,
+GUI launch, PDF OCR/Word table export, reinstall, preservation of selected runtime/model/
+document files, and uninstall cleanup. The Windows PowerShell 5 setup entry point was
+also tested. No unaffected Rust/model checks were repeated for packaging-only changes.
+
+Installer: 60,578,059 bytes; SHA256
+`c6b564a251352ac0c07235d9b9dca57a49f8333bc936003c6b115b7e6a236df8`.
+The installer is unsigned. The release includes a checksum and immutable build-provenance
+manifest; the application source remains the verified `1dd2606` Rust revision.
