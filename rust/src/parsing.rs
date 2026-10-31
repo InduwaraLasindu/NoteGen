@@ -175,7 +175,9 @@ pub fn lighton(text: &str) -> PageContent {
             continue;
         }
         let mut b = if c[1] == *"table" || c[1] == *"chart" {
-            html_table(body).or_else(||plain_blocks(body).into_iter().find(|b|b.kind=="table")).unwrap_or_else(|| Block::text(body))
+            html_table(body)
+                .or_else(|| plain_blocks(body).into_iter().find(|b| b.kind == "table"))
+                .unwrap_or_else(|| Block::text(body))
         } else {
             Block::text(body)
         };
@@ -214,4 +216,34 @@ pub fn structured(text: &str) -> Result<PageContent> {
         Fault::new("NG201", "Model returned empty page data")
     );
     Ok(p)
+}
+
+/// Keep a useful reading when the model cannot locate a region. Never guess units
+/// or invent a precise crop: preserve the full source for an uncertain figure.
+pub fn structured_reader(text: &str) -> Result<PageContent> {
+    let text = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_end_matches("```")
+        .trim();
+    let mut page: PageContent = serde_json::from_str(text)
+        .map_err(|_| Fault::new("NG201", "Structured model output is not valid page JSON"))?;
+    let mut repaired = 0;
+    for block in &mut page.blocks {
+        let invalid = block.bbox.as_ref().is_some_and(|b| !b.valid());
+        if invalid || (block.kind == "figure" && block.bbox.is_none()) {
+            block.bbox = (block.kind == "figure").then(BoxRect::full);
+            block.uncertain = true;
+            repaired += 1;
+        }
+    }
+    if repaired > 0 {
+        page.warnings.push(format!("{repaired} source regions could not be located. Uncertain figures retain the full source page; verify their boundaries in Review."));
+    }
+    page.validate()?;
+    anyhow::ensure!(
+        !page.blocks.is_empty(),
+        Fault::new("NG201", "Model returned empty page data")
+    );
+    Ok(page)
 }

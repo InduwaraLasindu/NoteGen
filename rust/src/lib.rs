@@ -2,6 +2,7 @@ pub mod consensus;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod hardware;
+pub mod motion;
 pub mod parsing;
 pub mod pipeline;
 pub mod planning;

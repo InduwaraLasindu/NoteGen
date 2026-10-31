@@ -12,11 +12,15 @@ for exact Windows/Linux results, native visual evidence and the executable downl
 | 2 | 31 tests: real PDFium/Tesseract raster-only PDF conversion, editable table, resume, DOCX merges/media, local SSE, faults/OOM/redirects/cancellation |
 | 3 | 39 tests with all features/targets + format/clippy: Advanced tabs, text/table/figure review, light/dark/reduced motion, queue/worker lifecycle, bounded logs, human corrections |
 | 4 | Additional real-model mixed-format regression, CPU-only isolation, manual selection, Balanced scheduling and draft-save protection; Windows/Linux/package gates in CI |
+| 5 | 61 ordinary tests + format/clippy locally: motion/reduced-motion render comparisons, animation timing and frame budgets, backward-compatible appearance settings, invalid AI grounding recovery and raw response evidence |
 
-Before the execution environment disconnected, 43 ordinary tests passed locally with
-the newer changes, and the actual native desktop started/rendered under a virtual X
-display. Earlier iteration gates passed format/clippy. The final recovered source,
-additional draft-save test, GPU lockfile and packaging are rechecked in Actions.
+The recovered source passes all 61 ordinary tests with all features/targets on Linux,
+plus strict format and clippy checks. The native desktop was started under an authenticated
+virtual X display; workspace, Advanced and review were captured, and the actual scanning
+graphic was recorded for four seconds. The screenshot harness decodes its output before
+reporting success. A compiled-CLI raster-PDF conversion produced an editable Word file.
+Cross-platform and packaged-executable status is recorded by the Actions run, independently
+of these local checks.
 
 The native fixture contains **only raster image data**, known printed text and a
 two-column table with cell 1250. No selectable PDF text shortcuts OCR. Rust draws the
@@ -33,9 +37,17 @@ fixture. NOTEGEN_FIXTURE_DIR exports its PNG/PDF for independent package tests.
   inside HTML tags; the real test caught this and the parser now reconstructs its cells.
   The repeated live test passed. Grounding markers were absent in this sample, so the
   adapter emits an explicit source-grounding review warning.
+- Qwen3.5 2B Q4_K_M + matching F16 projector, b11998 CPU: full-page and crop inference
+  passed in the explicit live test. It read 1250, rebuilt the table and described the
+  bar chart as a visual representation of sales. Its JSON supplied zero-sized boxes.
+  The regression now retains text/table data without invented coordinates and attaches
+  an ungrounded figure to the full source page with an uncertainty/review warning.
+  Valid coordinates remain unchanged; malformed table structure is still rejected.
+  Raw reader responses are retained separately under the local project/runtime
+  `responses` directory for diagnosis, without putting document text in live log messages.
 
-These demonstrate native inference/adapters on synthetic print and tables. They do not
-measure handwriting accuracy or diagram understanding. Model revisions/SHA256 are in
+These demonstrate native inference/adapters on synthetic print, tables and one simple
+chart. They do not measure broad handwriting accuracy or diagram understanding. Model revisions/SHA256 are in
 rust/downloads.json. Large model tests are opt-in and were invoked explicitly.
 
 ## CI/package verification
@@ -62,7 +74,7 @@ cargo run --features desktop --example ui_capture -- build/workspace.png workspa
 ~~~
 
 Use xvfb-run -a for native GUI capture on headless Linux. For actual AI testing, set
-NOTEGEN_LIVE_ROOT, NOTEGEN_LIVE_ID (glm-ocr or lighton3-1b), NOTEGEN_LIVE_WEIGHTS,
+NOTEGEN_LIVE_ROOT, NOTEGEN_LIVE_ID (glm-ocr, lighton3-1b or qwen35-2b), NOTEGEN_LIVE_WEIGHTS,
 NOTEGEN_LIVE_PROJECTOR and NOTEGEN_LIVE_SERVER, then:
 cargo test --test engine live_model -- --ignored --nocapture.
 

@@ -78,3 +78,7 @@ required-features = ["desktop"]
 name = "ui_capture"
 path = "rust/examples/ui_capture.rs"
 required-features = ["desktop"]
+
+[[test]]
+name = "motion"
+path = "rust/tests/motion.rs"

@@ -90,3 +90,46 @@ fn native_ui_renders_light_dark_and_reduced_motion() {
         }
     }
 }
+
+fn render_snapshot(app: &mut Desktop, ctx: &egui::Context, time: f64) -> String {
+    let mut out = ctx.run_ui(
+        egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1140., 890.),
+            )),
+            ..Default::default()
+        },
+        |ui| app.render(ui),
+    );
+    let shape = format!("{:?}", out.shapes);
+    out.textures_delta.clear();
+    shape
+}
+#[test]
+fn actual_ui_motion_moves_and_reduced_motion_is_visually_static() {
+    for reduced in [false, true] {
+        let mut state = Workspace::default();
+        state.settings.preset = Preset::Fast;
+        state.settings.ui.reduced_motion = reduced;
+        let mut app = Desktop::new(state);
+        app.hardware = Some(notegen::hardware::Hardware {
+            logical_cores: 8,
+            ram_mib: 16384,
+            free_ram_mib: 12000,
+            ..Default::default()
+        });
+        let ctx = egui::Context::default();
+        for i in 0..3 {
+            render_snapshot(&mut app, &ctx, i as f64 * 0.1);
+        }
+        let first = render_snapshot(&mut app, &ctx, 2.);
+        let second = render_snapshot(&mut app, &ctx, 3.5);
+        if reduced {
+            assert_eq!(first, second);
+        } else {
+            assert_ne!(first, second);
+        }
+    }
+}

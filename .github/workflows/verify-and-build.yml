@@ -13,8 +13,6 @@ concurrency:
 jobs:
   verify:
     name: Rust (${{ matrix.os }})
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +30,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr fonts-dejavu-core libfontconfig1-dev libegl1 libgl1-mesa-dri libxkbcommon0 xvfb
+          sudo apt-get install -y tesseract-ocr fonts-dejavu-core libfontconfig1-dev libegl1 libgl1-mesa-dri libxkbcommon0 libxkbcommon-x11-0 xvfb
           mkdir -p build/pdfium-rust
           curl -fL --retry 2 https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8125/pdfium-linux-x64.tgz -o build/pdfium-rust/pdfium.tgz
           tar -xzf build/pdfium-rust/pdfium.tgz -C build/pdfium-rust
@@ -56,12 +54,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: notegen-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.toml') }}
+          key: notegen-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
           restore-keys: notegen-${{ runner.os }}-1.99.1-
-      - name: Refresh lockfile for native GPU renderer
-        run: cargo generate-lockfile
-      - name: Format source after remote recovery
-        run: cargo fmt --all
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-features --all-targets -j 2 -- -D warnings
       - name: All Rust tests and real raster-PDF OCR
@@ -85,17 +79,6 @@ jobs:
           xvfb-run -a target/debug/examples/ui_capture docs/images/rust-workspace.png workspace
           xvfb-run -a target/debug/examples/ui_capture docs/images/rust-advanced.png advanced
           xvfb-run -a target/debug/examples/ui_capture docs/images/rust-review.png review "$project"
-      - name: Save recovered formatting, lock and native visual evidence
-        if: runner.os == 'Linux' && github.event_name == 'push'
-        shell: bash
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock rust docs/images
-          if ! git diff --cached --quiet; then
-            git commit -m "Apply verified Rust formatting, GPU lockfile and native UI evidence [skip ci]"
-            git push origin HEAD:main
-          fi
       - name: Verify Windows AI runtime installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -144,7 +127,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: notegen-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.toml') }}
+          key: notegen-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always() && runner.os == 'Windows'
         with:
@@ -152,6 +135,7 @@ jobs:
           path: |
             build/ai-smoke/NoteGen/results/**/*.json
             build/ai-smoke/NoteGen/results/**/*.log
+            build/ai-smoke/NoteGen/results/**/*.txt
             build/ai-smoke/NoteGen/maximum-smoke.docx
           if-no-files-found: ignore
           retention-days: 30

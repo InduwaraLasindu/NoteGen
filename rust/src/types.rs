@@ -160,7 +160,11 @@ impl Default for Settings {
             request_timeout_secs: 180,
             allow_cpu_offload: false,
             require_acceleration: false,
-            tesseract: if PathBuf::from("runtime/tesseract/tesseract.exe").is_file() { "runtime/tesseract/tesseract.exe".into() } else { "tesseract".into() },
+            tesseract: if PathBuf::from("runtime/tesseract/tesseract.exe").is_file() {
+                "runtime/tesseract/tesseract.exe".into()
+            } else {
+                "tesseract".into()
+            },
             pdfium: "runtime".into(),
             server: "runtime/llama-server.exe".into(),
             models_dir: "models".into(),
@@ -184,6 +188,12 @@ pub struct Appearance {
     pub accent: [u8; 3],
     pub scale: f32,
     pub motion: f32,
+    pub scan_animation: bool,
+    pub intro_animation: bool,
+    pub hover_effects: bool,
+    pub transition_ms: u32,
+    pub ambient_density: u8,
+    pub idle_fps: u32,
     pub reduced_motion: bool,
     pub particles: bool,
     pub glow: bool,
@@ -200,6 +210,12 @@ impl Default for Appearance {
             accent: [100, 226, 204],
             scale: 1.0,
             motion: 1.0,
+            scan_animation: true,
+            intro_animation: true,
+            hover_effects: true,
+            transition_ms: 220,
+            ambient_density: 3,
+            idle_fps: 30,
             reduced_motion: false,
             particles: true,
             glow: true,
@@ -264,6 +280,9 @@ impl Settings {
             || !(0.7..=2.0).contains(&self.ui.scale)
             || !(0.0..=3.0).contains(&self.ui.motion)
             || !(15..=144).contains(&self.ui.fps)
+            || !(1..=60).contains(&self.ui.idle_fps)
+            || self.ui.transition_ms > 1000
+            || self.ui.ambient_density > 8
         {
             return bad("Invalid timeout or UI settings");
         }
@@ -280,7 +299,15 @@ impl Settings {
         {
             return bad("Invalid document settings");
         }
-        if self.model_ids.len()>32 || self.model_ids.iter().any(|s|s.is_empty() || s.len()>100 || !s.chars().all(|c|c.is_ascii_alphanumeric() || c=='-' || c=='_')) {
+        if self.model_ids.len() > 32
+            || self.model_ids.iter().any(|s| {
+                s.is_empty()
+                    || s.len() > 100
+                    || !s
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+        {
             return bad("Invalid model allowlist");
         }
         local_endpoint(&self.endpoint)?;

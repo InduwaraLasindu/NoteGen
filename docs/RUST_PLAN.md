@@ -27,6 +27,11 @@ are required evidence. No universal accuracy or zero-error claim is made.
    names and saved human corrections. Fixed texture-size handling for small adapters.
 4. Windows release, clean Linux/Windows CI, package smoke tests and hardware acceptance.
    Gate: tests + format + clippy + actual compiled CLI conversion/export and desktop startup.
+5. Motion polish and reader recovery. Gate passed locally: 61 ordinary tests, strict
+   format/clippy, real native workspace/Advanced/review captures and motion recording.
+   Includes eased interactions, scan/orbit graphics, progress sheen, completion drawing,
+   animated drawers/windows, reduced motion and focus-aware frame budgets. Real Qwen3.5
+   2B full-page/crop inference passes; ungrounded AI boxes preserve source and require review.
 
 Every gate must pass before the following stage is declared complete. GPU quality tests
 and private handwriting corpus acceptance are distinct from mocked/protocol tests.
@@ -79,6 +84,7 @@ devices or equivalent controlled free-memory cases. Unit profiles cannot replace
 ## Release recovery and final gate
 
 The development environment disconnected during final packaging. The tested source was
-recovered into GitHub. CI regenerates the native GPU lockfile, formats source, runs all
-ordinary tests/clippy, captures native UI evidence, and compiles/tests the Windows ZIP.
+recovered into GitHub and the GPU lockfile/formatting were restored. CI checks the committed
+source and lockfile without rewriting them, runs all ordinary tests/clippy, captures
+native UI evidence, and compiles/tests the Windows ZIP.
 Final completion depends on successful Windows/Linux jobs, not an inferred build result.

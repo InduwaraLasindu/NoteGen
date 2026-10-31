@@ -47,6 +47,39 @@ pub struct Activity {
     pub callback: Option<Arc<dyn Fn(Event) + Send + Sync>>,
 }
 impl Activity {
+    pub fn capture_response(&self, model: &str, page: usize, raw: &str) -> Result<()> {
+        let Some(parent) = self.path.as_ref().and_then(|p| p.parent()) else {
+            return Ok(());
+        };
+        let folder = parent.join("responses");
+        fs::create_dir_all(&folder)?;
+        let model = model
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let mut file = tempfile::Builder::new()
+            .prefix(&format!("{model}-page-{page:05}-"))
+            .suffix(".txt")
+            .tempfile_in(&folder)?;
+        file.write_all(raw.as_bytes())?;
+        file.as_file().sync_all()?;
+        let (_, path) = file.keep()?;
+        self.emit(
+            "evidence",
+            format!("Raw reader response saved: {}", path.display()),
+            page,
+            0,
+            0,
+            "",
+        );
+        Ok(())
+    }
     pub fn emit(
         &self,
         stage: &str,
@@ -153,8 +186,12 @@ impl Project {
         self.root.join(format!("page-{n:05}.json"))
     }
     pub fn load(&self, n: usize) -> Result<Page> {
-        let manual=self.root.join(format!("page-{n:05}.edits.json"));
-        let path=if manual.is_file(){manual}else{self.page_path(n)};
+        let manual = self.root.join(format!("page-{n:05}.edits.json"));
+        let path = if manual.is_file() {
+            manual
+        } else {
+            self.page_path(n)
+        };
         let p: Page = serde_json::from_reader(fs::File::open(path)?)?;
         anyhow::ensure!(
             p.page == n && p.image == format!("page-{n:05}.png"),
@@ -165,7 +202,11 @@ impl Project {
     }
     pub fn save(&self, p: &Page) -> Result<()> {
         p.content.validate()?;
-        let path=if p.edited || p.reviewed {self.root.join(format!("page-{:05}.edits.json",p.page))} else {self.page_path(p.page)};
+        let path = if p.edited || p.reviewed {
+            self.root.join(format!("page-{:05}.edits.json", p.page))
+        } else {
+            self.page_path(p.page)
+        };
         atomic_json(&path, p)
     }
 }

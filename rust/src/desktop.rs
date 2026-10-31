@@ -1,6 +1,7 @@
 //! Native desktop presentation. Recognition runs in a worker and never on the UI thread.
 use crate::{
     hardware::{self, Hardware},
+    motion,
     pipeline::{self, Completed},
     planning, runtime,
     storage::*,
@@ -15,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering, mpsc},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JobStatus {
@@ -182,6 +183,8 @@ pub struct Desktop {
     review_open: bool,
     busy_setup: bool,
     review_error: String,
+    opened_at: Option<f64>,
+    completed_at: Option<Instant>,
 }
 impl Desktop {
     pub fn new(state: Workspace) -> Self {
@@ -220,6 +223,8 @@ impl Desktop {
             review_open: false,
             busy_setup: false,
             review_error: String::new(),
+            opened_at: None,
+            completed_at: None,
         }
     }
     pub fn from_context(cc: &eframe::CreationContext<'_>) -> Self {
@@ -284,11 +289,14 @@ impl Desktop {
                         r.review
                     );
                     self.progress = 1.;
+                    self.completed_at = Some(Instant::now());
                     self.stage = "Conversion complete".into();
                     self.state.recent.retain(|p| p != &r.project.root);
                     self.state.recent.insert(0, r.project.root.clone());
                     self.state.recent.truncate(12);
-                    if self.flush_review().is_ok() && let Ok(v) = Review::load(r.project, 0, ctx) {
+                    if self.flush_review().is_ok()
+                        && let Ok(v) = Review::load(r.project, 0, ctx)
+                    {
                         self.review = Some(v);
                     }
                     self.finished();
@@ -341,7 +349,11 @@ impl Desktop {
         if self.worker.is_some() {
             return;
         }
-        if let Err(e)=self.flush_review() {self.notice=e.to_string();self.running_queue=false;return;}
+        if let Err(e) = self.flush_review() {
+            self.notice = e.to_string();
+            self.running_queue = false;
+            return;
+        }
         let Some(i) = self.state.next() else {
             self.running_queue = false;
             return;
@@ -400,14 +412,19 @@ impl Desktop {
         }));
     }
     fn flush_review(&mut self) -> Result<()> {
-        if let Some(r)=&mut self.review && r.dirty {
-            save_review(&r.project,&mut r.page,false)?;
-            r.dirty=false;
+        if let Some(r) = &mut self.review
+            && r.dirty
+        {
+            save_review(&r.project, &mut r.page, false)?;
+            r.dirty = false;
         }
         Ok(())
     }
     pub fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) {
-        if let Err(e)=self.flush_review() {self.notice=e.to_string();return;}
+        if let Err(e) = self.flush_review() {
+            self.notice = e.to_string();
+            return;
+        }
         match Project::read(path).and_then(|p| Review::load(p, 0, ctx)) {
             Ok(r) => {
                 self.review = Some(r);
@@ -424,6 +441,8 @@ impl Desktop {
     }
     pub fn render(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        self.opened_at.get_or_insert(now);
         self.poll(&ctx);
         self.theme(&ctx);
         let files = ctx.input(|i| i.raw.dropped_files.clone());
@@ -433,12 +452,17 @@ impl Desktop {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
             self.pick_files();
         }
-        if ctx.input(|i|i.key_pressed(egui::Key::Escape)) {
-            self.advanced=false;
-            match self.flush_review() {Ok(())=>self.review_open=false,Err(e)=>self.review_error=e.to_string()}
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.advanced = false;
+            match self.flush_review() {
+                Ok(()) => self.review_open = false,
+                Err(e) => self.review_error = e.to_string(),
+            }
         }
-        if ctx.input(|i|i.viewport().close_requested()) && let Err(e)=self.flush_review() {
-            self.notice=format!("Could not save review draft: {e}");
+        if ctx.input(|i| i.viewport().close_requested())
+            && let Err(e) = self.flush_review()
+        {
+            self.notice = format!("Could not save review draft: {e}");
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.background()).inner_margin(if self.state.settings.ui.compact {
@@ -473,9 +497,11 @@ impl Desktop {
                 ui.add_space(18.);
                 ui.horizontal_wrapped(|ui|{
                     for (preset,title,help) in [(Preset::Fast,"Fast","Printed OCR, no AI"),(Preset::Balanced,"Balanced","Local OCR and vision readers"),(Preset::Accuracy,"Accuracy","Strongest fitting OCR and vision models"),(Preset::Maximum,"Maximum accuracy","Independent readers plus difficult-region retries; slower")] {
-                        if ui.add(egui::Button::new(title).selected(self.state.settings.preset==preset).min_size(Vec2::new(118.,38.))).on_hover_text(help).clicked() && self.worker.is_none(){
-                            self.state.settings.preset=preset;
-                        }
+                        let amount=ui.ctx().animate_bool_with_time(egui::Id::unique(format!("preset-{preset:?}")),self.state.settings.preset==preset,motion::transition(&self.state.settings.ui));
+                        let fill=self.surface().lerp_to_gamma(self.accent(),0.20*amount);
+                        let response=ui.add(egui::Button::new(title).selected(self.state.settings.preset==preset).fill(fill).min_size(Vec2::new(118.,38.))).on_hover_text(help);
+                        self.hover_ring(ui,&response,&format!("hover-{preset:?}"));
+                        if response.clicked() && self.worker.is_none(){self.state.settings.preset=preset;ctx.request_repaint();}
                     }
                 }
                 );
@@ -490,12 +516,14 @@ impl Desktop {
                 ui.add_space(20.);
                 ui.horizontal(|ui|{
                     let ready=self.state.next().is_some() && self.worker.is_none();
-                    if ui.add_enabled(ready,egui::Button::new(RichText::new("Convert to Word   →").strong().color(Color32::from_rgb(8,28,28))).fill(self.accent()).min_size(Vec2::new(220.,48.))).clicked(){
+                    let convert=ui.add_enabled(ready,egui::Button::new(RichText::new("Convert to Word   →").strong().color(self.accent_text())).fill(self.accent()).min_size(Vec2::new(220.,48.)));
+                    self.hover_ring(ui,&convert,"convert-hover");
+                    if convert.clicked(){
                         self.running_queue=true;
                         self.start_next(&ctx);
                     }
                     if self.active.is_some(){
-                        let paused=self.control.paused.load(Ordering::Relaxed);
+                        let paused=self.paused();
                         if ui.button(if paused{
                             "Resume"}
                         else{
@@ -552,14 +580,14 @@ impl Desktop {
         );
         self.advanced_ui(&ctx);
         self.review_ui(&ctx);
-        if self.worker.is_some()
-            || (!self.state.settings.ui.reduced_motion
-                && self.state.settings.ui.motion > 0.
-                && self.state.settings.ui.particles)
-        {
-            ctx.request_repaint_after(Duration::from_secs_f32(
-                1. / self.state.settings.ui.fps as f32,
-            ));
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if let Some(delay) = motion::repaint_delay(
+            &self.state.settings.ui,
+            focused,
+            self.worker.is_some(),
+            self.paused(),
+        ) {
+            ctx.request_repaint_after(delay);
         }
     }
     fn pick_files(&mut self) {
@@ -625,12 +653,19 @@ impl Desktop {
     }
     fn progress_ui(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&self.stage).strong());
+            ui.label(
+                RichText::new(if self.paused() {
+                    "Pause requested · waiting at a safe checkpoint"
+                } else {
+                    &self.stage
+                })
+                .strong(),
+            );
             if let Some(t) = self.started {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let sec = t.elapsed().as_secs();
                     ui.small(format!("{:02}:{:02} elapsed", sec / 60, sec % 60));
-                    if self.progress > 0.05 && self.progress < 1. {
+                    if self.progress > 0.05 && self.progress < 1. && !self.paused() {
                         ui.small(format!(
                             "~{}s remaining",
                             (t.elapsed().as_secs_f32() * (1. - self.progress) / self.progress)
@@ -643,18 +678,30 @@ impl Desktop {
         let value = ui.ctx().animate_value_with_time(
             egui::Id::unique("progress"),
             self.progress,
-            if self.state.settings.ui.reduced_motion {
-                0.
-            } else {
-                0.25
-            },
+            motion::transition(&self.state.settings.ui),
         );
-        ui.add(
+        let bar = ui.add(
             egui::ProgressBar::new(value)
                 .desired_height(6.)
                 .fill(self.accent())
-                .animate(self.worker.is_some() && !self.state.settings.ui.reduced_motion),
+                .animate(
+                    self.worker.is_some()
+                        && motion::enabled(&self.state.settings.ui)
+                        && !self.paused(),
+                ),
         );
+        if self.active.is_some() && motion::enabled(&self.state.settings.ui) && !self.paused() {
+            let phase = self.scene(ui).scan;
+            let x = egui::lerp(bar.rect.x_range(), phase);
+            ui.painter().with_clip_rect(bar.rect).rect_filled(
+                egui::Rect::from_center_size(
+                    egui::pos2(x, bar.rect.center().y),
+                    Vec2::new(60., bar.rect.height()),
+                ),
+                3,
+                Color32::from_white_alpha(40),
+            );
+        }
         if self.active.is_some() {
             ui.small(RichText::new("Pause takes effect at safe checkpoints. Cancel also stops an active model request.").color(self.muted()));
         }
@@ -695,7 +742,7 @@ impl Desktop {
             }
             else {
                 ui.horizontal(|ui|{
-                    ui.spinner();
+                    self.activity_indicator(ui);
                     ui.label("Detecting CPU, memory and GPU runtime…");
                 }
                 );
@@ -796,18 +843,36 @@ impl Desktop {
                 }
             }
         });
-        if self.log_open {
+        let mut drawer = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            ui.make_persistent_id("activity-drawer"),
+            false,
+        );
+        drawer.set_open(self.log_open);
+        drawer.show_body_unindented(ui, |ui| {
             egui::Frame::new()
                 .fill(self.surface())
                 .inner_margin(10)
                 .corner_radius(10)
                 .show(ui, |ui| {
+                    let filter = self.log_filter.to_lowercase();
+                    let events = self
+                        .logs
+                        .iter()
+                        .filter(|e| {
+                            (!self.warnings_only || e.warning)
+                                && (filter.is_empty()
+                                    || format!("{} {} {}", e.stage, e.code, e.message)
+                                        .to_lowercase()
+                                        .contains(&filter))
+                        })
+                        .collect::<Vec<_>>();
                     egui::ScrollArea::vertical()
                         .id_salt("logs")
                         .max_height(210.)
                         .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for e in &self.logs {
+                        .show_rows(ui, 15., events.len(), |ui, range| {
+                            for e in &events[range] {
                                 let line = format!(
                                     "{}  {:12}  p{}  {} {}",
                                     e.timestamp.get(11..19).unwrap_or(""),
@@ -816,30 +881,28 @@ impl Desktop {
                                     e.code,
                                     e.message
                                 );
-                                if (!self.warnings_only || e.warning)
-                                    && line
-                                        .to_lowercase()
-                                        .contains(&self.log_filter.to_lowercase())
-                                {
-                                    ui.label(RichText::new(line).monospace().size(11.).color(
-                                        if e.warning {
-                                            Color32::from_rgb(241, 187, 111)
-                                        } else {
-                                            self.muted()
-                                        },
-                                    ));
-                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&line).monospace().size(11.).color(
+                                            if e.warning {
+                                                Color32::from_rgb(241, 187, 111)
+                                            } else {
+                                                self.muted()
+                                            },
+                                        ),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(line);
                             }
                         });
                 });
-        }
+        });
     }
+
     fn advanced_ui(&mut self, ctx: &egui::Context) {
-        if !self.advanced {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Advanced").open(&mut open).default_size([760.,650.]).resizable(true).show(ctx,|ui|{
+        let mut open = self.advanced;
+        egui::Window::new("Advanced").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([760.,650.]).resizable(true).show(ctx,|ui|{
             ui.horizontal_wrapped(|ui|{
                 for(i,t)in["Compute","Recognition","Models","Appearance","All parameters"].iter().enumerate(){
                     if ui.selectable_label(self.tab==i,*t).clicked(){
@@ -1055,15 +1118,20 @@ impl Desktop {
             );
         }
         ui.separator();
-        ui.checkbox(&mut self.draft.automatic_models,"Automatically choose the strongest fitting installed models");
-        let catalog=planning::catalog();
+        ui.checkbox(
+            &mut self.draft.automatic_models,
+            "Automatically choose the strongest fitting installed models",
+        );
+        let catalog = planning::catalog();
         if !self.draft.automatic_models {
             ui.small("Allow these readers. Memory admission still applies.");
             for m in &catalog {
-                let mut selected=self.draft.model_ids.contains(&m.id);
-                if ui.checkbox(&mut selected,&m.name).changed() {
-                    self.draft.model_ids.retain(|v|v!=&m.id);
-                    if selected {self.draft.model_ids.push(m.id.clone());}
+                let mut selected = self.draft.model_ids.contains(&m.id);
+                if ui.checkbox(&mut selected, &m.name).changed() {
+                    self.draft.model_ids.retain(|v| v != &m.id);
+                    if selected {
+                        self.draft.model_ids.push(m.id.clone());
+                    }
                 }
             }
         }
@@ -1121,7 +1189,7 @@ impl Desktop {
         }
         if self.busy_setup {
             ui.horizontal(|ui| {
-                ui.spinner();
+                self.activity_indicator(ui);
                 ui.label("Verifying local files and computing checksums…");
             });
         }
@@ -1162,26 +1230,40 @@ impl Desktop {
         ui.add(egui::Slider::new(&mut a.scale, 0.7..=2.0).text("Interface scale"));
         ui.add(egui::Slider::new(&mut a.motion, 0.0..=3.0).text("Motion speed"));
         ui.add(egui::Slider::new(&mut a.rounding, 0..=30).text("Corner rounding"));
-        ui.add(egui::Slider::new(&mut a.fps, 15..=144).text("Animation FPS cap"));
+        ui.add(egui::Slider::new(&mut a.fps, 15..=144).text("Animation FPS limit"));
+        ui.add(egui::Slider::new(&mut a.idle_fps, 1..=60).text("Idle graphics FPS limit"));
+        ui.add(egui::Slider::new(&mut a.transition_ms, 0..=1000).text("Transition time (ms)"));
+        ui.add(egui::Slider::new(&mut a.ambient_density, 0..=8).text("Orbit density"));
+        ui.checkbox(&mut a.scan_animation, "Scanning page graphic");
+        ui.checkbox(&mut a.intro_animation, "Gentle entrance animation");
+        ui.checkbox(&mut a.hover_effects, "Hover highlights");
         ui.checkbox(&mut a.reduced_motion, "Reduced motion");
         ui.checkbox(&mut a.particles, "Ambient motion graphics");
         ui.checkbox(&mut a.glow, "Soft accent glow");
         ui.checkbox(&mut a.compact, "Compact spacing");
         ui.checkbox(&mut a.autosave, "Remember settings and queue");
-        ui.small("Animations stop when reduced motion is enabled. The operating system chooses the UI graphics adapter; AI GPU selection is independent.");
+        ui.small("Reduced motion freezes decorative movement and disables transitions. Background animation sleeps when the window is unfocused. The UI graphics adapter is independent of AI GPU selection.");
+        if ui.button("Preview appearance now").clicked() {
+            let mut preview = self.state.settings.clone();
+            preview.ui = self.draft.ui.clone();
+            match preview.validate() {
+                Ok(()) => {
+                    self.state.settings.ui = preview.ui;
+                    ui.ctx().request_repaint();
+                }
+                Err(e) => self.settings_error = e.to_string(),
+            }
+        }
     }
     fn review_ui(&mut self, ctx: &egui::Context) {
-        if !self.review_open {
-            return;
-        }
         let Some(mut r) = self.review.take() else {
             self.review_open = false;
             return;
         };
-        let mut open = true;
+        let mut open = self.review_open;
         let mut next = None;
         let mut export = false;
-        egui::Window::new("Review & correct").open(&mut open).default_size([1100.,740.]).resizable(true).show(ctx,|ui|{
+        egui::Window::new("Review & correct").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).resizable(true).show(ctx,|ui|{
             ui.horizontal(|ui|{
                 ui.strong(format!("Page {} / {}",r.page.page,r.project.manifest.pages.len()));
                 if ui.add_enabled(r.index>0 && !r.dirty,egui::Button::new("← Previous")).clicked(){
@@ -1437,11 +1519,7 @@ impl Desktop {
             s.spacing.button_padding = Vec2::new(12., 9.);
             s.visuals.selection.bg_fill = accent.gamma_multiply(0.25);
             s.visuals.selection.stroke = egui::Stroke::new(1., accent);
-            s.animation_time = if self.state.settings.ui.reduced_motion {
-                0.
-            } else {
-                0.15
-            };
+            s.animation_time = motion::transition(&self.state.settings.ui);
         });
     }
     fn logo(&self, ui: &mut egui::Ui) {
@@ -1454,48 +1532,190 @@ impl Desktop {
                     r.min + Vec2::new(7., 9. + i as f32 * 6.),
                     r.min + Vec2::new(7. + w, 9. + i as f32 * 6.),
                 ],
-                egui::Stroke::new(2., Color32::from_rgb(12, 35, 35)),
+                egui::Stroke::new(2., self.accent_text()),
+            );
+        }
+    }
+    fn scene(&self, ui: &egui::Ui) -> motion::Scene {
+        let time = ui.input(|i| i.time);
+        let elapsed = time - self.opened_at.unwrap_or(time);
+        let complete = if self.active.is_none() && self.progress >= 1. {
+            self.completed_at.map(|t| t.elapsed().as_secs_f64())
+        } else {
+            None
+        };
+        motion::scene(
+            elapsed,
+            &self.state.settings.ui,
+            self.active.is_some(),
+            self.paused(),
+            complete,
+        )
+    }
+    fn paused(&self) -> bool {
+        self.active.is_some() && self.control.paused.load(Ordering::Relaxed)
+    }
+    fn activity_indicator(&self, ui: &mut egui::Ui) {
+        if motion::enabled(&self.state.settings.ui) {
+            ui.spinner();
+        } else {
+            ui.colored_label(self.accent(), "●");
+        }
+    }
+    fn accent_text(&self) -> Color32 {
+        let a = self.state.settings.ui.accent;
+        if 0.2126 * a[0] as f32 + 0.7152 * a[1] as f32 + 0.0722 * a[2] as f32 > 140. {
+            Color32::from_rgb(8, 28, 28)
+        } else {
+            Color32::WHITE
+        }
+    }
+    fn hover_ring(&self, ui: &egui::Ui, response: &egui::Response, salt: &str) {
+        if !self.state.settings.ui.hover_effects {
+            return;
+        }
+        let amount = ui.ctx().animate_bool_with_time(
+            egui::Id::unique(salt),
+            response.hovered() && response.enabled(),
+            motion::transition(&self.state.settings.ui),
+        );
+        if amount > 0.001 {
+            let a = self.accent();
+            ui.painter().rect_stroke(
+                response.rect.expand(1. + amount),
+                self.state.settings.ui.rounding.min(16),
+                egui::Stroke::new(
+                    1.,
+                    Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), (110. * amount) as u8),
+                ),
+                egui::StrokeKind::Outside,
             );
         }
     }
     fn background_art(&self, ui: &egui::Ui) {
-        if !self.state.settings.ui.particles {
+        let style = &self.state.settings.ui;
+        if !style.particles && !style.scan_animation {
             return;
         }
-        let rect = ui.max_rect();
+        let scene = self.scene(ui);
         let p = ui.painter();
-        let motion = if self.state.settings.ui.reduced_motion {
-            0.
-        } else {
-            ui.input(|i| i.time) as f32 * self.state.settings.ui.motion
+        let rect = ui.max_rect();
+        let center = egui::pos2(rect.right() - 100., rect.top() + 116.);
+        let accent = self.accent();
+        let tint = |alpha: f32| {
+            Color32::from_rgba_unmultiplied(
+                accent.r(),
+                accent.g(),
+                accent.b(),
+                (alpha.clamp(0., 255.) * scene.reveal) as u8,
+            )
         };
-        let center = egui::pos2(rect.right() - 80., rect.top() + 120.);
-        let a = self.accent();
-        if self.state.settings.ui.glow {
+        if style.glow {
             for k in (1..=6).rev() {
-                p.circle_filled(
-                    center,
-                    40. + k as f32 * 20.,
-                    Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), 2),
-                );
+                p.circle_filled(center, 30. + k as f32 * 17., tint(2.));
             }
         }
-        for i in 0..3 {
-            let radius = 60. + i as f32 * 35.;
-            p.circle_stroke(
-                center,
-                radius,
-                egui::Stroke::new(
-                    0.7,
-                    Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), 16),
+        if style.particles {
+            for i in 0..style.ambient_density.min(8) {
+                let radius = 54. + i as f32 * 23.;
+                p.circle_stroke(center, radius, egui::Stroke::new(0.7, tint(16.)));
+                let angle = scene.orbit + i as f32 * 2.1;
+                let dot = center + Vec2::angled(angle) * radius;
+                if style.glow {
+                    p.circle_filled(dot, 5., tint(10. + scene.pulse * 8.));
+                }
+                p.circle_filled(dot, 2.2, tint(80. + scene.pulse * 35.));
+            }
+        }
+        if !style.scan_animation {
+            return;
+        }
+        let paper = egui::Rect::from_center_size(
+            center + Vec2::new(0., (1. - scene.reveal) * 8.),
+            Vec2::new(80., 104.),
+        );
+        p.rect_filled(
+            paper.translate(Vec2::new(0., 4.)),
+            10,
+            Color32::from_black_alpha((35. * scene.reveal) as u8),
+        );
+        let fill = if style.dark {
+            Color32::from_rgb(23, 35, 48)
+        } else {
+            Color32::from_rgb(253, 254, 255)
+        };
+        p.rect_filled(paper, 9, fill.gamma_multiply(scene.reveal));
+        p.rect_stroke(
+            paper,
+            9,
+            egui::Stroke::new(1., tint(105.)),
+            egui::StrokeKind::Inside,
+        );
+        for (i, width) in [37., 51., 43., 49., 33.].iter().enumerate() {
+            let pos = paper.min + Vec2::new(12., 16. + i as f32 * 11.);
+            p.rect_filled(
+                egui::Rect::from_min_size(pos, Vec2::new(*width, 3.)),
+                2,
+                if i == 0 {
+                    tint(170.)
+                } else {
+                    self.muted().gamma_multiply(scene.reveal * 0.38)
+                },
+            );
+        }
+        for (i, height) in [9., 17., 13.].iter().enumerate() {
+            p.rect_filled(
+                egui::Rect::from_min_size(
+                    paper.min + Vec2::new(13. + i as f32 * 12., 88. - height),
+                    Vec2::new(7., *height),
                 ),
+                2,
+                tint(50. + i as f32 * 25.),
             );
-            let angle = motion * 0.12 + i as f32 * 2.1;
-            p.circle_filled(
-                center + Vec2::angled(angle) * radius,
-                2.5,
-                Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), 75),
+        }
+        let clipped = p.with_clip_rect(paper.shrink(2.));
+        if scene.check > 0. {
+            let base = paper.min + Vec2::new(23., 71.);
+            let points = [
+                base,
+                base + Vec2::new(11., 11.),
+                base + Vec2::new(30., -10.),
+            ];
+            let amount = scene.check;
+            if amount < 0.4 {
+                clipped.line_segment(
+                    [points[0], points[0].lerp(points[1], amount / 0.4)],
+                    egui::Stroke::new(3., accent),
+                );
+            } else {
+                clipped.line_segment([points[0], points[1]], egui::Stroke::new(3., accent));
+                clipped.line_segment(
+                    [points[1], points[1].lerp(points[2], (amount - 0.4) / 0.6)],
+                    egui::Stroke::new(3., accent),
+                );
+            }
+        } else {
+            let y = egui::lerp(paper.top() + 10. ..=paper.bottom() - 10., scene.scan);
+            if style.glow {
+                for k in (1..=5).rev() {
+                    clipped.rect_filled(
+                        egui::Rect::from_center_size(
+                            egui::pos2(paper.center().x, y),
+                            Vec2::new(paper.width() - 8., k as f32 * 4.),
+                        ),
+                        2,
+                        tint(5.),
+                    );
+                }
+            }
+            clipped.line_segment(
+                [
+                    egui::pos2(paper.left() + 5., y),
+                    egui::pos2(paper.right() - 5., y),
+                ],
+                egui::Stroke::new(1.5, tint(220.)),
             );
+            clipped.circle_filled(egui::pos2(paper.right() - 7., y), 2.2, tint(255.));
         }
     }
 }
@@ -1514,7 +1734,7 @@ impl eframe::App for Desktop {
         }
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
-        let _=self.flush_review();
+        let _ = self.flush_review();
         self.control.cancelled.store(true, Ordering::Relaxed);
         self.running_queue = false;
         if let Some(w) = self.worker.take() {
@@ -1607,6 +1827,7 @@ fn open_path(path: &Path) {
 #[cfg(test)]
 mod acceptance {
     use super::*;
+    use std::time::Duration;
     fn draw(app: &mut Desktop, ctx: &egui::Context) {
         let mut result = ctx.run_ui(
             egui::RawInput {
@@ -1657,7 +1878,7 @@ mod acceptance {
     fn worker_failure_stops_queue_and_explains_error() {
         let mut state = Workspace::default();
         state.settings.preset = Preset::Fast;
-        let dir=tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         state.enqueue(dir.path().join("notegen.pdf"));
         state.enqueue(dir.path().join("second.pdf"));
         let mut app = Desktop::new(state);
@@ -1728,23 +1949,58 @@ mod acceptance {
     }
     #[test]
     fn switching_projects_saves_the_previous_review_draft() {
-        let dir=tempfile::tempdir().unwrap();
-        let p=Project::open(dir.path().into(),Manifest{schema:2,input_sha256:"a".into(),fingerprint:"b".into(),pages:vec![1],models:vec![],settings:Settings::default()}).unwrap();
-        p.save(&Page{page:1,image:"page-00001.png".into(),content:PageContent{blocks:vec![Block::text("Original")],..Default::default()},..Default::default()}).unwrap();
-        let ctx=egui::Context::default();let mut app=Desktop::new(Workspace::default());
-        app.open_review(p.root.clone(),&ctx);
-        let r=app.review.as_mut().unwrap();r.page.content.blocks[0].text="Human correction".into();r.dirty=true;
-        app.open_review(p.root.clone(),&ctx);
-        assert!(p.load(1).unwrap().edited);assert_eq!(app.review.as_ref().unwrap().page.content.plain(),"Human correction");
+        let dir = tempfile::tempdir().unwrap();
+        let p = Project::open(
+            dir.path().into(),
+            Manifest {
+                schema: 2,
+                input_sha256: "a".into(),
+                fingerprint: "b".into(),
+                pages: vec![1],
+                models: vec![],
+                settings: Settings::default(),
+            },
+        )
+        .unwrap();
+        p.save(&Page {
+            page: 1,
+            image: "page-00001.png".into(),
+            content: PageContent {
+                blocks: vec![Block::text("Original")],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Desktop::new(Workspace::default());
+        app.open_review(p.root.clone(), &ctx);
+        let r = app.review.as_mut().unwrap();
+        r.page.content.blocks[0].text = "Human correction".into();
+        r.dirty = true;
+        app.open_review(p.root.clone(), &ctx);
+        assert!(p.load(1).unwrap().edited);
+        assert_eq!(
+            app.review.as_ref().unwrap().page.content.plain(),
+            "Human correction"
+        );
     }
 
     #[test]
     fn invalid_output_folder_marks_job_failed_without_starting_worker() {
-        let dir=tempfile::tempdir().unwrap();let blocked=dir.path().join("a-file");fs::write(&blocked,b"file").unwrap();
-        let mut state=Workspace::default();state.settings.preset=Preset::Fast;state.output_dir=blocked.display().to_string();
-        state.enqueue(dir.path().join("scan.pdf"));let mut app=Desktop::new(state);let ctx=egui::Context::default();
-        app.running_queue=true;draw(&mut app,&ctx);
-        assert_eq!(app.state.queue[0].status,JobStatus::Failed);assert_eq!(app.error_code,"NG400");assert!(app.worker.is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("a-file");
+        fs::write(&blocked, b"file").unwrap();
+        let mut state = Workspace::default();
+        state.settings.preset = Preset::Fast;
+        state.output_dir = blocked.display().to_string();
+        state.enqueue(dir.path().join("scan.pdf"));
+        let mut app = Desktop::new(state);
+        let ctx = egui::Context::default();
+        app.running_queue = true;
+        draw(&mut app, &ctx);
+        assert_eq!(app.state.queue[0].status, JobStatus::Failed);
+        assert_eq!(app.error_code, "NG400");
+        assert!(app.worker.is_none());
     }
-
 }

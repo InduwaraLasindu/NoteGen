@@ -85,7 +85,13 @@ pub fn convert(
         0,
         "",
     );
-    let input = hash_file(source, c).map_err(|e| if e.downcast_ref::<Fault>().is_some() {e} else {Fault::new("NG100",format!("Cannot read input PDF: {e}")).into()})?;
+    let input = hash_file(source, c).map_err(|e| {
+        if e.downcast_ref::<Fault>().is_some() {
+            e
+        } else {
+            Fault::new("NG100", format!("Cannot read input PDF: {e}")).into()
+        }
+    })?;
     let key = fingerprint(&(
         2,
         recognition_settings(s),
@@ -208,7 +214,7 @@ pub fn convert(
                     .warnings
                     .push("Blur/low detail detected. Verify small text against the source.".into());
             }
-            p.source_warnings=p.content.warnings.clone();
+            p.source_warnings = p.content.warnings.clone();
             atomic_json(&checkpoint, &p)?;
             rendered.push(n);
             log.emit(
@@ -238,7 +244,12 @@ pub fn convert(
         let tasks = selected
             .iter()
             .copied()
-            .filter(|n| project.load(*n).ok().is_none_or(|p| should_read(&model.id,&model.role,&p,s)))
+            .filter(|n| {
+                project
+                    .load(*n)
+                    .ok()
+                    .is_none_or(|p| should_read(&model.id, &model.role, &p, s))
+            })
             .collect::<Vec<_>>();
         if tasks.is_empty() {
             done += selected.len();
@@ -298,9 +309,14 @@ pub fn convert(
             recovery.micro_batch = 32;
             recovery.gpu_layers = if plan.backend == Backend::Cpu { 0 } else { 16 };
             active_settings.projector_on_cpu = true;
-            active_settings.context=recovery.context;
-            active_settings.image_tokens=recovery.image_tokens;
-            active_settings.max_tokens=active_settings.max_tokens.min(recovery.context.saturating_sub(recovery.image_tokens+6000).max(512));
+            active_settings.context = recovery.context;
+            active_settings.image_tokens = recovery.image_tokens;
+            active_settings.max_tokens = active_settings.max_tokens.min(
+                recovery
+                    .context
+                    .saturating_sub(recovery.image_tokens + 6000)
+                    .max(512),
+            );
             server = Server::start(model, &recovery, &active_settings, c, &log, &root);
         }
         let server = match server {
@@ -505,7 +521,9 @@ pub fn convert(
         if p.needs_review(s.review_threshold) {
             review += 1;
         }
-        if !p.edited && !p.reviewed {project.save(&p)?;}
+        if !p.edited && !p.reviewed {
+            project.save(&p)?;
+        }
     }
     c.check()?;
     log.emit(
@@ -551,20 +569,45 @@ pub fn recognition_settings(s: &Settings) -> Settings {
 }
 
 /// Balanced skips a vision pass only after independent full-page agreement.
-pub fn should_read(id:&str, role:&str, page:&Page,s:&Settings)->bool {
-    if page.edited || page.reviewed || page.candidates.iter().any(|v|v.model_id==id && v.view=="full") {return false;}
-    !(s.preset==Preset::Balanced && role=="vision" && !s.handwriting && page.agreement>=s.agreement_threshold
-        && !page.content.blocks.iter().any(|b|b.kind=="figure" || b.uncertain || b.plain().contains("[illegible]")))
+pub fn should_read(id: &str, role: &str, page: &Page, s: &Settings) -> bool {
+    if page.edited
+        || page.reviewed
+        || page
+            .candidates
+            .iter()
+            .any(|v| v.model_id == id && v.view == "full")
+    {
+        return false;
+    }
+    !(s.preset == Preset::Balanced
+        && role == "vision"
+        && !s.handwriting
+        && page.agreement >= s.agreement_threshold
+        && !page
+            .content
+            .blocks
+            .iter()
+            .any(|b| b.kind == "figure" || b.uncertain || b.plain().contains("[illegible]")))
 }
 
-pub fn retain_source_warnings(source:&[String],content:&mut PageContent) {
-    for warning in source {if !content.warnings.contains(warning){content.warnings.push(warning.clone());}}
+pub fn retain_source_warnings(source: &[String], content: &mut PageContent) {
+    for warning in source {
+        if !content.warnings.contains(warning) {
+            content.warnings.push(warning.clone());
+        }
+    }
 }
 
-pub fn merge_contextual_figures(target:&mut PageContent,incoming:&PageContent) {
-    for figure in incoming.blocks.iter().filter(|b|b.kind=="figure") {
-        target.blocks.retain(|old|old.kind!="figure" || old.bbox.as_ref().zip(figure.bbox.as_ref())
-            .is_none_or(|(a,b)|consensus::overlap(a,b)<0.35));
+pub fn merge_contextual_figures(target: &mut PageContent, incoming: &PageContent) {
+    for figure in incoming.blocks.iter().filter(|b| b.kind == "figure") {
+        target.blocks.retain(|old| {
+            old.kind != "figure"
+                || old
+                    .bbox
+                    .as_ref()
+                    .zip(figure.bbox.as_ref())
+                    .is_none_or(|(a, b)| consensus::overlap(a, b) < 0.35)
+        });
         target.blocks.push(figure.clone());
     }
 }

@@ -327,6 +327,16 @@ impl Server {
             body["response_format"] = json!({"type":"json_object","schema":page_schema()});
         }
         let text = chat(&self.endpoint, body, s, c, log, page)?;
+        if let Err(error) = log.capture_response(&self.model.id, page, &text) {
+            log.emit(
+                "evidence",
+                format!("Could not save raw reader evidence: {error}"),
+                page,
+                0,
+                0,
+                "NG500",
+            );
+        }
         let mut p = match self.model.prompt.as_str() {
             "lighton" => crate::parsing::lighton(&text),
             "glm" | "glm_table" => PageContent {
@@ -334,7 +344,7 @@ impl Server {
                 summary: text.chars().take(2000).collect(),
                 ..Default::default()
             },
-            _ => crate::parsing::structured(&text)?,
+            _ => crate::parsing::structured_reader(&text)?,
         };
         p.validate()?;
         anyhow::ensure!(
@@ -400,13 +410,19 @@ pub fn offloaded_layers(log: &str) -> usize {
         .unwrap_or(0)
 }
 
-pub fn input_edge(model:&Model,s:&Settings)->u32 {
-    if s.image_edge != 0 {s.image_edge} else if model.prompt=="lighton" && model.id=="lighton3-1b" {1540} else {2048}
+pub fn input_edge(model: &Model, s: &Settings) -> u32 {
+    if s.image_edge != 0 {
+        s.image_edge
+    } else if model.prompt == "lighton" && model.id == "lighton3-1b" {
+        1540
+    } else {
+        2048
+    }
 }
 
 /// Native llama.cpp schema constrains output shapes; semantic validation still follows.
-pub fn page_schema()->Value {
-    let bbox=json!({"type":"object","additionalProperties":false,
+pub fn page_schema() -> Value {
+    let bbox = json!({"type":"object","additionalProperties":false,
         "properties":{"left":{"type":"number","minimum":0,"maximum":1},"top":{"type":"number","minimum":0,"maximum":1},
         "right":{"type":"number","minimum":0,"maximum":1},"bottom":{"type":"number","minimum":0,"maximum":1}},
         "required":["left","top","right","bottom"]});

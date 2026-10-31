@@ -41,13 +41,19 @@ or document upload.
 | Live activity | Stage/page progress, elapsed/estimated time, filterable activity, NG error codes and remedies; full JSONL/native runtime logs |
 | Durable jobs | Queue, page ranges, pause, active-request cancellation, input/model/settings-bound checkpoints, restart recovery and protected output names |
 | Review | Side-by-side source boxes, editable text/cells/diagram explanations, reader evidence, validated page JSON and persistent human corrections |
-| Minimal native UI | Advanced controls and every parameter in validated JSON; light/dark, accent/background, scale, motion/FPS, reduced motion, compact mode |
+| Minimal native UI | Scanning-page motion graphic, orbiting accents, eased hover/preset transitions, progress sheen, completion check and animated drawers/windows; configurable in Advanced |
+| Appearance controls | Light/dark, accent/background, scale, corners, speed, transition timing, orbit density, active/idle FPS, glow and reduced motion; live appearance preview while converting |
 | Offline CLI | Diagnostics, hardware plan, registration, conversion, project inspection, native export and re-export |
 
 Windows UI rendering uses wgpu/Direct3D or Vulkan; AI uses CUDA/Vulkan through llama.cpp.
 Actual offloaded layers are recorded in the native startup log. PDF rendering, Tesseract,
 export and some preprocessing remain CPU operations. Not every operation can occupy
 100% of the GPU. The UI and AI select graphics devices independently.
+
+[Actual native motion preview](docs/images/notegen-motion.mp4). Open **Advanced → Appearance**
+to customize it. Reduced motion freezes decorative graphics and transitions. Ambient
+animation sleeps when unfocused; a running job still updates its status. The live log
+drawer animates and virtualizes rows so long jobs do not build thousands of labels.
 
 ## Hardware and models
 
@@ -70,10 +76,11 @@ conversions. Setup pins runtime b11998 and immutable model revisions/checksums.
 
 ## Quality and verification
 
-Real PDFium/Tesseract conversion and actual GLM-OCR/LightOnOCR-3 CPU inference have
+Real PDFium/Tesseract conversion and actual GLM-OCR/LightOnOCR-3/Qwen3.5 2B CPU inference have
 been exercised on a raster-only printed scan and accounting table. Tests cover model
 protocols, faults/cancellation, memory profiles, consensus, persistence, Word structure
-and native desktop rendering. Windows/Linux CI compiles the executables and smoke-tests
+and native desktop rendering. The motion iteration passes 61 ordinary Rust tests,
+format and clippy locally. Windows/Linux CI compiles the executables and smoke-tests
 the portable package. See [exact evidence and limits](docs/TESTING.md).
 
 Terrible handwriting and severe blur can destroy information. Agreement is not a

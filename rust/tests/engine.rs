@@ -102,10 +102,22 @@ fn fixture() -> RgbImage {
             }
         }
     }
-    for y in 720..990 {for x in 245..365 {im.put_pixel(x,y,Rgb([45,100,145]));}}
-    for y in 680..1005 {for x in 100..104 {im.put_pixel(x,y,Rgb([0,0,0]));}}
-    for x in 100..800 {for y in 1000..1004 {im.put_pixel(x,y,Rgb([0,0,0]));}}
-    imageproc::drawing::draw_text_mut(&mut im,Rgb([0,0,0]),220,1040,28.,&font,"Sales");
+    for y in 720..990 {
+        for x in 245..365 {
+            im.put_pixel(x, y, Rgb([45, 100, 145]));
+        }
+    }
+    for y in 680..1005 {
+        for x in 100..104 {
+            im.put_pixel(x, y, Rgb([0, 0, 0]));
+        }
+    }
+    for x in 100..800 {
+        for y in 1000..1004 {
+            im.put_pixel(x, y, Rgb([0, 0, 0]));
+        }
+    }
+    imageproc::drawing::draw_text_mut(&mut im, Rgb([0, 0, 0]), 220, 1040, 28., &font, "Sales");
     im
 }
 fn pdfium() -> PathBuf {
@@ -425,9 +437,11 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
     let t = tempfile::tempdir().unwrap();
     let source = t.path().join("scan.pdf");
     pdf(&source, &fixture());
-    if let Some(out)=std::env::var_os("NOTEGEN_FIXTURE_DIR") {
-        let folder=PathBuf::from(out);fs::create_dir_all(&folder).unwrap();
-        fs::copy(&source,folder.join("scan.pdf")).unwrap();fixture().save(folder.join("scan.png")).unwrap();
+    if let Some(out) = std::env::var_os("NOTEGEN_FIXTURE_DIR") {
+        let folder = PathBuf::from(out);
+        fs::create_dir_all(&folder).unwrap();
+        fs::copy(&source, folder.join("scan.pdf")).unwrap();
+        fixture().save(folder.join("scan.png")).unwrap();
     }
     let mut im = None;
     scan::render_pdf(
@@ -519,11 +533,15 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
 fn live_model() {
     let root = PathBuf::from(std::env::var("NOTEGEN_LIVE_ROOT").expect("Set NOTEGEN_LIVE_ROOT"));
     fs::create_dir_all(&root).unwrap();
+    let log = Activity {
+        path: Some(root.join("activity.jsonl")),
+        callback: None,
+    };
     let weights = PathBuf::from(std::env::var("NOTEGEN_LIVE_WEIGHTS").unwrap());
     let projector = PathBuf::from(std::env::var("NOTEGEN_LIVE_PROJECTOR").unwrap());
     let mut model = planning::catalog()
         .into_iter()
-        .find(|m| m.id == std::env::var("NOTEGEN_LIVE_ID").unwrap_or_else(|_|"glm-ocr".into()))
+        .find(|m| m.id == std::env::var("NOTEGEN_LIVE_ID").unwrap_or_else(|_| "glm-ocr".into()))
         .unwrap();
     model.weights = weights;
     model.projector = projector;
@@ -543,15 +561,7 @@ fn live_model() {
         std::slice::from_ref(&model),
     )
     .unwrap();
-    let server = runtime::Server::start(
-        &model,
-        &p,
-        &s,
-        &Control::default(),
-        &Activity::default(),
-        &root,
-    )
-    .unwrap();
+    let server = runtime::Server::start(&model, &p, &s, &Control::default(), &log, &root).unwrap();
     let result = server
         .read(
             &DynamicImage::ImageRgb8(fixture()),
@@ -559,7 +569,7 @@ fn live_model() {
             "Accounting worksheet",
             &s,
             &Control::default(),
-            &Activity::default(),
+            &log,
             1,
         )
         .unwrap();
@@ -569,10 +579,19 @@ fn live_model() {
     )
     .unwrap();
     assert!(result.plain().contains("1250"), "{}", result.plain());
-    println!("MODEL_EVIDENCE {} {}",model.id,serde_json::to_string(&result).unwrap());
-    if model.role=="vision" {
-        assert!(result.blocks.iter().any(|b|b.kind=="figure" && b.bbox.as_ref().is_some_and(BoxRect::valid)
-            && !b.description.is_empty() && !b.interpretation.is_empty()),"Vision reader must preserve and explain the bar chart");
+    println!(
+        "MODEL_EVIDENCE {} {}",
+        model.id,
+        serde_json::to_string(&result).unwrap()
+    );
+    if model.role == "vision" {
+        assert!(
+            result.blocks.iter().any(|b| b.kind == "figure"
+                && b.bbox.as_ref().is_some_and(BoxRect::valid)
+                && !b.description.is_empty()
+                && !b.interpretation.is_empty()),
+            "Vision reader must preserve and explain the bar chart"
+        );
     }
     let table_image = DynamicImage::ImageRgb8(fixture()).crop_imm(45, 295, 815, 215);
     let table = server
@@ -582,7 +601,7 @@ fn live_model() {
             "Accounting table",
             &s,
             &Control::default(),
-            &Activity::default(),
+            &log,
             1,
         )
         .unwrap();
@@ -656,92 +675,295 @@ fn unrecognized_graphics_are_preserved() {
 
 #[test]
 fn live_lighton_mixed_html_markdown_table_is_editable() {
-    let text="<table>\n### Table - Sales Summary\n*Type: data*\n\n| Item | Amount |\n|------|-------|\n| Sales | 1250 |\n\n</table>";
-    let p=parsing::lighton(text);let t=p.blocks.iter().find(|b|b.kind=="table").unwrap();
-    assert_eq!(t.rows[1][1],"1250");assert!(p.validate().is_ok());
+    let text = "<table>\n### Table - Sales Summary\n*Type: data*\n\n| Item | Amount |\n|------|-------|\n| Sales | 1250 |\n\n</table>";
+    let p = parsing::lighton(text);
+    let t = p.blocks.iter().find(|b| b.kind == "table").unwrap();
+    assert_eq!(t.rows[1][1], "1250");
+    assert!(p.validate().is_ok());
 }
 #[test]
 fn balanced_skips_only_agreed_plain_pages_and_preserves_human_work() {
-    let mut p=Page{agreement:0.99,content:PageContent{blocks:vec![Block::text("Clean print")],..Default::default()},..Default::default()};
-    let mut s=Settings{preset:Preset::Balanced,..Default::default()};
-    assert!(!notegen::pipeline::should_read("vision","vision",&p,&s));
-    assert!(notegen::pipeline::should_read("ocr","ocr",&p,&s));
-    s.handwriting=true;assert!(notegen::pipeline::should_read("vision","vision",&p,&s));
-    s.handwriting=false;p.content.blocks.push(Block{kind:"figure".into(),bbox:Some(BoxRect::full()),..Default::default()});
-    assert!(notegen::pipeline::should_read("vision","vision",&p,&s));
-    p.edited=true;assert!(!notegen::pipeline::should_read("ocr","ocr",&p,&s));
+    let mut p = Page {
+        agreement: 0.99,
+        content: PageContent {
+            blocks: vec![Block::text("Clean print")],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut s = Settings {
+        preset: Preset::Balanced,
+        ..Default::default()
+    };
+    assert!(!notegen::pipeline::should_read("vision", "vision", &p, &s));
+    assert!(notegen::pipeline::should_read("ocr", "ocr", &p, &s));
+    s.handwriting = true;
+    assert!(notegen::pipeline::should_read("vision", "vision", &p, &s));
+    s.handwriting = false;
+    p.content.blocks.push(Block {
+        kind: "figure".into(),
+        bbox: Some(BoxRect::full()),
+        ..Default::default()
+    });
+    assert!(notegen::pipeline::should_read("vision", "vision", &p, &s));
+    p.edited = true;
+    assert!(!notegen::pipeline::should_read("ocr", "ocr", &p, &s));
 }
 
 #[test]
 fn source_blur_warnings_survive_new_ai_consensus() {
-    let readers=vec![candidate("a","a","Correct 1250"),candidate("b","b","Correct 1250")];
-    let (mut content,_)=consensus::select(&readers,2,0.92);
-    notegen::pipeline::retain_source_warnings(&["Blur/low detail detected".into()],&mut content);
-    let page=Page{agreement:1.,content,source_warnings:vec!["Blur/low detail detected".into()],..Default::default()};
-    assert!(page.needs_review(0.9));assert_eq!(page.content.warnings.len(),1);
+    let readers = vec![
+        candidate("a", "a", "Correct 1250"),
+        candidate("b", "b", "Correct 1250"),
+    ];
+    let (mut content, _) = consensus::select(&readers, 2, 0.92);
+    notegen::pipeline::retain_source_warnings(&["Blur/low detail detected".into()], &mut content);
+    let page = Page {
+        agreement: 1.,
+        content,
+        source_warnings: vec!["Blur/low detail detected".into()],
+        ..Default::default()
+    };
+    assert!(page.needs_review(0.9));
+    assert_eq!(page.content.warnings.len(), 1);
 }
 #[test]
 fn manual_and_recovery_image_limits_override_specialist_defaults() {
-    let m=planning::catalog().into_iter().find(|m|m.id=="lighton3-1b").unwrap();
-    assert_eq!(runtime::input_edge(&m,&Settings::default()),1540);
-    assert_eq!(runtime::input_edge(&m,&Settings{image_edge:3072,..Default::default()}),3072);
-    assert_eq!(runtime::input_edge(&m,&Settings{image_edge:1024,..Default::default()}),1024);
+    let m = planning::catalog()
+        .into_iter()
+        .find(|m| m.id == "lighton3-1b")
+        .unwrap();
+    assert_eq!(runtime::input_edge(&m, &Settings::default()), 1540);
+    assert_eq!(
+        runtime::input_edge(
+            &m,
+            &Settings {
+                image_edge: 3072,
+                ..Default::default()
+            }
+        ),
+        3072
+    );
+    assert_eq!(
+        runtime::input_edge(
+            &m,
+            &Settings {
+                image_edge: 1024,
+                ..Default::default()
+            }
+        ),
+        1024
+    );
 }
 
 #[test]
 fn solid_chart_bars_are_not_recreated_as_empty_tables() {
-    let mut g=image::GrayImage::from_pixel(600,800,image::Luma([255]));
-    for y in 200..500 {for x in 100..300 {g.put_pixel(x,y,image::Luma([40]));}}
-    assert!(scan::tables(&g,&[]).is_empty());
-    let mut grid=image::GrayImage::from_pixel(600,800,image::Luma([255]));
-    for y in [100,200,300] {for x in 100..400 {grid.put_pixel(x,y,image::Luma([0]));}}
-    for x in [100,250,400] {for y in 100..301 {grid.put_pixel(x,y,image::Luma([0]));}}
-    assert!(!scan::tables(&grid,&[]).is_empty(),"Real blank forms must remain editable tables");
+    let mut g = image::GrayImage::from_pixel(600, 800, image::Luma([255]));
+    for y in 200..500 {
+        for x in 100..300 {
+            g.put_pixel(x, y, image::Luma([40]));
+        }
+    }
+    assert!(scan::tables(&g, &[]).is_empty());
+    let mut grid = image::GrayImage::from_pixel(600, 800, image::Luma([255]));
+    for y in [100, 200, 300] {
+        for x in 100..400 {
+            grid.put_pixel(x, y, image::Luma([0]));
+        }
+    }
+    for x in [100, 250, 400] {
+        for y in 100..301 {
+            grid.put_pixel(x, y, image::Luma([0]));
+        }
+    }
+    assert!(
+        !scan::tables(&grid, &[]).is_empty(),
+        "Real blank forms must remain editable tables"
+    );
 }
 
 #[test]
 fn contextual_reader_does_not_discard_unmatched_source_diagrams() {
-    let first=BoxRect{left:0.1,top:0.1,right:0.4,bottom:0.4};
-    let second=BoxRect{left:0.6,top:0.6,right:0.9,bottom:0.9};
-    let mut target=PageContent{blocks:vec![
-        Block{kind:"figure".into(),bbox:Some(first.clone()),description:"First source".into(),..Default::default()},
-        Block{kind:"figure".into(),bbox:Some(second),description:"Second source".into(),uncertain:true,..Default::default()}
-    ],..Default::default()};
-    let incoming=PageContent{blocks:vec![Block{kind:"figure".into(),bbox:Some(first),description:"Visible bars".into(),interpretation:"Likely a sales comparison".into(),..Default::default()}],..Default::default()};
-    notegen::pipeline::merge_contextual_figures(&mut target,&incoming);
-    assert_eq!(target.blocks.len(),2);
-    assert!(target.blocks.iter().any(|b|b.description=="Second source"));
-    assert!(target.blocks.iter().any(|b|b.interpretation.contains("sales")));
+    let first = BoxRect {
+        left: 0.1,
+        top: 0.1,
+        right: 0.4,
+        bottom: 0.4,
+    };
+    let second = BoxRect {
+        left: 0.6,
+        top: 0.6,
+        right: 0.9,
+        bottom: 0.9,
+    };
+    let mut target = PageContent {
+        blocks: vec![
+            Block {
+                kind: "figure".into(),
+                bbox: Some(first.clone()),
+                description: "First source".into(),
+                ..Default::default()
+            },
+            Block {
+                kind: "figure".into(),
+                bbox: Some(second),
+                description: "Second source".into(),
+                uncertain: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let incoming = PageContent {
+        blocks: vec![Block {
+            kind: "figure".into(),
+            bbox: Some(first),
+            description: "Visible bars".into(),
+            interpretation: "Likely a sales comparison".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    notegen::pipeline::merge_contextual_figures(&mut target, &incoming);
+    assert_eq!(target.blocks.len(), 2);
+    assert!(
+        target
+            .blocks
+            .iter()
+            .any(|b| b.description == "Second source")
+    );
+    assert!(
+        target
+            .blocks
+            .iter()
+            .any(|b| b.interpretation.contains("sales"))
+    );
 }
 #[test]
 fn late_ai_checkpoints_cannot_overwrite_manual_edits() {
-    let dir=tempfile::tempdir().unwrap();let project=project(dir.path(),vec![1]);
-    let raw=Page{page:1,image:"page-00001.png".into(),content:PageContent{blocks:vec![Block::text("AI original")],..Default::default()},..Default::default()};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path(), vec![1]);
+    let raw = Page {
+        page: 1,
+        image: "page-00001.png".into(),
+        content: PageContent {
+            blocks: vec![Block::text("AI original")],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     project.save(&raw).unwrap();
-    let mut human=raw.clone();human.edited=true;human.content.blocks[0].text="Human correction 1500".into();
+    let mut human = raw.clone();
+    human.edited = true;
+    human.content.blocks[0].text = "Human correction 1500".into();
     project.save(&human).unwrap();
     project.save(&raw).unwrap();
-    assert_eq!(project.load(1).unwrap().content.plain(),"Human correction 1500");
-    fs::write(project.page_path(1),b"corrupt automatic cache").unwrap();
-    assert_eq!(project.load(1).unwrap().content.plain(),"Human correction 1500");
+    assert_eq!(
+        project.load(1).unwrap().content.plain(),
+        "Human correction 1500"
+    );
+    fs::write(project.page_path(1), b"corrupt automatic cache").unwrap();
+    assert_eq!(
+        project.load(1).unwrap().content.plain(),
+        "Human correction 1500"
+    );
 }
 
 #[test]
 fn identical_tables_at_distinct_source_locations_are_not_collapsed() {
-    let mut a=candidate("a","a","Intro");let mut b=candidate("b","b","Intro");
-    let table=|top|Block{kind:"table".into(),rows:vec![vec!["Sales".into(),"1250".into()]],
-        bbox:Some(BoxRect{left:0.1,top,right:0.9,bottom:top+0.15}),..Default::default()};
-    a.content.blocks.push(table(0.1));b.content.blocks.extend([table(0.1),table(0.6)]);
-    let (p,_)=consensus::select(&[a,b],2,0.92);
-    assert_eq!(p.blocks.iter().filter(|b|b.kind=="table").count(),2);
+    let mut a = candidate("a", "a", "Intro");
+    let mut b = candidate("b", "b", "Intro");
+    let table = |top| Block {
+        kind: "table".into(),
+        rows: vec![vec!["Sales".into(), "1250".into()]],
+        bbox: Some(BoxRect {
+            left: 0.1,
+            top,
+            right: 0.9,
+            bottom: top + 0.15,
+        }),
+        ..Default::default()
+    };
+    a.content.blocks.push(table(0.1));
+    b.content.blocks.extend([table(0.1), table(0.6)]);
+    let (p, _) = consensus::select(&[a, b], 2, 0.92);
+    assert_eq!(p.blocks.iter().filter(|b| b.kind == "table").count(), 2);
 }
 #[test]
 fn matching_table_recovers_grounding_for_specialist_crop_retries() {
-    let mut a=candidate("a","a","Intro");let mut b=candidate("b","b","Intro");
-    let table=Block{kind:"table".into(),rows:vec![vec!["Sales".into(),"1250".into()]],..Default::default()};
-    a.content.blocks.push(table.clone());let mut grounded=table;
-    grounded.bbox=Some(BoxRect{left:0.1,top:0.3,right:0.9,bottom:0.6});b.content.blocks.push(grounded);
-    let (p,_)=consensus::select(&[a,b],2,0.92);
-    assert_eq!(p.blocks.iter().filter(|b|b.kind=="table").count(),1);
-    assert!(p.blocks.iter().find(|b|b.kind=="table").unwrap().bbox.is_some());
+    let mut a = candidate("a", "a", "Intro");
+    let mut b = candidate("b", "b", "Intro");
+    let table = Block {
+        kind: "table".into(),
+        rows: vec![vec!["Sales".into(), "1250".into()]],
+        ..Default::default()
+    };
+    a.content.blocks.push(table.clone());
+    let mut grounded = table;
+    grounded.bbox = Some(BoxRect {
+        left: 0.1,
+        top: 0.3,
+        right: 0.9,
+        bottom: 0.6,
+    });
+    b.content.blocks.push(grounded);
+    let (p, _) = consensus::select(&[a, b], 2, 0.92);
+    assert_eq!(p.blocks.iter().filter(|b| b.kind == "table").count(), 1);
+    assert!(
+        p.blocks
+            .iter()
+            .find(|b| b.kind == "table")
+            .unwrap()
+            .bbox
+            .is_some()
+    );
+}
+
+#[test]
+fn invalid_reader_boxes_keep_text_and_preserve_uncertain_source() {
+    let raw = r#"{"blocks":[{"kind":"text","text":"Recognized 1250","box":{"left":0,"top":0,"right":0,"bottom":0}},{"kind":"figure","description":"A sales bar chart","interpretation":"Likely visualizes the table's sales amount","box":{"left":50,"top":100,"right":900,"bottom":950}}]}"#;
+    assert!(parsing::structured(raw).is_err());
+    let p = parsing::structured_reader(raw).unwrap();
+    assert!(p.plain().contains("1250"));
+    assert!(p.blocks[0].bbox.is_none());
+    assert_eq!(p.blocks[1].bbox, Some(BoxRect::full()));
+    assert!(p.blocks.iter().all(|b| b.uncertain));
+    assert_eq!(p.warnings.len(), 1);
+}
+#[test]
+fn valid_reader_boxes_are_preserved_without_repair() {
+    let raw = r#"{"blocks":[{"kind":"figure","description":"A bar","interpretation":"Likely a comparison","box":{"left":0.1,"top":0.2,"right":0.5,"bottom":0.6}}]}"#;
+    let p = parsing::structured_reader(raw).unwrap();
+    assert!(p.warnings.is_empty());
+    assert_eq!(p.blocks[0].bbox.as_ref().unwrap().left, 0.1);
+    assert!(
+        parsing::structured_reader(r#"{"blocks":[{"kind":"table","rows":[["A"],["B","C"]]}]}"#)
+            .is_err()
+    );
+}
+#[test]
+fn raw_reader_evidence_is_retained_with_safe_unique_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = Activity {
+        path: Some(dir.path().join("activity.jsonl")),
+        callback: None,
+    };
+    log.capture_response("../reader", 1, "bad box 900").unwrap();
+    log.capture_response("../reader", 1, "second attempt")
+        .unwrap();
+    let paths = fs::read_dir(dir.path().join("responses"))
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 2);
+    assert!(
+        paths
+            .iter()
+            .all(|p| p.parent() == Some(dir.path().join("responses").as_path()))
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|p| fs::read_to_string(p).unwrap() == "bad box 900")
+    );
 }

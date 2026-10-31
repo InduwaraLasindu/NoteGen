@@ -123,7 +123,13 @@ pub fn safe_image(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(p)
 }
 pub fn export(project: &Project, target: &Path, c: &Control) -> Result<()> {
-    export_inner(project,target,c).map_err(|e| if e.downcast_ref::<Fault>().is_some() {e} else {Fault::new("NG400",format!("Could not save Word document: {e}")).into()})
+    export_inner(project, target, c).map_err(|e| {
+        if e.downcast_ref::<Fault>().is_some() {
+            e
+        } else {
+            Fault::new("NG400", format!("Could not save Word document: {e}")).into()
+        }
+    })
 }
 fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
     anyhow::ensure!(

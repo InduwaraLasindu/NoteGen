@@ -154,18 +154,26 @@ pub fn select(candidates: &[Candidate], minimum: usize, threshold: f64) -> (Page
     // Align structures one-to-one per reader. Similar tables at different locations
     // must not collapse, and a grounded reader can supply a missing source box.
     for candidate in &voters {
-        let mut assigned=HashSet::new();
-        for block in candidate.content.blocks.iter().filter(|b|b.kind=="table" || b.kind=="figure") {
-            let matched=result.blocks.iter().enumerate().position(|(index,b)| {
-                !assigned.contains(&index) && b.kind==block.kind &&
-                match b.bbox.as_ref().zip(block.bbox.as_ref()) {
-                    Some((a,b))=>overlap(a,b)>0.35,
-                    None=>b.kind=="table" && similarity(&b.plain(),&block.plain())>0.85
-                }
+        let mut assigned = HashSet::new();
+        for block in candidate
+            .content
+            .blocks
+            .iter()
+            .filter(|b| b.kind == "table" || b.kind == "figure")
+        {
+            let matched = result.blocks.iter().enumerate().position(|(index, b)| {
+                !assigned.contains(&index)
+                    && b.kind == block.kind
+                    && match b.bbox.as_ref().zip(block.bbox.as_ref()) {
+                        Some((a, b)) => overlap(a, b) > 0.35,
+                        None => b.kind == "table" && similarity(&b.plain(), &block.plain()) > 0.85,
+                    }
             });
-            if let Some(index)=matched {
+            if let Some(index) = matched {
                 assigned.insert(index);
-                if result.blocks[index].bbox.is_none(){result.blocks[index].bbox=block.bbox.clone();}
+                if result.blocks[index].bbox.is_none() {
+                    result.blocks[index].bbox = block.bbox.clone();
+                }
             } else {
                 assigned.insert(result.blocks.len());
                 result.blocks.push(block.clone());

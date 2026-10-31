@@ -102,7 +102,11 @@ fn run() -> Result<()> {
             };
             println!(
                 "{}",
-                serde_json::to_string_pretty(&planning::build(&hardware::detect_for(&s, &c), &s, &models)?)?
+                serde_json::to_string_pretty(&planning::build(
+                    &hardware::detect_for(&s, &c),
+                    &s,
+                    &models
+                )?)?
             );
         }
         Action::Catalog => println!("{}", serde_json::to_string_pretty(&planning::catalog())?),
