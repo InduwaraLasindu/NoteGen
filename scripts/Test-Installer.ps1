@@ -8,11 +8,24 @@ $Evidence=(Resolve-Path $Evidence).Path
 $installDir=Join-Path $env:LOCALAPPDATA ('Programs/NoteGen installer QA '+[guid]::NewGuid().ToString('N'))
 $registry='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{6D37E156-3C8D-4BB7-AAC8-8F6C4C8F331A}_is1'
 $results=[System.Collections.Generic.List[string]]::new()
-function Wait-QAProcess([Diagnostics.Process]$process,[string]$stage,[int]$seconds=180) {
+function Wait-QAProcess([Diagnostics.Process]$process,[string]$stage,[int]$seconds=180,[string]$LogPath='') {
  Write-Host "[QA] Waiting for $stage (PID $($process.Id), limit $seconds seconds)"
- if(-not $process.WaitForExit($seconds*1000)){
-  try{$process.Kill($true)}catch{}
-  throw "$stage exceeded $seconds seconds. The disposable test process was stopped."
+ $watch=[Diagnostics.Stopwatch]::StartNew();$nextLog=0
+ while($true){
+  $process.Refresh()
+  if($process.HasExited){break}
+  if($watch.Elapsed.TotalSeconds -ge $nextLog){
+   Write-Host "[QA] $stage active: $([int]$watch.Elapsed.TotalSeconds)s"
+   if($LogPath -and (Test-Path $LogPath)){Get-Content $LogPath -Tail 8 -ErrorAction SilentlyContinue | ForEach-Object {Write-Host "[installer] $_"}}
+   $nextLog=$watch.Elapsed.TotalSeconds+15
+  }
+  if($watch.Elapsed.TotalSeconds -gt $seconds){
+   if($LogPath -and (Test-Path $LogPath)){Get-Content $LogPath -Tail 80 -ErrorAction SilentlyContinue | Write-Host}
+   # Stop the named disposable parent without a blocking descendant-tree walk.
+   Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+   throw "$stage exceeded $seconds seconds. The disposable test parent was stopped; see the streamed installer log."
+  }
+  Start-Sleep -Milliseconds 250
  }
  $code=$process.ExitCode
  Write-Host "[QA] $stage exited with code $code"
@@ -23,7 +36,7 @@ function Install-NoteGen([string]$name,[switch]$AI) {
  $installArgs=@('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/TASKS=desktopicon',('/DIR="{0}"' -f $installDir),('/LOG="{0}"' -f (Join-Path $Evidence "$name.log")))
  if($AI){$installArgs+=@('/AI=1','/AIBACKEND=cpu')}
  $p=Start-Process -FilePath $Installer -ArgumentList $installArgs -PassThru
- $exit=Wait-QAProcess $p "Installer $name" $(if($AI){900}else{180})
+ $exit=Wait-QAProcess $p "Installer $name" $(if($AI){600}else{180}) (Join-Path $Evidence "$name.log")
  if($exit -ne 0){throw "Installer failed ($name): $exit"}
 }
 function Test-Desktop([string]$name) {

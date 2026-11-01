@@ -114,7 +114,16 @@ jobs:
           $previous=(Resolve-Path "./build/previous-installer/NoteGen-Setup-0.3.0.exe").Path
           $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $test),'-Installer',('"{0}"' -f $setup),'-Version',$env:RELEASE_VERSION,'-PreviousInstaller',('"{0}"' -f $previous))
           $process=Start-Process pwsh -ArgumentList $arguments -PassThru -NoNewWindow
-          if(-not $process.WaitForExit(1200000)){try{$process.Kill($true)}catch{};throw 'Installer acceptance exceeded twenty minutes; see stage logs'}
+          $watch=[Diagnostics.Stopwatch]::StartNew();$nextLog=0
+          while(-not $process.HasExited){
+            if($watch.Elapsed.TotalSeconds -gt 780){Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue;throw 'Installer acceptance exceeded thirteen minutes; see streamed logs'}
+            if($watch.Elapsed.TotalSeconds -ge $nextLog){
+              Get-ChildItem build/installer-evidence -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object {Write-Host "[QA monitor] $($_.Name)";Get-Content $_.FullName -Tail 5 -ErrorAction SilentlyContinue | Write-Host}
+              $nextLog=$watch.Elapsed.TotalSeconds+15
+            }
+            Start-Sleep -Seconds 1
+            $process.Refresh()
+          }
           if($process.ExitCode -ne 0){throw "Installer acceptance failed: $($process.ExitCode)"}
       - name: Seal the tested release manifest
         shell: pwsh
