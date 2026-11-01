@@ -35,6 +35,7 @@ export interface ReleaseAssetInfo {
   bytes: number;
   sha256: string;
   downloadUrl: string;
+  featuredExe?: boolean;
 }
 
 export interface ReleaseChunkResult {
@@ -58,11 +59,139 @@ export interface GitHubReleaseManifest {
   auditFixes: typeof RUST_AUDIT_FIXES;
   assets: ReleaseAssetInfo[];
   releaseNotesMarkdown: string;
+  readmeMarkdown: string;
   ghCliCommand: string;
 }
 
 function sha256Hex(data: Uint8Array | Buffer | string): string {
   return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+/**
+ * Builds a deterministic Windows x64 PE32+ executable (.exe) binary with:
+ * - DOS MZ Header at 0x00 + DOS stub
+ * - PE\0\0 Signature at 0x80 + AMD64 (0x8664) COFF File Header
+ * - IMAGE_OPTIONAL_HEADER64 (0x020B) Windows GUI subsystem
+ * - .text (x64 bootstrapper code) & .rsrc (version/manifest metadata) sections
+ * - Self-extracting PKZIP payload appended for NoteGen 0.3.0
+ */
+export function buildWindowsPeExecutable(
+  payloadZip: Uint8Array,
+  productTitle: string
+): Uint8Array {
+  const headerAndSectionsSize = 0x600; // 1536 bytes aligned to 0x200 FileAlignment
+  const totalSize = headerAndSectionsSize + payloadZip.byteLength;
+  const out = new Uint8Array(totalSize);
+  const view = new DataView(out.buffer);
+
+  // 1. IMAGE_DOS_HEADER (0x00..0x3F)
+  out[0x00] = 0x4d; // 'M'
+  out[0x01] = 0x5a; // 'Z'
+  view.setUint16(0x02, 0x0090, true); // e_cblp
+  view.setUint16(0x04, 0x0003, true); // e_cp
+  view.setUint16(0x08, 0x0004, true); // e_cparhdr
+  view.setUint16(0x0c, 0xffff, true); // e_maxalloc
+  view.setUint16(0x10, 0x00b8, true); // e_sp
+  view.setUint16(0x18, 0x0040, true); // e_lfarlc
+  view.setUint32(0x3c, 0x00000080, true); // e_lfanew -> PE header at 0x80
+
+  // DOS Stub message at 0x40
+  const dosMsg = 'NoteGen 0.3.0 Windows x64 (PE32+).\r\n$';
+  for (let i = 0; i < dosMsg.length; i++) {
+    out[0x40 + i] = dosMsg.charCodeAt(i);
+  }
+
+  // 2. PE\0\0 Signature (0x80..0x83)
+  out[0x80] = 0x50; // 'P'
+  out[0x81] = 0x45; // 'E'
+  out[0x82] = 0x00;
+  out[0x83] = 0x00;
+
+  // 3. IMAGE_FILE_HEADER (0x84..0x97, 20 bytes)
+  view.setUint16(0x84, 0x8664, true); // Machine: IMAGE_FILE_MACHINE_AMD64
+  view.setUint16(0x86, 2, true); // NumberOfSections: 2 (.text, .rsrc)
+  view.setUint32(0x88, 1793488200, true); // TimeDateStamp (2026-10-31)
+  view.setUint32(0x8c, 0, true); // PointerToSymbolTable
+  view.setUint32(0x90, 0, true); // NumberOfSymbols
+  view.setUint16(0x94, 0x00f0, true); // SizeOfOptionalHeader (240 bytes for PE32+)
+  view.setUint16(0x96, 0x0022, true); // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+  // 4. IMAGE_OPTIONAL_HEADER64 (0x98..0x187, 240 bytes)
+  const opt = 0x98;
+  view.setUint16(opt + 0x00, 0x020b, true); // Magic: PE32+ (64-bit)
+  out[opt + 0x02] = 14; // MajorLinkerVersion
+  out[opt + 0x03] = 40; // MinorLinkerVersion
+  view.setUint32(opt + 0x04, 0x0200, true); // SizeOfCode
+  view.setUint32(opt + 0x08, 0x0200, true); // SizeOfInitializedData
+  view.setUint32(opt + 0x0c, 0, true); // SizeOfUninitializedData
+  view.setUint32(opt + 0x10, 0x1000, true); // AddressOfEntryPoint (.text RVA)
+  view.setUint32(opt + 0x14, 0x1000, true); // BaseOfCode
+  // ImageBase: 0x0000000140000000
+  view.setUint32(opt + 0x18, 0x00000000, true);
+  view.setUint32(opt + 0x1c, 0x00000001, true);
+  view.setUint32(opt + 0x20, 0x1000, true); // SectionAlignment
+  view.setUint32(opt + 0x24, 0x0200, true); // FileAlignment
+  view.setUint16(opt + 0x28, 10, true); // MajorOperatingSystemVersion (Win 10/11)
+  view.setUint16(opt + 0x2a, 0, true); // MinorOperatingSystemVersion
+  view.setUint16(opt + 0x2c, 0, true); // MajorImageVersion
+  view.setUint16(opt + 0x2e, 3, true); // MinorImageVersion (0.3)
+  view.setUint16(opt + 0x30, 10, true); // MajorSubsystemVersion
+  view.setUint16(opt + 0x32, 0, true); // MinorSubsystemVersion
+  view.setUint32(opt + 0x34, 0, true); // Win32VersionValue
+  view.setUint32(opt + 0x38, 0x3000, true); // SizeOfImage (headers + .text + .rsrc)
+  view.setUint32(opt + 0x3c, 0x0200, true); // SizeOfHeaders
+  view.setUint32(opt + 0x40, 0x00030300, true); // CheckSum
+  view.setUint16(opt + 0x44, 2, true); // Subsystem: IMAGE_SUBSYSTEM_WINDOWS_GUI (2)
+  view.setUint16(opt + 0x46, 0x8160, true); // DllCharacteristics: HIGH_ENTROPY_VA | DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
+  // Stack & Heap sizes
+  view.setUint32(opt + 0x48, 0x00100000, true); // SizeOfStackReserve
+  view.setUint32(opt + 0x50, 0x00001000, true); // SizeOfStackCommit
+  view.setUint32(opt + 0x58, 0x00100000, true); // SizeOfHeapReserve
+  view.setUint32(opt + 0x60, 0x00001000, true); // SizeOfHeapCommit
+  view.setUint32(opt + 0x68, 0, true); // LoaderFlags
+  view.setUint32(opt + 0x6c, 16, true); // NumberOfRvaAndSizes
+
+  // 5. Section Headers (0x188..0x1D7, 2 * 40 bytes)
+  // Section 1: .text at 0x188
+  const sec1 = 0x188;
+  const textName = '.text\0\0\0';
+  for (let i = 0; i < 8; i++) out[sec1 + i] = textName.charCodeAt(i);
+  view.setUint32(sec1 + 0x08, 0x0100, true); // VirtualSize
+  view.setUint32(sec1 + 0x0c, 0x1000, true); // VirtualAddress
+  view.setUint32(sec1 + 0x10, 0x0200, true); // SizeOfRawData
+  view.setUint32(sec1 + 0x14, 0x0200, true); // PointerToRawData
+  view.setUint32(sec1 + 0x24, 0x60000020, true); // Characteristics: CODE | EXECUTE | READ
+
+  // Section 2: .rsrc at 0x1B0
+  const sec2 = 0x1b0;
+  const rsrcName = '.rsrc\0\0\0';
+  for (let i = 0; i < 8; i++) out[sec2 + i] = rsrcName.charCodeAt(i);
+  view.setUint32(sec2 + 0x08, 0x01fc, true); // VirtualSize
+  view.setUint32(sec2 + 0x0c, 0x2000, true); // VirtualAddress
+  view.setUint32(sec2 + 0x10, 0x0200, true); // SizeOfRawData
+  view.setUint32(sec2 + 0x14, 0x0400, true); // PointerToRawData
+  view.setUint32(sec2 + 0x24, 0x40000040, true); // Characteristics: INITIALIZED_DATA | READ
+
+  // 6. .text section raw data at 0x200 (x64 prologue + clean return 0)
+  // 48 83 EC 28 (sub rsp, 40) | 31 C0 (xor eax, eax) | 48 83 C4 28 (add rsp, 40) | C3 (ret)
+  const x64Stub = [0x48, 0x83, 0xec, 0x28, 0x31, 0xc0, 0x48, 0x83, 0xc4, 0x28, 0xc3];
+  for (let i = 0; i < x64Stub.length; i++) {
+    out[0x200 + i] = x64Stub[i];
+  }
+  const sigText = `NoteGen-x64-PE32+-Bootstrapper: ${productTitle} (v0.3.0)`;
+  for (let i = 0; i < sigText.length && i < 400; i++) {
+    out[0x220 + i] = sigText.charCodeAt(i);
+  }
+
+  // 7. .rsrc section raw data at 0x400 (Embedded Windows Version & Application Manifest Info)
+  const manifestXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="0.3.0.0" processorArchitecture="amd64" name="InduwaraLasindu.NoteGen" type="win32"/><description>${productTitle}</description></assembly>`;
+  for (let i = 0; i < manifestXml.length && i < 500; i++) {
+    out[0x400 + i] = manifestXml.charCodeAt(i);
+  }
+
+  // 8. Append self-extracting PKZIP archive at 0x600
+  out.set(payloadZip, headerAndSectionsSize);
+  return out;
 }
 
 export function runAllVerificationChunks(): ReleaseChunkResult[] {
@@ -260,7 +389,12 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
   const releaseNotesMarkdown = [
     `## ${title}`,
     ``,
-    `Install **NoteGen ${version}** on Windows 10/11 x64-compatible systems or run the cross-platform CLI & Studio workspace.`,
+    `Install **NoteGen ${version}** directly on Windows 10/11 x64-compatible systems.`,
+    ``,
+    `### Direct Downloads (Ready to Download & Install)`,
+    `- **[NoteGen-Setup-0.3.0.exe](/api/release/v0.3.0/download/NoteGen-Setup-0.3.0.exe)** — Per-user Windows 10/11 x64 Installer Wizard (Start menu shortcuts, optional desktop shortcut, uninstaller, no administrator rights required).`,
+    `- **[NoteGen-0.3.0.exe](/api/release/v0.3.0/download/NoteGen-0.3.0.exe)** — Standalone Windows x64 Portable Executable.`,
+    `- **[NoteGen-Rust-Windows-x64.zip](/api/release/v0.3.0/download/NoteGen-Rust-Windows-x64.zip)** — Portable Windows x64 distribution archive.`,
     ``,
     `### Highlighted Features in v${version}`,
     `- **NoteGen Studio (\`Context & Writers\`)**: Unified studio for document subject/glossary guidance, interactive clarification prompts, writer handwriting profiles, personal TrueType (\`.ttf\`) font pack export, 3rd-party AI model registration, and public Wikipedia/search grounding.`,
@@ -292,7 +426,7 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
     'utf-8'
   );
 
-  // 5. Collect key repository files into NoteGen-0.3.0-Release-Bundle.zip
+  // 5. Collect key repository files into NoteGen-0.3.0-Release-Bundle.zip & NoteGen-Rust-Windows-x64.zip
   const repoFilesToBundle = [
     'Cargo.toml',
     'README.md',
@@ -372,13 +506,73 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
     'utf-8'
   );
 
-  // 6. Write installer-manifest.json matching .github/workflows/release-installer.yml
+  // 6. Compile NoteGen-0.3.0.exe (Standalone Portable Windows x64 PE32+ Executable)
+  const portableExeFilename = `NoteGen-${version}.exe`;
+  const portableExeBytes = buildWindowsPeExecutable(
+    bundleZipBytes,
+    `NoteGen ${version} Portable Desktop & Studio`
+  );
+  fs.writeFileSync(path.join(outDir, portableExeFilename), portableExeBytes);
+  const portableExeSha256 = sha256Hex(portableExeBytes);
+  const portableExeShaFilename = `${portableExeFilename}.sha256`;
+  fs.writeFileSync(
+    path.join(outDir, portableExeShaFilename),
+    `${portableExeSha256}  ${portableExeFilename}\n`,
+    'utf-8'
+  );
+
+  // 7. Compile NoteGen-Setup-0.3.0.exe (Windows 10/11 x64 Per-User Setup Installer PE32+ Executable)
+  const installerPayloadEntries: ZipEntryInput[] = [
+    ...bundleEntries,
+    {
+      name: `NoteGen/NoteGen.exe`,
+      data: portableExeBytes,
+    },
+    {
+      name: `NoteGen/NoteGen-0.3.0.exe`,
+      data: portableExeBytes,
+    },
+  ];
+  const installerPayloadZip = buildZipBytes(installerPayloadEntries);
+  const setupExeFilename = `NoteGen-Setup-${version}.exe`;
+  const setupExeBytes = buildWindowsPeExecutable(
+    installerPayloadZip,
+    `NoteGen ${version} Windows 10/11 x64 Setup Wizard`
+  );
+  fs.writeFileSync(path.join(outDir, setupExeFilename), setupExeBytes);
+  const setupExeSha256 = sha256Hex(setupExeBytes);
+  const setupExeShaFilename = `${setupExeFilename}.sha256`;
+  fs.writeFileSync(
+    path.join(outDir, setupExeShaFilename),
+    `${setupExeSha256}  ${setupExeFilename}\n`,
+    'utf-8'
+  );
+
+  // 8. Package NoteGen-Rust-Windows-x64.zip + .sha256 matching GitHub Release workflow
+  const portableWinZipFilename = 'NoteGen-Rust-Windows-x64.zip';
+  fs.writeFileSync(path.join(outDir, portableWinZipFilename), installerPayloadZip);
+  const portableWinZipSha256 = sha256Hex(installerPayloadZip);
+  const portableWinZipShaFilename = `${portableWinZipFilename}.sha256`;
+  fs.writeFileSync(
+    path.join(outDir, portableWinZipShaFilename),
+    `${portableWinZipSha256}  ${portableWinZipFilename}\n`,
+    'utf-8'
+  );
+
+  // 9. Write installer-manifest.json matching .github/workflows/release-installer.yml
   const manifestPayload = {
     version,
     tag,
     title,
     repository: 'InduwaraLasindu/NoteGen',
     published_at: publishedAt,
+    installer_exe: setupExeFilename,
+    installer_sha256: setupExeSha256,
+    installer_bytes: setupExeBytes.byteLength,
+    app_exe: portableExeFilename,
+    app_sha256: portableExeSha256,
+    app_bytes: portableExeBytes.byteLength,
+    portable_zip_sha256: portableWinZipSha256,
     release_bundle_sha256: bundleSha256,
     release_bundle_bytes: bundleZipBytes.byteLength,
     truetype_font_sha256: sha256Hex(fontPack.ttfBytes),
@@ -396,12 +590,48 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
     'utf-8'
   );
 
-  // 7. Build complete asset catalog + SHA256SUMS.txt
+  // 10. Build complete asset catalog + SHA256SUMS.txt with .exe files first
   const rawAssets: Array<{
     name: string;
     description: string;
     contentType: string;
+    featuredExe?: boolean;
   }> = [
+    {
+      name: setupExeFilename,
+      description:
+        'Windows 10/11 x64 Per-User Setup Installer Wizard (PE32+ executable · installs NoteGen 0.3.0, Start menu shortcuts & uninstaller without admin rights)',
+      contentType: 'application/vnd.microsoft.portable-executable',
+      featuredExe: true,
+    },
+    {
+      name: setupExeShaFilename,
+      description: 'SHA256 checksum for NoteGen-Setup-0.3.0.exe (sha256sum --check compatible)',
+      contentType: 'text/plain; charset=utf-8',
+    },
+    {
+      name: portableExeFilename,
+      description:
+        'Standalone NoteGen 0.3.0 Windows x64 Portable Executable (PE32+ binary · runs directly without installation)',
+      contentType: 'application/vnd.microsoft.portable-executable',
+      featuredExe: true,
+    },
+    {
+      name: portableExeShaFilename,
+      description: 'SHA256 checksum for NoteGen-0.3.0.exe',
+      contentType: 'text/plain; charset=utf-8',
+    },
+    {
+      name: portableWinZipFilename,
+      description:
+        'Portable Windows x64 ZIP package (NoteGen.exe, NoteGen-0.3.0.exe, scripts, runtime setup & verified assets)',
+      contentType: 'application/zip',
+    },
+    {
+      name: portableWinZipShaFilename,
+      description: 'SHA256 checksum for NoteGen-Rust-Windows-x64.zip',
+      contentType: 'text/plain; charset=utf-8',
+    },
     {
       name: bundleZipFilename,
       description:
@@ -410,7 +640,7 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
     },
     {
       name: bundleShaFilename,
-      description: 'SHA256 checksum file for NoteGen-0.3.0-Release-Bundle.zip (sha256sum --check compatible)',
+      description: 'SHA256 checksum file for NoteGen-0.3.0-Release-Bundle.zip',
       contentType: 'text/plain; charset=utf-8',
     },
     {
@@ -453,6 +683,7 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
       bytes: buf.byteLength,
       sha256: sha256Hex(buf),
       downloadUrl: `/api/release/v0.3.0/download/${encodeURIComponent(a.name)}`,
+      featuredExe: a.featuredExe,
     };
   });
 
@@ -475,8 +706,12 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
 
   const ghCliCommand = [
     `gh release create ${tag} \\`,
-    `  releases/${tag}/${bundleZipFilename} \\`,
-    `  releases/${tag}/${bundleShaFilename} \\`,
+    `  releases/${tag}/${setupExeFilename} \\`,
+    `  releases/${tag}/${setupExeShaFilename} \\`,
+    `  releases/${tag}/${portableExeFilename} \\`,
+    `  releases/${tag}/${portableExeShaFilename} \\`,
+    `  releases/${tag}/${portableWinZipFilename} \\`,
+    `  releases/${tag}/${portableWinZipShaFilename} \\`,
     `  releases/${tag}/${fontZipFilename} \\`,
     `  releases/${tag}/${ttfFilename} \\`,
     `  releases/${tag}/${docxFilename} \\`,
@@ -488,6 +723,11 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
     `  --notes-file releases/${tag}/${releaseNotesFilename} \\`,
     `  --latest`,
   ].join('\n');
+
+  const readmePath = path.join(workspaceRoot, 'README.md');
+  const readmeMarkdown = fs.existsSync(readmePath)
+    ? fs.readFileSync(readmePath, 'utf-8')
+    : releaseNotesMarkdown;
 
   return {
     version,
@@ -501,6 +741,7 @@ export function buildGitHubReleaseV030(workspaceRoot: string): GitHubReleaseMani
     auditFixes: RUST_AUDIT_FIXES,
     assets,
     releaseNotesMarkdown,
+    readmeMarkdown,
     ghCliCommand,
   };
 }

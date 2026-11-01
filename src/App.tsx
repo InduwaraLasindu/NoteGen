@@ -830,6 +830,20 @@ export function App() {
               Export Word (.docx)
             </button>
 
+            <a
+              href="/api/release/v0.3.0/download/NoteGen-Setup-0.3.0.exe"
+              download="NoteGen-Setup-0.3.0.exe"
+              onClick={() =>
+                setNotice(
+                  'Downloading NoteGen-Setup-0.3.0.exe (Windows 10/11 x64 Per-User Installer from Releases v0.3.0).'
+                )
+              }
+              className="px-4 py-3 rounded-xl text-xs font-medium bg-white dark:bg-[#131B2A] border border-teal-500/40 text-teal-700 dark:text-teal-300 hover:bg-teal-500/10 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <Download className="w-4 h-4 text-teal-500" />
+              Download NoteGen-Setup-0.3.0.exe
+            </a>
+
             <button
               type="button"
               onClick={() => setAdvancedOpen(true)}

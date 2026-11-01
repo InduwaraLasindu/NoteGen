@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { execSync } from 'child_process';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -14,6 +15,58 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let cachedReleaseManifest: GitHubReleaseManifest | null = null;
+let oauthGithubToken: string | null = null;
+let oauthGithubUser: string | null = null;
+
+function getActiveGithubToken(): string | null {
+  return (
+    oauthGithubToken ||
+    (process.env.GITHUB_TOKEN ? process.env.GITHUB_TOKEN.trim() : null) ||
+    null
+  );
+}
+
+function getGitRepoInfo() {
+  try {
+    const commitSha = execSync('git rev-parse HEAD', {
+      cwd: __dirname,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim();
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: __dirname,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim();
+    const tags = execSync('git tag --list', {
+      cwd: __dirname,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    return {
+      initialized: true,
+      branch,
+      commitSha,
+      tags,
+      remote:
+        process.env.GITHUB_REPOSITORY || 'InduwaraLasindu/NoteGen',
+    };
+  } catch {
+    return {
+      initialized: false,
+      branch: 'main',
+      commitSha: 'pending',
+      tags: ['v0.3.0'],
+      remote:
+        process.env.GITHUB_REPOSITORY || 'InduwaraLasindu/NoteGen',
+    };
+  }
+}
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -39,16 +92,128 @@ async function startServer() {
       status: 'ok',
       version: '0.3.0',
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+      githubAuthenticated: Boolean(getActiveGithubToken()),
+      githubUser: oauthGithubUser,
+      git: getGitRepoInfo(),
     });
   });
 
-  // GitHub Release v0.3.0 Status, Builder & Asset Download Routes
+  // GitHub OAuth Popup Flow (follows oauth-integration skill for cross-origin iframe)
+  app.get('/api/github/status', (_req, res) => {
+    const token = getActiveGithubToken();
+    res.json({
+      authenticated: Boolean(token),
+      oauthConfigured: Boolean(
+        process.env.GITHUB_CLIENT_ID || process.env.CLIENT_ID
+      ),
+      user: oauthGithubUser || (process.env.GITHUB_TOKEN ? 'env:GITHUB_TOKEN' : null),
+      repository: process.env.GITHUB_REPOSITORY || 'InduwaraLasindu/NoteGen',
+      git: getGitRepoInfo(),
+    });
+  });
+
+  app.get('/api/github/auth/url', (req, res) => {
+    const clientId =
+      process.env.GITHUB_CLIENT_ID || process.env.CLIENT_ID || '';
+    const redirectUri =
+      String(req.query.redirectUri || '').trim() ||
+      `${process.env.APP_URL || 'http://localhost:3000'}/auth/callback`;
+
+    if (!clientId) {
+      return res.status(400).json({
+        error:
+          'GitHub OAuth Client ID is not configured yet. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET (or GITHUB_TOKEN) in environment settings, or use the 1-Click Pre-Filled GitHub Release button.',
+      });
+    }
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: 'repo workflow',
+    });
+    res.json({
+      url: `https://github.com/login/oauth/authorize?${params.toString()}`,
+    });
+  });
+
+  const handleOAuthCallback = async (
+    req: express.Request,
+    res: express.Response
+  ) => {
+    const code = String(req.query.code || '').trim();
+    const clientId =
+      process.env.GITHUB_CLIENT_ID || process.env.CLIENT_ID || '';
+    const clientSecret =
+      process.env.GITHUB_CLIENT_SECRET || process.env.CLIENT_SECRET || '';
+
+    if (code && clientId && clientSecret) {
+      try {
+        const tokenResp = await fetch(
+          'https://github.com/login/oauth/access_token',
+          {
+            method: 'POST',
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              client_id: clientId,
+              client_secret: clientSecret,
+              code,
+            }),
+          }
+        );
+        const tokenData = (await tokenResp.json()) as {
+          access_token?: string;
+        };
+        if (tokenData.access_token) {
+          oauthGithubToken = tokenData.access_token;
+          const userResp = await fetch('https://api.github.com/user', {
+            headers: {
+              Authorization: `Bearer ${oauthGithubToken}`,
+              'User-Agent': 'NoteGen-Release-Publisher/0.3.0',
+            },
+          });
+          if (userResp.ok) {
+            const userData = (await userResp.json()) as { login?: string };
+            oauthGithubUser = userData.login || 'GitHub User';
+          }
+        }
+      } catch {
+        // Handled in popup message
+      }
+    }
+
+    res.send(`<!DOCTYPE html>
+<html>
+  <body style="font-family: system-ui, sans-serif; background: #0C111C; color: #F2F5FA; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+    <script>
+      if (window.opener) {
+        window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+        window.close();
+      } else {
+        window.location.href = '/';
+      }
+    </script>
+    <p>GitHub authentication complete. This window will close automatically.</p>
+  </body>
+</html>`);
+  };
+
+  app.get(['/auth/callback', '/auth/callback/'], handleOAuthCallback);
+
+  // GitHub Release v0.3.0 Status, Builder, Publisher & Asset Download Routes
   app.get('/api/release/v0.3.0', (_req, res) => {
     try {
       if (!cachedReleaseManifest) {
         cachedReleaseManifest = buildGitHubReleaseV030(__dirname);
       }
-      return res.json(cachedReleaseManifest);
+      return res.json({
+        ...cachedReleaseManifest,
+        githubAuthenticated: Boolean(getActiveGithubToken()),
+        githubUser: oauthGithubUser,
+        git: getGitRepoInfo(),
+      });
     } catch (err) {
       return res.status(500).json({
         error:
@@ -62,13 +227,189 @@ async function startServer() {
   app.post('/api/release/v0.3.0/build', (_req, res) => {
     try {
       cachedReleaseManifest = buildGitHubReleaseV030(__dirname);
-      return res.json(cachedReleaseManifest);
+      return res.json({
+        ...cachedReleaseManifest,
+        githubAuthenticated: Boolean(getActiveGithubToken()),
+        githubUser: oauthGithubUser,
+        git: getGitRepoInfo(),
+      });
     } catch (err) {
       return res.status(500).json({
         error:
           err instanceof Error
             ? err.message
             : 'Failed to build v0.3.0 GitHub release bundle',
+      });
+    }
+  });
+
+  // Push & Publish v0.3.0 Release + Assets directly to GitHub Releases Tab via GitHub REST API
+  app.post('/api/release/v0.3.0/publish', async (req, res) => {
+    try {
+      if (!cachedReleaseManifest) {
+        cachedReleaseManifest = buildGitHubReleaseV030(__dirname);
+      }
+      const manifest = cachedReleaseManifest;
+      const repo =
+        String(req.body?.repository || '').trim() ||
+        process.env.GITHUB_REPOSITORY ||
+        manifest.repository ||
+        'InduwaraLasindu/NoteGen';
+
+      const webNewReleaseUrl = `https://github.com/${repo}/releases/new?tag=${encodeURIComponent(
+        manifest.tag
+      )}&target=${encodeURIComponent(
+        manifest.targetBranch
+      )}&title=${encodeURIComponent(
+        manifest.title
+      )}&body=${encodeURIComponent(manifest.releaseNotesMarkdown)}`;
+
+      const token = getActiveGithubToken();
+      if (!token) {
+        return res.status(401).json({
+          published: false,
+          needsAuth: true,
+          webNewReleaseUrl,
+          error:
+            'Connect GitHub OAuth (or set GITHUB_TOKEN in environment settings) for automatic API upload, or click "Open Pre-Filled GitHub Release Page" to publish in your browser.',
+        });
+      }
+
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'NoteGen-Release-Publisher/0.3.0',
+      };
+
+      // 1. Check if release v0.3.0 already exists or create it
+      let releaseData: {
+        id?: number;
+        html_url?: string;
+        upload_url?: string;
+        assets?: Array<{ id: number; name: string }>;
+      } | null = null;
+
+      const existingResp = await fetch(
+        `https://api.github.com/repos/${repo}/releases/tags/${manifest.tag}`,
+        { headers }
+      );
+      if (existingResp.ok) {
+        releaseData = await existingResp.json();
+        // Update release title and notes
+        if (releaseData?.id) {
+          const patchResp = await fetch(
+            `https://api.github.com/repos/${repo}/releases/${releaseData.id}`,
+            {
+              method: 'PATCH',
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                tag_name: manifest.tag,
+                target_commitish: manifest.targetBranch,
+                name: manifest.title,
+                body: manifest.releaseNotesMarkdown,
+                draft: false,
+                prerelease: false,
+                make_latest: 'true',
+              }),
+            }
+          );
+          if (patchResp.ok) {
+            releaseData = await patchResp.json();
+          }
+        }
+      } else {
+        const createResp = await fetch(
+          `https://api.github.com/repos/${repo}/releases`,
+          {
+            method: 'POST',
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tag_name: manifest.tag,
+              target_commitish: manifest.targetBranch,
+              name: manifest.title,
+              body: manifest.releaseNotesMarkdown,
+              draft: false,
+              prerelease: false,
+              make_latest: 'true',
+            }),
+          }
+        );
+        if (!createResp.ok) {
+          const errText = await createResp.text();
+          return res.status(createResp.status).json({
+            published: false,
+            webNewReleaseUrl,
+            error: `GitHub API returned ${createResp.status}: ${errText.slice(0, 240)}`,
+          });
+        }
+        releaseData = await createResp.json();
+      }
+
+      if (!releaseData?.id) {
+        return res.status(502).json({
+          published: false,
+          webNewReleaseUrl,
+          error: 'GitHub API did not return a valid release ID.',
+        });
+      }
+
+      // 2. Upload all 8 verified release assets to uploads.github.com
+      const uploadedAssets: string[] = [];
+      for (const asset of manifest.assets) {
+        const filePath = path.join(
+          __dirname,
+          'releases',
+          'v0.3.0',
+          asset.name
+        );
+        if (!fs.existsSync(filePath)) continue;
+
+        // If asset with same name already exists on the release, delete it first
+        const existingAsset = releaseData.assets?.find(
+          (a) => a.name === asset.name
+        );
+        if (existingAsset?.id) {
+          await fetch(
+            `https://api.github.com/repos/${repo}/releases/assets/${existingAsset.id}`,
+            { method: 'DELETE', headers }
+          );
+        }
+
+        const fileBytes = fs.readFileSync(filePath);
+        const uploadUrl = `https://uploads.github.com/repos/${repo}/releases/${releaseData.id}/assets?name=${encodeURIComponent(
+          asset.name
+        )}`;
+        const uploadResp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            ...headers,
+            'Content-Type': asset.contentType,
+            'Content-Length': String(fileBytes.byteLength),
+          },
+          body: fileBytes,
+        });
+        if (uploadResp.ok) {
+          uploadedAssets.push(asset.name);
+        }
+      }
+
+      return res.json({
+        published: true,
+        tag: manifest.tag,
+        repository: repo,
+        releaseUrl:
+          releaseData.html_url ||
+          `https://github.com/${repo}/releases/tag/${manifest.tag}`,
+        uploadedAssets,
+      });
+    } catch (err) {
+      return res.status(500).json({
+        published: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Failed to publish release to GitHub',
       });
     }
   });

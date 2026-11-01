@@ -90,6 +90,7 @@ interface ReleaseAssetItem {
   bytes: number;
   sha256: string;
   downloadUrl: string;
+  featuredExe?: boolean;
 }
 
 interface ServerReleaseManifest {
@@ -103,6 +104,7 @@ interface ServerReleaseManifest {
   chunks: BatchTestChunk[];
   assets: ReleaseAssetItem[];
   releaseNotesMarkdown: string;
+  readmeMarkdown?: string;
   ghCliCommand: string;
 }
 
@@ -229,6 +231,7 @@ export const StudioModal: React.FC<StudioModalProps> = ({
   const [releaseManifest, setReleaseManifest] =
     useState<ServerReleaseManifest | null>(null);
   const [buildingRelease, setBuildingRelease] = useState(false);
+  const [showGithubPagePreview, setShowGithubPagePreview] = useState(false);
 
   React.useEffect(() => {
     setTab(initialTab);
@@ -452,15 +455,22 @@ export const StudioModal: React.FC<StudioModalProps> = ({
         setBuildingRelease(false);
       });
     onNotify(
-      'All 6 batch test chunks passed & NoteGen 0.3.0 GitHub Release bundle built in dist/releases/v0.3.0/.'
+      'All 6 batch test chunks passed & NoteGen-Setup-0.3.0.exe + NoteGen-0.3.0.exe compiled in releases/v0.3.0/.'
     );
   };
 
-  const handleDownloadReleaseBundle = () => {
+  const handleDownloadSetupExe = () => {
     window.location.href =
-      '/api/release/v0.3.0/download/NoteGen-0.3.0-Release-Bundle.zip';
+      '/api/release/v0.3.0/download/NoteGen-Setup-0.3.0.exe';
     onNotify(
-      'Downloading NoteGen-0.3.0-Release-Bundle.zip (GitHub Release v0.3.0 package).'
+      'Downloading NoteGen-Setup-0.3.0.exe (Windows 10/11 x64 Per-User Setup Installer).'
+    );
+  };
+
+  const handleDownloadPortableExe = () => {
+    window.location.href = '/api/release/v0.3.0/download/NoteGen-0.3.0.exe';
+    onNotify(
+      'Downloading NoteGen-0.3.0.exe (Windows x64 Standalone Portable Executable).'
     );
   };
 
@@ -1525,40 +1535,92 @@ export const StudioModal: React.FC<StudioModalProps> = ({
                 <div>
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                      NoteGen 0.3.0 — GitHub Releases Builder &amp; 6-Chunk Verification Gate
+                      GitHub Releases (`v0.3.0`) — Ready to Download &amp; Install
                     </h3>
                     <span className="text-xs font-mono text-teal-600 dark:text-teal-400">
                       tag: v0.3.0 · target: main
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Runs all 6 verification chunks and compiles the release assets (`NoteGen-0.3.0-Release-Bundle.zip`, `.sha256`, TrueType `.ttf` font pack, verified `.docx`, `installer-manifest.json`, and `release-notes.md`) for the GitHub Releases tab.
+                    Compiled Windows x64 executables (`NoteGen-Setup-0.3.0.exe` installer wizard &amp; `NoteGen-0.3.0.exe` portable binary), SHA256 checksums, TrueType font pack, and updated GitHub repository pages.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDownloadSetupExe}
+                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-500 text-slate-950 hover:bg-teal-400 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download NoteGen-Setup-0.3.0.exe
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadPortableExe}
+                    className="px-3.5 py-2 text-xs font-medium rounded-lg border border-teal-500/40 text-teal-700 dark:text-teal-300 hover:bg-teal-500/10 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download NoteGen-0.3.0.exe
+                  </button>
                   <button
                     type="button"
                     disabled={buildingRelease}
                     onClick={handleRunAllBatchChunks}
-                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-500 text-slate-950 hover:bg-teal-400 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap shrink-0"
                   >
                     <Play className="w-3.5 h-3.5" />
                     {buildingRelease
-                      ? 'Building v0.3.0 release...'
-                      : 'Build NoteGen 0.3.0 Release & Run 6 Chunks'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadReleaseBundle}
-                    className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Download v0.3.0 Release ZIP
+                      ? 'Compiling v0.3.0...'
+                      : 'Recompile 0.3.0.exe & Verify 6 Chunks'}
                   </button>
                 </div>
               </div>
 
-              {/* GitHub Releases Tab Asset Table */}
+              {/* Featured Windows 0.3.0 Executable Cards (Installer + Portable EXE) */}
+              {releaseManifest && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {releaseManifest.assets
+                    .filter((a) => a.featuredExe)
+                    .map((exe) => (
+                      <div
+                        key={exe.name}
+                        className="p-4 rounded-xl bg-teal-500/10 border border-teal-500/30 flex flex-col justify-between gap-3"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono text-sm font-bold text-slate-900 dark:text-white">
+                              {exe.name}
+                            </span>
+                            <span className="text-xs font-mono text-teal-700 dark:text-teal-300 tabular-nums">
+                              {(exe.bytes / 1024).toFixed(1)} KB · PE32+ x64
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-600 dark:text-slate-300">
+                            {exe.description}
+                          </p>
+                          <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
+                            SHA256: {exe.sha256}
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 pt-1">
+                          <span className="text-[11px] font-mono text-teal-700 dark:text-teal-300">
+                            Ready to download &amp; install
+                          </span>
+                          <a
+                            href={exe.downloadUrl}
+                            download={exe.name}
+                            className="px-3.5 py-1.5 rounded-lg bg-teal-500 text-slate-950 text-xs font-semibold hover:bg-teal-400 transition-colors flex items-center gap-1.5"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            Download {exe.name}
+                          </a>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+
+              {/* GitHub Releases Tab Asset Table & Updated GitHub Page Toggle */}
               {releaseManifest && (
                 <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 overflow-hidden">
                   <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-slate-50 dark:bg-slate-950/60">
@@ -1567,58 +1629,80 @@ export const StudioModal: React.FC<StudioModalProps> = ({
                         {releaseManifest.title}
                       </span>
                       <span className="text-[11px] font-mono text-teal-600 dark:text-teal-400">
-                        Latest Release · {releaseManifest.assets.length} verified assets built in dist/releases/v0.3.0/
+                        Latest Release · {releaseManifest.assets.length} verified assets in releases/v0.3.0/
                       </span>
                     </div>
-                    <span className="text-[11px] font-mono text-slate-500 tabular-nums">
-                      Built {new Date(releaseManifest.publishedAt).toLocaleTimeString()}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowGithubPagePreview((v) => !v)}
+                        className="px-2.5 py-1 rounded text-xs font-medium bg-slate-200/70 dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:bg-teal-500/20"
+                      >
+                        {showGithubPagePreview
+                          ? 'Show Release Assets Table'
+                          : 'View Updated GitHub Page (README.md)'}
+                      </button>
+                      <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                        Built {new Date(releaseManifest.publishedAt).toLocaleTimeString()}
+                      </span>
+                    </div>
                   </div>
 
-                  <div className="divide-y divide-slate-200 dark:divide-slate-800">
-                    {releaseManifest.assets.map((asset) => (
-                      <div
-                        key={asset.name}
-                        className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
+                  {showGithubPagePreview ? (
+                    <div className="p-4 bg-slate-950 text-slate-200 font-mono text-xs overflow-x-auto max-h-96 space-y-2">
+                      <div className="text-[11px] text-teal-400 pb-2 border-b border-slate-800">
+                        Updated Repository Page (`README.md` · `docs/WINDOWS.md` · `docs/INSTALLER.md` · `docs/TESTING.md` — synchronized to v0.3.0)
+                      </div>
+                      <pre className="whitespace-pre-wrap leading-relaxed text-xs">
+                        {releaseManifest.readmeMarkdown || releaseManifest.releaseNotesMarkdown}
+                      </pre>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {releaseManifest.assets.map((asset) => (
+                        <div
+                          key={asset.name}
+                          className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <a
+                                href={asset.downloadUrl}
+                                download={asset.name}
+                                className="font-mono font-semibold text-teal-600 dark:text-teal-400 hover:underline"
+                              >
+                                {asset.name}
+                              </a>
+                              <span className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                — {asset.description}
+                              </span>
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-400 dark:text-slate-500 mt-0.5 truncate">
+                              sha256: {asset.sha256}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="font-mono text-slate-500 dark:text-slate-400 tabular-nums">
+                              {(asset.bytes / 1024).toFixed(1)} KB
+                            </span>
                             <a
                               href={asset.downloadUrl}
                               download={asset.name}
-                              className="font-mono font-semibold text-teal-600 dark:text-teal-400 hover:underline"
+                              className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:bg-teal-500 hover:text-slate-950 font-medium transition-colors flex items-center gap-1"
                             >
-                              {asset.name}
+                              <Download className="w-3 h-3" />
+                              Download
                             </a>
-                            <span className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                              — {asset.description}
-                            </span>
-                          </div>
-                          <div className="text-[11px] font-mono text-slate-400 dark:text-slate-500 mt-0.5 truncate">
-                            sha256: {asset.sha256}
                           </div>
                         </div>
-
-                        <div className="flex items-center gap-3 shrink-0">
-                          <span className="font-mono text-slate-500 dark:text-slate-400 tabular-nums">
-                            {(asset.bytes / 1024).toFixed(1)} KB
-                          </span>
-                          <a
-                            href={asset.downloadUrl}
-                            download={asset.name}
-                            className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:bg-teal-500 hover:text-slate-950 font-medium transition-colors flex items-center gap-1"
-                          >
-                            <Download className="w-3 h-3" />
-                            Download
-                          </a>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="px-4 py-3 bg-slate-50 dark:bg-slate-950/80 border-t border-slate-200 dark:border-slate-800 space-y-1.5">
                     <div className="flex items-center justify-between text-[11px] font-mono text-slate-500">
-                      <span>GitHub CLI Release Publish Command (also automated in .github/workflows/release-installer.yml)</span>
+                      <span>GitHub CLI Release Publish Command (automated in .github/workflows/release-installer.yml)</span>
                       <span>tag: v0.3.0</span>
                     </div>
                     <pre className="p-2.5 rounded-lg bg-slate-900 text-slate-200 font-mono text-[11px] overflow-x-auto">

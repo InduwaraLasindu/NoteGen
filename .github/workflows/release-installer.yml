@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - Cargo.toml
+      - README.md
       - rust/**
       - installer/**
       - scripts/Build-Installer.ps1
@@ -11,7 +12,13 @@ on:
       - scripts/Configure-AI.ps1
       - docs/INSTALLER.md
       - docs/STUDIO.md
+      - docs/WINDOWS.md
+      - docs/TESTING.md
       - .github/workflows/release-installer.yml
+  workflow_run:
+    workflows: ["Rust verification and Windows executable"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -34,6 +41,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   installer:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 20
     outputs:
@@ -41,8 +49,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_VERSION: ${{ inputs.version || '0.3.0' }}
-      SOURCE_RUN: ${{ inputs.source_run || 'latest' }}
-      SOURCE_SHA: ${{ inputs.source_sha || 'latest' }}
+      SOURCE_RUN: ${{ inputs.source_run || (github.event_name == 'workflow_run' && github.event.workflow_run.id) || 'latest' }}
+      SOURCE_SHA: ${{ inputs.source_sha || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha) || 'latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Verify and download the proven Rust build
@@ -77,6 +85,10 @@ jobs:
           Expand-Archive $zip build/installer-payload -Force
           New-Item -ItemType Directory -Force dist/installer | Out-Null
           Copy-Item $zip,"$zip.sha256" dist/installer -Force
+          $portableExe="dist/installer/NoteGen-$env:RELEASE_VERSION.exe"
+          Copy-Item build/installer-payload/NoteGen/NoteGen.exe $portableExe -Force
+          $portableHash=(Get-FileHash $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$portableHash  NoteGen-$env:RELEASE_VERSION.exe" | Set-Content "$portableExe.sha256" -Encoding ascii
           $manifest=@{version=$env:RELEASE_VERSION;source_run=[long]$env:SOURCE_RUN;source_sha=$env:SOURCE_SHA;source_artifact=$artifact.id;source_artifact_digest=$artifact.digest;portable_zip_sha256=$actual;installer_source_sha=$env:GITHUB_SHA}
           $manifest | ConvertTo-Json | Set-Content build/installer-provenance.json -Encoding utf8
           "version=$env:RELEASE_VERSION" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -123,7 +135,7 @@ jobs:
 
           Install NoteGen $env:RELEASE_VERSION directly on Windows 10/11 x64-compatible systems.
 
-          Download **NoteGen-Setup-$env:RELEASE_VERSION.exe** (or the portable **NoteGen-Rust-Windows-x64.zip**) below.
+          Download **NoteGen-Setup-$env:RELEASE_VERSION.exe** (installer wizard), **NoteGen-$env:RELEASE_VERSION.exe** (standalone executable), or **NoteGen-Rust-Windows-x64.zip** below.
           Installation is per user and does not require administrator rights. Start menu
           shortcuts and an optional desktop shortcut are included. Uninstall from Windows
           Settings; user models, writer profiles, and document projects are preserved.
@@ -175,11 +187,13 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum --check "NoteGen-Setup-$RELEASE_VERSION.exe.sha256"
+          sha256sum --check "NoteGen-$RELEASE_VERSION.exe.sha256"
           sha256sum --check "NoteGen-Rust-Windows-x64.zip.sha256"
           tag="v$RELEASE_VERSION"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo 'This release version already exists; use a new version instead of replacing published binaries.'
-            exit 1
+            gh release upload "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" "NoteGen-$RELEASE_VERSION.exe" "NoteGen-$RELEASE_VERSION.exe.sha256" "NoteGen-Rust-Windows-x64.zip" "NoteGen-Rust-Windows-x64.zip.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "NoteGen $RELEASE_VERSION — Studio, Handwriting Profiles & Windows Installer" --notes-file release-notes.md --draft=false --latest
+          else
+            gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" "NoteGen-$RELEASE_VERSION.exe" "NoteGen-$RELEASE_VERSION.exe.sha256" "NoteGen-Rust-Windows-x64.zip" "NoteGen-Rust-Windows-x64.zip.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Studio, Handwriting Profiles & Windows Installer" --notes-file release-notes.md --draft
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           fi
-          gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" "NoteGen-Rust-Windows-x64.zip" "NoteGen-Rust-Windows-x64.zip.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Studio, Handwriting Profiles & Windows Installer" --notes-file release-notes.md --draft
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest

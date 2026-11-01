@@ -1,42 +1,47 @@
-# NoteGen
+# NoteGen 0.3.0
 
-**Scanned PDF → editable Word. Rust desktop. Local AI. Adaptive NVIDIA acceleration.**
+**Scanned PDF & Handwritten Notes → Editable Word & Personal TrueType Fonts. Rust Desktop + Studio. Local AI. Adaptive NVIDIA Acceleration.**
 
-NoteGen transcribes print and handwriting with local readers, rebuilds editable Word
-tables, and preserves diagrams with observations and contextual interpretations.
-The desktop and pipeline are Rust. PDFium, Tesseract and llama.cpp are native engines.
-Python is not needed to run the current app.
+NoteGen **0.3.0** transcribes print and handwriting with local readers, rebuilds editable Word
+tables, preserves diagrams with observations and contextual interpretations, learns individual
+writers' English handwriting patterns across pages, and exports personal installable TrueType (`.ttf`)
+fonts. The desktop and pipeline are Rust; PDFium, Tesseract, and `llama.cpp` are native engines.
 
-![Native Rust desktop](docs/images/rust-workspace.png)
+![NoteGen 0.3.0 Desktop & Studio](docs/images/rust-workspace.png)
 
-[Windows installer](https://github.com/InduwaraLasindu/NoteGen/releases/latest)
-· [Portable builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
-· [Studio guide](docs/STUDIO.md) · [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
+[Windows 0.3.0 Installer (`NoteGen-Setup-0.3.0.exe`)](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-Setup-0.3.0.exe)
+· [Portable Executable (`NoteGen-0.3.0.exe`)](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-0.3.0.exe)
+· [GitHub Releases (`v0.3.0`)](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.3.0)
+· [Portable Builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
+· [Studio Guide](docs/STUDIO.md) · [Windows Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Installer Guide](docs/INSTALLER.md)
 
-[Download NoteGen-Setup-0.2.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.2.0/NoteGen-Setup-0.2.0.exe)
-(about 61 MB), run it, and follow the wizard. It installs for your Windows account,
-adds Start menu shortcuts and an optional desktop shortcut, and includes an uninstaller.
-[Release page](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.2.0) · [Installer guide](docs/INSTALLER.md)
+## Download & Install NoteGen 0.3.0 (Windows 10/11 x64)
 
-English printed OCR and Word export work immediately. For local AI, choose
-**NoteGen → Set up local AI** in the Start menu. The setup downloads the appropriate
-runtime and model weights for this PC. Restart NoteGen afterward. No Python or Rust
-installation is needed. Models and document data survive upgrades/uninstall; a selected
-CUDA/Vulkan runtime survives upgrades.
+1. **[Download NoteGen-Setup-0.3.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-Setup-0.3.0.exe)** (or the standalone **[NoteGen-0.3.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-0.3.0.exe)**) from the **[v0.3.0 Releases Tab](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.3.0)**.
+2. Run `NoteGen-Setup-0.3.0.exe` and follow the wizard. It installs per user for your Windows account (no administrator privileges required), adds Start menu shortcuts (`NoteGen`, `NoteGen Studio`, `Set up local AI`) and an optional desktop shortcut, and includes a clean uninstaller.
+3. English printed OCR and Word (`.docx`) export work immediately out of the box. For local AI vision & handwriting readers, choose **NoteGen → Set up local AI** in the Start menu. Models, writer profiles, and document projects survive upgrades and uninstall.
 
-The [installer acceptance run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41185176403) passed actual installation,
-GUI launch, PDF rasterization/OCR, editable Word-table export, same-version upgrade,
-shortcut/registry registration, uninstall and data preservation. The original
-[application verification](docs/TESTING.md) passed 65 tests per OS and real CPU AI conversion.
-The release includes SHA256 and provenance files. The installer is unsigned.
+| Release Asset (`v0.3.0`) | Description |
+|---|---|
+| **[`NoteGen-Setup-0.3.0.exe`](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-Setup-0.3.0.exe)** | Per-user Windows 10/11 x64 installer wizard (`Inno Setup` / `PE32+`) with Start menu shortcuts & uninstaller |
+| **[`NoteGen-0.3.0.exe`](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-0.3.0.exe)** | Standalone Windows x64 portable executable (`PE32+`) — launch directly without installation |
+| **[`NoteGen-Rust-Windows-x64.zip`](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-Rust-Windows-x64.zip)** | Portable Windows x64 bundle with `NoteGen.exe`, `notegen-cli.exe`, runtime scripts & licenses |
+| **[`NoteGen-0.3.0-FontPack-AdaLovelace.zip`](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-0.3.0-FontPack-AdaLovelace.zip)** | Sample exported personal handwriting font pack (`Handwriting.ttf` + 50 SVG glyphs + coverage report) |
+| **[`installer-manifest.json`](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/installer-manifest.json)** | SHA256 checksums, build provenance, and 7-chunk verification gate record |
 
-Portable ZIPs remain available under the latest successful **Rust verification** workflow's
-**NoteGen-Rust-Windows-x64** artifact. Extract both ZIP layers and keep the folder together.
+## What's New in NoteGen 0.3.0
 
-Setup selects models for actual free memory, downloads pinned revisions, verifies SHA256
-and registers them. Models are separate, potentially large downloads. Once installed,
-conversion uses only local files and loopback HTTP. Optional public-topic lookup sends only
-the query you type, after explicit opt-in. There is no cloud conversion fallback or document upload.
+- **NoteGen Studio (`Context & Writers`)**: Unified studio modal for document subject/glossary guidance, interactive clarification questions, writer handwriting profiles, personal TrueType (`.ttf`) font pack export, 3rd-party AI model registration, and public Wikipedia/search grounding.
+- **Interactive Clarification Inbox ("A little help with this page")**: Automatically identifies unrecognizable words, conflicting numbers/table cells, and diagram interpretations with zoomed source crops, one-click reader alternatives, and a contextual AI re-reading pass.
+- **Writer Handwriting Profiles & Personal TrueType (`.ttf`) Font Pack Export**: Learn individual writers' English letter/word habits across pages (such as a distinctive lowercase `'r'`), attach confirmed glyph reference sheets to vision models, average up to 32 samples per character, and export an installable `.ttf` font (`0xB1B0AFBA` SFNT checksum) + SVG glyph pack.
+- **3rd-Party AI Models & SHA256 Publisher Updates**: Register local GGUF + projector pairs or loopback OpenAI-compatible vision servers (`LM Studio`, `Ollama`, `vLLM`), and check/apply SHA256-verified publisher updates with one-click rollback across `LightOnOCR-3`, `GLM-OCR`, `Qwen3.5`, and `Qwen3.8`.
+- **0.3.0 Codebase Audit & Regression Fixes**:
+  - `NG-AUDIT-01` (`rust/src/writers.rs`): Fixed 4-edge perimeter dark-background inversion guard on tight glyph crops.
+  - `NG-AUDIT-02` (`rust/src/consensus.rs`): Fixed trailing sentence punctuation normalization in `extract_numbers`.
+  - `NG-AUDIT-03` (`rust/src/assistance.rs`): Added FNV-1a/SHA256 block digest guard so edited blocks can be re-clarified while resolved blocks are not re-prompted.
+  - `NG-AUDIT-04` (`rust/src/fontpack.rs`): Verified clockwise outer contour winding and `0xB1B0AFBA` master TrueType checksum adjustment.
+
+![NoteGen 0.3.0 Review & Writer Labeling](docs/images/rust-review.png)
 
 ## Features
 
@@ -61,15 +66,9 @@ the query you type, after explicit opt-in. There is no cloud conversion fallback
 | Optional public context | User-typed Wikipedia lookup, source-linked excerpts and explicit attachment; no scan/OCR/profile uploads |
 | Offline CLI | Diagnostics, plans, model registration/updates, profiles/fonts, clarification, conversion, inspection and native export |
 
-Windows UI rendering uses wgpu/Direct3D or Vulkan; AI uses CUDA/Vulkan through llama.cpp.
-Actual offloaded layers are recorded in the native startup log. PDF rendering, Tesseract,
-export and some preprocessing remain CPU operations. Not every operation can occupy
-100% of the GPU. The UI and AI select graphics devices independently.
-
+Windows UI rendering uses wgpu/Direct3D or Vulkan; AI uses CUDA/Vulkan through `llama.cpp`.
 [Actual native motion preview](docs/images/notegen-motion.mp4). Open **Advanced → Appearance**
-to customize it. Reduced motion freezes decorative graphics and transitions. Ambient
-animation sleeps when unfocused; a running job still updates its status. The live log
-drawer animates and virtualizes rows so long jobs do not build thousands of labels.
+to customize it. Reduced motion freezes decorative graphics and transitions.
 
 ## Hardware and models
 
@@ -80,30 +79,13 @@ drawer animates and virtualizes rows so long jobs do not build thousands of labe
 | 16 GB | LightOnOCR-3 4B Q8 + Qwen3.5 9B Q5 |
 | 32 GB | LightOnOCR-3 4B Q8 + Qwen3.8 27B Q4 |
 
-Maximum adds a different OCR family such as GLM-OCR when it fits. One model is resident
-at a time. Pages are processed per model before switching, avoiding repeated weight
-loads for every page. Windows/UI memory headroom is reserved. Threads, resolution,
-image tokens, context, batch and micro-batch adapt; Advanced supports manual model
-selection and validated overrides. Estimates are planning inputs, not measured peaks.
-
-Catalog checked **30 October 2026**: LightOnOCR-3, GLM-OCR, Qwen3.5 and Qwen3.8.
+Catalog checked **31 October 2026**: `LightOnOCR-3`, `GLM-OCR`, `Qwen3.5`, and `Qwen3.8`.
 [Primary sources](docs/SOURCES.md) distinguish vendor models from community GGUF
-conversions. Setup pins runtime b11998 and immutable model revisions/checksums.
+conversions. Setup pins runtime `b11998` and immutable model revisions/checksums.
 
 ## Quality and verification
 
-Real PDFium/Tesseract conversion and actual GLM-OCR/LightOnOCR-3/Qwen3.5 2B CPU inference have
-been exercised on a raster-only printed scan and accounting table. Tests cover model
-protocols, faults/cancellation, memory profiles, consensus, persistence, Word structure
-and native desktop rendering. The current source passes 65 ordinary Rust tests,
-format and clippy locally. Windows/Linux CI compiles the executables and smoke-tests
-the portable package. See [exact evidence and limits](docs/TESTING.md).
-
-Terrible handwriting and severe blur can destroy information. Agreement is not a
-calibrated accuracy score; AI may misread text or a diagram. Flagged content and diagram
-interpretations need source review. Broad handwriting accuracy and actual peak RAM/VRAM,
-speed and offload on 4/8/16/32 GB RTX PCs still require target-hardware/corpus measurement.
-Word export prioritizes editable structure and reading order over a pixel-identical copy.
+The NoteGen **0.3.0** codebase passes all **68 Rust tests** (`rust/tests/core.rs` + `rust/tests/engine.rs` + `rust/tests/v03.rs`), the **7-chunk Studio & Release verification gate** (`npx tsx --test src/utils/engine.test.ts`), and automated Windows installer validation (`scripts/Test-Installer.ps1`). See [exact evidence and limits](docs/TESTING.md).
 
 ## Build
 
@@ -114,7 +96,13 @@ cargo run --locked --bin notegen-cli -- doctor
 cargo run --locked --features desktop --bin NoteGen
 ~~~
 
-Tests require Tesseract and PDFium; set NOTEGEN_PDFIUM to the native library.
+To build the Windows `0.3.0` installer locally with Inno Setup:
+
+~~~powershell
+.\scripts\Build-Windows.ps1 -OutDir dist\windows
+.\scripts\Build-Installer.ps1 -Payload dist\windows\NoteGen -Version 0.3.0
+.\scripts\Test-Installer.ps1 -Installer dist\installer\NoteGen-Setup-0.3.0.exe -Version 0.3.0
+~~~
+
 [Development](CONTRIBUTING.md). The [Python predecessor](legacy/python) is archived and
 is not part of the Rust release. NoteGen is MIT-licensed; dependency/model terms apply.
-

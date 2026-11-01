@@ -158,17 +158,41 @@ test('Chunk 6: Word OOXML table & document generator preserves cells, merges, an
   assert.ok(docXml.includes('Contextual interpretation:'));
 });
 
-test('Chunk 7: GitHub Release v0.3.0 builder packages verified ZIP bundle, .ttf, .docx, manifest, and SHA256 checksums', async () => {
+test('Chunk 7: GitHub Release v0.3.0 builder compiles NoteGen-Setup-0.3.0.exe & NoteGen-0.3.0.exe (PE32+ x64), .ttf, .docx, manifest, and updated README.md', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
   const { buildGitHubReleaseV030 } = await import('./releaseBuilder');
   const manifest = buildGitHubReleaseV030(process.cwd());
   assert.equal(manifest.version, '0.3.0');
   assert.equal(manifest.tag, 'v0.3.0');
   assert.equal(manifest.allChunksPassed, true);
-  assert.equal(manifest.assets.length, 8);
-  const bundleAsset = manifest.assets.find(
-    (a) => a.name === 'NoteGen-0.3.0-Release-Bundle.zip'
-  );
-  assert.ok(bundleAsset);
-  assert.ok(bundleAsset.bytes > 10000);
-  assert.equal(bundleAsset.sha256.length, 64);
+  assert.equal(manifest.assets.length, 14);
+
+  // Verify NoteGen-Setup-0.3.0.exe and NoteGen-0.3.0.exe exist and have valid PE32+ headers
+  for (const exeName of ['NoteGen-Setup-0.3.0.exe', 'NoteGen-0.3.0.exe']) {
+    const exeAsset = manifest.assets.find((a) => a.name === exeName);
+    assert.ok(exeAsset, `Missing ${exeName} in v0.3.0 release manifest`);
+    assert.ok(exeAsset.bytes > 10000);
+    assert.equal(exeAsset.sha256.length, 64);
+
+    const exeBytes = fs.readFileSync(
+      path.join(process.cwd(), 'releases', 'v0.3.0', exeName)
+    );
+    // 'MZ' DOS signature at 0x00
+    assert.equal(exeBytes[0], 0x4d);
+    assert.equal(exeBytes[1], 0x5a);
+    // 'PE\0\0' signature at 0x80
+    assert.equal(exeBytes[0x80], 0x50);
+    assert.equal(exeBytes[0x81], 0x45);
+    assert.equal(exeBytes[0x82], 0x00);
+    assert.equal(exeBytes[0x83], 0x00);
+    // Machine = 0x8664 (AMD64) at 0x84..0x85
+    assert.equal(exeBytes[0x84], 0x64);
+    assert.equal(exeBytes[0x85], 0x86);
+  }
+
+  // Verify README.md is updated to NoteGen 0.3.0 and references NoteGen-Setup-0.3.0.exe
+  assert.ok(manifest.readmeMarkdown.includes('NoteGen 0.3.0'));
+  assert.ok(manifest.readmeMarkdown.includes('NoteGen-Setup-0.3.0.exe'));
+  assert.ok(manifest.readmeMarkdown.includes('NoteGen-0.3.0.exe'));
 });

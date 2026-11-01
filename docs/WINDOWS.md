@@ -1,12 +1,12 @@
-# Windows setup and usage
+# Windows setup and usage (NoteGen 0.3.0)
 
 Use Windows 10 build 19041 or newer, or Windows 11, on an x64-compatible system.
-Download **[NoteGen-Setup-0.2.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.2.0/NoteGen-Setup-0.2.0.exe)** from
-[GitHub Releases](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.2.0) and run the wizard. It installs per user without
+Download **[NoteGen-Setup-0.3.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-Setup-0.3.0.exe)** (or the standalone portable **[NoteGen-0.3.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-0.3.0.exe)**) from
+[GitHub Releases (`v0.3.0`)](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.3.0) and run the wizard. It installs per user without
 requesting administrator rights. Launch NoteGen from the Start menu. English print,
-PDFium, Tesseract and Word export are included. See [Installer details](INSTALLER.md).
+PDFium, Tesseract, Studio (`Context & Writers`), personal TrueType font export, and Word export are included. See [Installer details](INSTALLER.md) and [Studio guide](STUDIO.md).
 
-For portable builds, download **NoteGen-Rust-Windows-x64** from a successful
+For portable builds, download **[NoteGen-Rust-Windows-x64.zip](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.3.0/NoteGen-Rust-Windows-x64.zip)** from the `v0.3.0` release or from a successful
 [Rust workflow](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 and extract both ZIP layers.
 
