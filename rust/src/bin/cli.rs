@@ -16,6 +16,21 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Doctor,
+    /// Download verified models and a compatible Windows AI runtime.
+    Setup {
+        #[arg(long, conflicts_with = "runtime_only")]
+        models_only: bool,
+        #[arg(long)]
+        runtime_only: bool,
+        #[arg(long, value_delimiter = ',')]
+        model_ids: Vec<String>,
+        #[arg(long)]
+        preset: Option<String>,
+        #[arg(long)]
+        backend: Option<String>,
+        #[arg(short, long, default_value = "ai-settings.json")]
+        output: PathBuf,
+    },
     RegisterReader {
         spec: PathBuf,
     },
@@ -130,6 +145,35 @@ fn run() -> Result<()> {
         })),
     };
     match args.command {
+        Action::Setup {
+            models_only,
+            runtime_only,
+            model_ids,
+            preset,
+            backend,
+            output,
+        } => {
+            if let Some(preset) = preset {
+                s.preset = serde_json::from_value(serde_json::Value::String(preset))?;
+            }
+            if let Some(backend) = backend {
+                s.backend = serde_json::from_value(serde_json::Value::String(backend))?;
+            }
+            s.validate()?;
+            let next = notegen::setup::install(
+                &s,
+                &notegen::setup::Options {
+                    models_only,
+                    runtime_only,
+                    model_ids,
+                },
+                &c,
+                &log,
+            )?;
+            atomic_json(&output, &next)?;
+            println!("AI setup complete. Settings saved to {}", output.display());
+        }
+
         Action::RegisterReader { spec } => {
             let model = read_json(&spec, 100_000)?;
             let m = notegen::models::save_custom(&s.models_dir, model, &c)?;

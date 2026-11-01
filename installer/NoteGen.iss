@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.3.0"
 #endif
 #ifndef PayloadDir
   #error PayloadDir is required
@@ -65,4 +65,4 @@ Name: "{autodesktop}\NoteGen"; Filename: "{app}\NoteGen.exe"; WorkingDir: "{app}
 Filename: "{app}\NoteGen.exe"; Description: "Launch NoteGen"; Flags: nowait postinstall skipifsilent
 
 [Messages]
-WelcomeLabel2=Install NoteGen on this Windows account.%n%nPrinted OCR and Word export are included. For local AI, use "Set up local AI" in the Start menu after installation. AI model downloads are separate and can be large.%n%nYour models and document projects are preserved during upgrades and uninstall.
+WelcomeLabel2=Install NoteGen on this Windows account.%n%nPrinted OCR and Word export are included. For local AI, click "Download & install AI" inside the app after installation. AI model downloads are separate and can be large.%n%nYour models and document projects are preserved during upgrades and uninstall.

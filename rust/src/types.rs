@@ -185,7 +185,9 @@ impl Default for Settings {
                 "tesseract".into()
             },
             pdfium: "runtime".into(),
-            server: "runtime/llama-server.exe".into(),
+            server: crate::setup::saved_runtime(std::path::Path::new("runtime"))
+                .map(|r| r.server)
+                .unwrap_or_else(|| "runtime/llama-server.exe".into()),
             models_dir: "models".into(),
             endpoint: "http://127.0.0.1:18745".into(),
             external_server: false,

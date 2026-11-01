@@ -1,6 +1,6 @@
 # Install NoteGen on Windows
 
-Download **NoteGen-Setup-0.2.0.exe** from the [GitHub Releases page](https://github.com/InduwaraLasindu/NoteGen/releases/latest).
+Download the latest **NoteGen-Setup-*.exe** from the [GitHub Releases page](https://github.com/InduwaraLasindu/NoteGen/releases/latest).
 Run it and follow the wizard. The installer targets Windows 10 build 19041 or newer,
 Windows 11, and x64-compatible systems. It installs for your Windows account without
 requesting administrator rights. The wizard follows the Windows light/dark appearance.
@@ -11,20 +11,30 @@ No Python, Rust toolchain, Office installation or developer tools are required t
 
 ## Set up local AI
 
-Choose **NoteGen → Set up local AI** in the Start menu. It downloads the pinned native
-runtime and models selected for your available RAM/VRAM. NVIDIA PCs select CUDA 13;
-the setup console records progress and SHA256 checks. Model downloads can require
-several GB. Restart NoteGen after setup. Conversion never uploads documents.
+Click **Download & install AI** inside NoteGen. The card lists the recommended
+readers and model download size. It uses the current preset (Fast installs the Accuracy
+reader set) and available memory. Setup downloads a native Windows runtime and matching
+model/projector pairs, verifies SHA256, probes runtime/GPU access and registers the readers.
+You can start converting without restarting. CUDA 13/12, Vulkan and permitted CPU fallback
+are tried as needed; Advanced → Hardware lets you select a backend or require acceleration.
 
-For an older driver, open PowerShell in the installation folder and run:
+Downloads can require several GB, plus runtime files. The overall and byte progress bars
+remain visible. Cancel preserves existing active versions and resumable partial downloads.
+Retrying reuses checksum-verified models, including newer publisher revisions.
+Conversion does not upload documents. Studio → Readers offers custom readers, explicit
+publisher update checks and rollback.
+
+The Start menu **Set up local AI** helper remains a manual alternative. CLI automation:
 
 ```powershell
-.\scripts\Configure-AI.ps1 -Backend CUDA12
+.\notegen-cli.exe setup --preset maximum --backend auto -o ai-settings.json
+.\notegen-cli.exe --settings ai-settings.json convert notes.pdf -o notes.docx
 ```
 
-Other choices are `Auto`, `Vulkan` and `CPU`. Add `-Balanced` for the smaller initial
-reader set. Runtime/model compatibility and actual RTX performance still require
-validation on the target PC. See [Windows usage](WINDOWS.md) for conversion and review.
+Use `--runtime-only` or `--models-only` for individual stages, or
+`--model-ids glm-ocr,lighton3-1b,qwen35-2b` for an explicit verified reader set.
+Actual RTX performance and broad handwriting accuracy still need measurement on the
+user's PC. See [Windows usage](WINDOWS.md) for conversion and review.
 
 ## Upgrade or uninstall
 
@@ -35,9 +45,8 @@ document projects are retained. Back up your projects before manually deleting d
 
 The installer is unsigned. It is published only after real Windows install, dependency,
 GUI launch, Word export, upgrade and uninstall tests pass. The release includes its SHA256
-file and a manifest identifying the original verified Rust build. The base app passed
-65 Rust tests on Windows/Linux and real CPU AI conversion tests; installer packaging
-does not change its executable code.
+file and a manifest identifying the original verified Rust build. The source workflow runs the full Windows/Linux Rust suites, native desktop checks and
+real CPU AI conversion. Installer packaging uses those exact executable bytes.
 
 ## Reproduce the installer
 

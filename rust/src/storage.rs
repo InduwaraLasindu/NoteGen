@@ -43,6 +43,8 @@ pub struct Event {
     pub total: usize,
     pub code: String,
     pub warning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<crate::progress::Work>,
 }
 #[derive(Clone, Default)]
 pub struct Activity {
@@ -50,6 +52,19 @@ pub struct Activity {
     pub callback: Option<Arc<dyn Fn(Event) + Send + Sync>>,
 }
 impl Activity {
+    pub fn work(&self, work: crate::progress::Work, message: impl Into<String>) {
+        self.publish(Event {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            stage: "progress".into(),
+            message: message.into(),
+            page: 0,
+            done: work.done as usize,
+            total: work.total as usize,
+            code: String::new(),
+            warning: false,
+            work: Some(work),
+        });
+    }
     pub fn capture_response(&self, model: &str, page: usize, raw: &str) -> Result<()> {
         let Some(parent) = self.path.as_ref().and_then(|p| p.parent()) else {
             return Ok(());
@@ -101,7 +116,11 @@ impl Activity {
             total,
             code: code.into(),
             warning: !code.is_empty(),
+            work: None,
         };
+        self.publish(e);
+    }
+    pub(crate) fn publish(&self, e: Event) {
         if let Some(p) = &self.path {
             if let Some(d) = p.parent() {
                 let _ = fs::create_dir_all(d);

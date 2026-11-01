@@ -40,3 +40,21 @@ caches disabled; the cache namespace changes to avoid restoring the bloated targ
 Fast OCR avoids unused writer-reference loading, and external vision requests use
 standard JSON-object fields without llama.cpp-only template parameters. Regression
 coverage verifies these compatibility and resource paths.
+
+
+## Restored-source follow-up (2026-11-01)
+
+The release source is restored from `a12832311e5383e6251355e66ea2c1725e893aca`
+(the original Studio candidate). Later third-party edits are removed through a new commit;
+Git history is preserved. The compact CI profiles and local-server compatibility fixes
+are reapplied. `Cargo.lock` stays checked in.
+
+New gates cover stage-weighted master/queue progress, growing crop work, pause/clarification
+ETA suspension, misleading byte logs, cancellation, interrupted/oversized model downloads,
+pinned in-app model installation, newer-reader reuse, runtime extraction and GPU/backend
+fallback. Windows acceptance installs real runtime/models using the same native setup
+entry point as the GUI, then runs the models and Maximum Accuracy conversion.
+
+Installer publication now follows successful verification of the same source SHA, checks
+that it remains the current main head, exercises an actual 0.2 → 0.3 upgrade, and records
+artifact/ZIP/installer provenance. It never packages a failed or stale source workflow.

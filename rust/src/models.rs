@@ -264,19 +264,33 @@ async fn download_async(
     c: &Control,
     log: &Activity,
 ) -> Result<()> {
+    c.check()?;
     if path.is_file() && path.metadata()?.len() == a.bytes && hash_file(path, c)? == a.sha256 {
+        log.emit(
+            "download",
+            format!("{} · verified cached file", a.file),
+            0,
+            a.bytes as usize,
+            a.bytes as usize,
+            "",
+        );
         return Ok(());
     }
-    let part = path.with_extension("gguf.part");
+    let part = path.with_file_name(format!(
+        "{}.part",
+        path.file_name().unwrap().to_string_lossy()
+    ));
     fs::create_dir_all(path.parent().unwrap())?;
     let offset = part.metadata().map_or(0, |m| m.len());
     if offset > a.bytes {
         fs::remove_file(&part)?;
     }
-    let offset = offset.min(a.bytes);
+    let offset = part.metadata().map_or(0, |m| m.len());
     if offset == a.bytes {
         if hash_file(&part, c)? == a.sha256 {
-            crate::runtime::verify_gguf(&part)?;
+            if a.file.ends_with(".gguf") {
+                crate::runtime::verify_gguf(&part)?;
+            }
             fs::rename(part, path)?;
             return Ok(());
         }
@@ -353,6 +367,14 @@ async fn download_async(
             last = std::time::Instant::now();
         }
     }
+    log.emit(
+        "download",
+        format!("{} · download complete; verifying SHA256", a.file),
+        0,
+        done as usize,
+        a.bytes as usize,
+        "",
+    );
     file.sync_all()?;
     drop(file);
     anyhow::ensure!(
@@ -370,11 +392,19 @@ async fn download_async(
         )
         .into());
     }
-    crate::runtime::verify_gguf(&part)?;
+    if a.file.ends_with(".gguf") {
+        crate::runtime::verify_gguf(&part)?;
+    }
     fs::rename(part, path)?;
     Ok(())
 }
-fn download(url: &str, path: &Path, a: &Asset, c: &Control, log: &Activity) -> Result<()> {
+pub(crate) fn download(
+    url: &str,
+    path: &Path,
+    a: &Asset,
+    c: &Control,
+    log: &Activity,
+) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -389,6 +419,9 @@ fn download(url: &str, path: &Path, a: &Asset, c: &Control, log: &Activity) -> R
                 if attempt.previous().len() >= 8
                     || u.scheme() != "https"
                     || !(h == "huggingface.co"
+                        || h == "github.com"
+                        || h == "release-assets.githubusercontent.com"
+                        || h == "objects.githubusercontent.com"
                         || h.ends_with(".huggingface.co")
                         || h.ends_with(".hf.co")
                         || h.ends_with(".amazonaws.com"))
@@ -399,6 +432,11 @@ fn download(url: &str, path: &Path, a: &Asset, c: &Control, log: &Activity) -> R
                 }
             }))
             .build()?;
+        let u = reqwest::Url::parse(url)?;
+        anyhow::ensure!(
+            u.scheme() == "https" && matches!(u.host_str(), Some("huggingface.co" | "github.com")),
+            Fault::new("NG650", "Invalid publisher download URL")
+        );
         download_async(&client, url, path, a, c, log).await
     })
 }
@@ -584,6 +622,52 @@ mod tests {
         assert!(error.to_string().contains("checksum"));
         assert!(!path.exists());
         t.join().unwrap();
+    }
+    #[test]
+    fn oversized_parts_restart_and_ignored_range_responses_replace_partial_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"GGUFvalid-download-bytes";
+        let a = Asset {
+            file: "reader.gguf".into(),
+            bytes: bytes.len() as u64,
+            sha256: hex::encode(sha2::Sha256::digest(bytes)),
+        };
+        let path = dir.path().join("reader.gguf");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for partial in [vec![b'X'; 100], bytes[..8].to_vec()] {
+            fs::write(path.with_extension("gguf.part"), partial).unwrap();
+            let (url, t) = mock(bytes.to_vec(), None);
+            rt.block_on(download_async(
+                &reqwest::Client::builder().no_proxy().build().unwrap(),
+                &url,
+                &path,
+                &a,
+                &Control::default(),
+                &Activity::default(),
+            ))
+            .unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::remove_file(&path).unwrap();
+            t.join().unwrap();
+        }
+        let c = Control::default();
+        c.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            rt.block_on(download_async(
+                &reqwest::Client::new(),
+                "http://127.0.0.1:1",
+                &path,
+                &a,
+                &c,
+                &Activity::default()
+            ))
+            .is_err()
+        );
+        assert!(!path.exists());
     }
     use sha2::Digest;
 }

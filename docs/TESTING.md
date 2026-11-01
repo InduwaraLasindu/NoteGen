@@ -138,3 +138,24 @@ GLM-OCR, LightOnOCR-3 1B and Qwen3.5 2B, then a Maximum Accuracy conversion. Its
 fixture now includes a bar chart; the vision adapter must preserve a valid source box,
 visible description and contextual interpretation. See the run for whether these gates
 have passed; inclusion in a workflow alone is not evidence of a successful test.
+
+
+## 0.3 restored-source progress/setup gate
+
+The original Studio candidate is the baseline. Focused tests cover learned stage timing,
+page-weighted queues, changing work budgets, non-completion on cancellation/failure,
+paused ETA clocks, isolation from arbitrary log counters, setup state application,
+immutable matching model metadata, hardware-tier recommendations, verified newer-reader
+reuse, downloader resume/restart/checksum/cancellation, and bounded runtime extraction.
+The real PDFium/Tesseract test also verifies selected-page preflight and structured progress
+through successful Word export. Windows `Smoke-AI.ps1` invokes native runtime installation
+and downloads/activates three real readers through `notegen-cli setup` before inference.
+
+The new candidate's final result and release provenance are recorded after CI and installer
+acceptance. Earlier test counts above describe earlier revisions.
+
+Local restored-source candidate: **93 passed, 1 explicitly ignored real-model test**.
+`cargo fmt --all --check` and strict all-feature/all-target Clippy passed. The ordinary
+suite includes native raster-PDF/Tesseract/Word conversion and the new progress/setup
+regressions. Real Windows runtime/model installation, inference, packaging and installer
+acceptance are separate CI gates; their evidence is attached to the successful release.

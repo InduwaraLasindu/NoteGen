@@ -3,7 +3,9 @@ use crate::{
     hardware::{self, Hardware},
     motion,
     pipeline::{self, Completed},
-    planning, runtime,
+    planning,
+    progress::{self, Batch, Estimate},
+    runtime,
     storage::*,
     types::*,
     word,
@@ -128,6 +130,7 @@ enum Message {
     Complete(Box<Completed>),
     Failed(String, String),
     Hardware(Hardware, Vec<planning::Model>, Option<String>),
+    QueueWeights(Vec<(usize, usize)>),
     Notice(String),
     Exported(PathBuf),
 }
@@ -198,6 +201,11 @@ pub struct Desktop {
     inventory_error: Option<String>,
     logs: VecDeque<Event>,
     progress: f32,
+    clock: Instant,
+    estimate: Option<Estimate>,
+    batch: Option<Batch>,
+    batch_index: Option<usize>,
+    transfer: Option<(String, usize, usize)>,
     stage: String,
     started: Option<Instant>,
     advanced: bool,
@@ -240,6 +248,11 @@ impl Desktop {
             inventory_error: None,
             logs: VecDeque::new(),
             progress: 0.,
+            clock: Instant::now(),
+            estimate: None,
+            batch: None,
+            batch_index: None,
+            transfer: None,
             stage: "Ready when you are".into(),
             started: None,
             advanced: false,
@@ -297,6 +310,26 @@ impl Desktop {
         });
     }
     fn poll(&mut self, ctx: &egui::Context) {
+        let now = self.clock.elapsed().as_secs_f64();
+        if self.running_queue
+            && let Some(batch) = &mut self.batch
+        {
+            for (i, j) in self.state.queue.iter().enumerate() {
+                if matches!(j.status, JobStatus::Pending | JobStatus::Running) {
+                    batch.include(i);
+                }
+            }
+        }
+        let held = self.paused()
+            || self
+                .studio
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.reply.is_some());
+        if let Some(e) = &mut self.estimate {
+            e.suspend(now, held);
+        }
+
         for _ in 0..500 {
             let Ok(msg) = self.rx.try_recv() else { break };
             match msg {
@@ -304,15 +337,33 @@ impl Desktop {
                 Message::Clarify(batch, reply) => {
                     self.studio.pending = Some(studio::Pending::new(batch, Some(reply)));
                     self.stage = "Waiting for your clarification".into();
+                    if let Some(e) = &mut self.estimate {
+                        e.suspend(now, true);
+                    }
                 }
                 Message::Event(e) => {
-                    if e.total > 0 {
-                        self.progress = (e.done as f32 / e.total as f32).clamp(0., 1.);
+                    if let Some(work) = &e.work
+                        && let Some(estimate) = &mut self.estimate
+                    {
+                        estimate.update(work, now);
+                    }
+                    if e.stage == "download" {
+                        self.transfer = Some((e.message.clone(), e.done, e.total));
+                    }
+                    if e.stage == "clarify"
+                        && let Some(estimate) = &mut self.estimate
+                    {
+                        estimate.suspend(now, e.message.starts_with("Waiting for you:"));
                     }
                     self.stage = e.message.clone();
                     self.logs.push_back(e);
                     if self.logs.len() > 2000 {
                         self.logs.pop_front();
+                    }
+                }
+                Message::QueueWeights(weights) => {
+                    if let Some(batch) = &mut self.batch {
+                        batch.set_pages(weights);
                     }
                 }
                 Message::Hardware(h, m, e) => {
@@ -321,7 +372,14 @@ impl Desktop {
                     self.inventory_error = e;
                 }
                 Message::Complete(r) => {
+                    if let Some(e) = &mut self.estimate {
+                        e.finish(now, true);
+                    }
                     if let Some(i) = self.active.take() {
+                        if let Some(batch) = &mut self.batch {
+                            batch.set_pages([(i, r.pages)]);
+                            batch.finish(i);
+                        }
                         let j = &mut self.state.queue[i];
                         j.status = JobStatus::Complete;
                         j.output = Some(r.output.clone());
@@ -350,6 +408,10 @@ impl Desktop {
                     self.finished();
                 }
                 Message::Failed(code, detail) => {
+                    if let Some(e) = &mut self.estimate {
+                        e.finish(now, false);
+                    }
+                    self.transfer = None;
                     self.busy_setup = false;
                     self.studio.pending = None;
                     let cancelled = code == "NG900";
@@ -384,6 +446,9 @@ impl Desktop {
                 }
             }
         }
+        if let Some(e) = &self.estimate {
+            self.progress = e.snapshot(now).fraction;
+        }
         if self.running_queue && self.worker.is_none() {
             self.start_next(ctx);
         }
@@ -413,6 +478,29 @@ impl Desktop {
             self.running_queue = false;
             return;
         }
+        if self.batch.is_none() {
+            self.batch = Some(Batch::new(
+                self.state
+                    .queue
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, j)| j.status == JobStatus::Pending)
+                    .map(|(i, _)| (i, 1)),
+            ));
+        }
+        let preflight = true;
+        self.batch_index = Some(i);
+        let count_jobs = if preflight {
+            self.state
+                .queue
+                .iter()
+                .enumerate()
+                .filter(|(_, j)| j.status == JobStatus::Pending)
+                .map(|(i, j)| (i, j.input.clone()))
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
         let input = self.state.queue[i].input.clone();
         let folder = if self.state.output_dir.trim().is_empty() {
             input.parent().unwrap_or(Path::new(".")).to_path_buf()
@@ -458,6 +546,8 @@ impl Desktop {
         self.state.queue[i].status = JobStatus::Running;
         self.active = Some(i);
         self.progress = 0.;
+        self.estimate = Some(Estimate::new(self.clock.elapsed().as_secs_f64()));
+        self.transfer = None;
         self.stage = "Planning this PC".into();
         self.started = Some(Instant::now());
         self.error_code.clear();
@@ -473,6 +563,18 @@ impl Desktop {
                 })),
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if !count_jobs.is_empty() {
+                    let mut weights = vec![];
+                    for (i, path) in count_jobs {
+                        c.check()?;
+                        weights.push((
+                            i,
+                            crate::scan::selected_page_count(&path, &s.pdfium, &s.page_range)
+                                .unwrap_or(1),
+                        ));
+                    }
+                    let _ = tx.send(Message::QueueWeights(weights));
+                }
                 pipeline::convert(&input, &output, &s, &c, &log)
             }));
             let msg=match result {
@@ -595,6 +697,8 @@ impl Desktop {
                     let convert=ui.add_enabled(ready,egui::Button::new(RichText::new("Convert to Word   →").strong().color(self.accent_text())).fill(self.accent()).min_size(Vec2::new(220.,48.)));
                     self.hover_ring(ui,&convert,"convert-hover");
                     if convert.clicked(){
+                        self.batch=None;
+                        self.batch_index=None;
                         self.running_queue=true;
                         self.start_next(&ctx);
                     }
@@ -611,6 +715,9 @@ impl Desktop {
                             self.running_queue=false;
                             self.control.cancelled.store(true,Ordering::Relaxed);
                         }
+                    }
+                    if self.busy_setup && self.active.is_none() && ui.button("Cancel background task").clicked() {
+                        self.control.cancelled.store(true,Ordering::Relaxed);
                     }
                     if self.review.is_some() && ui.button("Review results").clicked(){
                         self.review_open=true;
@@ -729,7 +836,63 @@ impl Desktop {
             });
     }
     fn progress_ui(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        let now = self.clock.elapsed().as_secs_f64();
+        let current = self
+            .estimate
+            .as_ref()
+            .map(|e| e.snapshot(now))
+            .unwrap_or_default();
+        let master = if let (Some(batch), Some(index)) = (&self.batch, self.batch_index) {
+            batch.snapshot(index, &current)
+        } else {
+            current.clone()
+        };
+        let waiting = self
+            .studio
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.reply.is_some());
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(if self.busy_setup {
+                "AI setup · overall"
+            } else {
+                "Overall progress"
+            });
+            ui.label(format!(
+                "{:.0}% complete · {:.0}% left",
+                master.fraction * 100.,
+                (1. - master.fraction) * 100.
+            ));
+            if self.paused() || waiting {
+                ui.small("Estimate paused");
+            } else if let Some(seconds) = master.remaining
+                && master.fraction < 1.
+            {
+                ui.small(format!(
+                    "About {} left{}",
+                    progress::duration(seconds),
+                    if master.measured {
+                        ""
+                    } else {
+                        " · initial estimate"
+                    }
+                ));
+            } else if self.worker.is_some() {
+                ui.small("Estimating…");
+            }
+        });
+        let overall = ui.ctx().animate_value_with_time(
+            egui::Id::unique("master-progress"),
+            master.fraction,
+            motion::transition(&self.state.settings.ui),
+        );
+        ui.add(
+            egui::ProgressBar::new(overall)
+                .desired_height(13.)
+                .fill(self.accent()),
+        );
+        ui.add_space(7.);
+        ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(if self.paused() {
                     "Pause requested · waiting at a safe checkpoint"
@@ -738,18 +901,11 @@ impl Desktop {
                 })
                 .strong(),
             );
-            if let Some(t) = self.started {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let sec = t.elapsed().as_secs();
-                    ui.small(format!("{:02}:{:02} elapsed", sec / 60, sec % 60));
-                    if self.progress > 0.05 && self.progress < 1. && !self.paused() {
-                        ui.small(format!(
-                            "~{}s remaining",
-                            (t.elapsed().as_secs_f32() * (1. - self.progress) / self.progress)
-                                as u64
-                        ));
-                    }
-                });
+            if self.started.is_some() {
+                ui.small(format!(
+                    "{} active time",
+                    progress::duration(current.elapsed)
+                ));
             }
         });
         let value = ui.ctx().animate_value_with_time(
@@ -778,6 +934,13 @@ impl Desktop {
                 3,
                 Color32::from_white_alpha(40),
             );
+        }
+        if let Some((message, done, total)) = &self.transfer
+            && self.busy_setup
+            && *total > 0
+        {
+            ui.small(message);
+            ui.add(egui::ProgressBar::new(*done as f32 / *total as f32).desired_height(4.));
         }
         if self.active.is_some() {
             ui.small(RichText::new("Pause takes effect at safe checkpoints. Cancel also stops an active model request.").color(self.muted()));
@@ -809,7 +972,7 @@ impl Desktop {
                             p.models.iter().map(|m|m.name.as_str()).collect::<Vec<_>>().join(" + ")}
                         ,format_args!("{:?}",p.backend),p.dpi,p.context));
                         if p.models.is_empty() && self.state.settings.preset!=Preset::Fast {
-                            ui.colored_label(Color32::from_rgb(241,187,111),"AI setup needed → Advanced / Models. Fast works with Tesseract.");
+                            ui.colored_label(Color32::from_rgb(241,187,111),"AI setup needed → use Download & install AI below. Fast works with Tesseract.");
                         }
                     }
                     ,Err(e)=>{
@@ -826,6 +989,34 @@ impl Desktop {
             }
         }
         );
+        let ctx = ui.ctx().clone();
+        self.ai_setup_controls(ui, &ctx);
+    }
+    pub(super) fn ai_setup_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let recommendation = self
+            .hardware
+            .as_ref()
+            .and_then(|h| crate::setup::recommend(h, &self.state.settings).ok());
+        egui::Frame::new().fill(self.surface()).corner_radius(12).inner_margin(14).show(ui,|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Local AI · one-click setup");
+                if ui.add_enabled(self.worker.is_none() && self.hardware.is_some(),egui::Button::new("Download & install AI").fill(self.accent()).stroke(egui::Stroke::NONE)).clicked() {
+                    self.begin_ai_setup(ctx);
+                }
+            });
+            if let Some(r)=recommendation {
+                ui.small(format!("Recommended: {} · up to {:.2} GiB of models",r.models.iter().map(|m|m.name.as_str()).collect::<Vec<_>>().join(" + "),r.bytes as f64 / 1073741824.));
+            }
+            ui.small("Downloads the compatible runtime and fitting models from GitHub / Hugging Face. Verifies files and registers readers automatically. Existing verified models are reused. Scans stay on this PC.");
+        });
+    }
+    fn begin_ai_setup(&mut self, ctx: &egui::Context) {
+        let settings = self.state.settings.clone();
+        self.studio_task(ctx, move |c, log| {
+            let next =
+                crate::setup::install(&settings, &crate::setup::Options::default(), &c, &log)?;
+            Ok(studio::StudioMessage::Setup(Box::new(next)))
+        });
     }
     fn queue_ui(&mut self, ui: &mut egui::Ui) {
         if self.state.queue.is_empty() {
@@ -2002,6 +2193,47 @@ mod acceptance {
         assert!(evidence_label(&page).contains("2 reader families"));
     }
     #[test]
+    fn background_byte_logs_do_not_corrupt_master_work_progress() {
+        let mut app = Desktop::new(Workspace::default());
+        app.estimate = Some(Estimate::new(0.));
+        app.estimate.as_mut().unwrap().update(
+            &progress::Work::new(progress::Phase::Read, 1, 4, 10000, false),
+            0.,
+        );
+        let log = Activity {
+            path: None,
+            callback: Some(Arc::new({
+                let tx = app.tx.clone();
+                move |e| {
+                    tx.send(Message::Event(e)).unwrap();
+                }
+            })),
+        };
+        log.emit("download", "Model bytes", 0, 900, 1000, "");
+        app.poll(&egui::Context::default());
+        assert!((app.progress - 0.25).abs() < 0.01);
+    }
+    #[test]
+    fn successful_ai_setup_applies_runtime_settings_without_losing_writer_context() {
+        let mut app = Desktop::new(Workspace::default());
+        app.state.settings.subject = "Accounting notes".into();
+        let mut installed = app.state.settings.clone();
+        installed.server = "runtime/ai-backends/test/llama-server.exe".into();
+        installed.backend = Backend::Cuda;
+        app.estimate = Some(Estimate::new(0.));
+        app.tx
+            .send(Message::Studio(studio::StudioMessage::Setup(Box::new(
+                installed,
+            ))))
+            .unwrap();
+        app.poll(&egui::Context::default());
+        assert_eq!(app.state.settings.subject, "Accounting notes");
+        assert_eq!(app.state.settings.backend, Backend::Cuda);
+        assert_eq!(app.state.settings.server, app.draft.server);
+        assert_eq!(app.progress, 1.);
+        assert!(!app.busy_setup);
+    }
+    #[test]
     fn every_advanced_tab_renders_and_logs_are_bounded() {
         let mut app = Desktop::new(Workspace::default());
         let ctx = egui::Context::default();
@@ -2024,6 +2256,7 @@ mod acceptance {
                     total: 4,
                     code: String::new(),
                     warning: false,
+                    work: None,
                 }))
                 .unwrap();
         }
@@ -2031,7 +2264,7 @@ mod acceptance {
             draw(&mut app, &ctx);
         }
         assert_eq!(app.logs.len(), 2000);
-        assert_eq!(app.progress, 0.25);
+        assert_eq!(app.progress, 0.); // Ordinary log counters are not conversion progress.
     }
     #[test]
     fn worker_failure_stops_queue_and_explains_error() {

@@ -9,15 +9,21 @@ New-Item -ItemType Directory -Force $smoke,"$smoke/assets","$smoke/runtime" | Ou
 Copy-Item target/release/notegen-cli.exe $smoke
 Copy-Item rust/downloads.json "$smoke/assets/model-downloads.json"
 Get-ChildItem runtime -File | Where-Object {$_.Extension -in @('.dll','.exe')} | Copy-Item -Destination "$smoke/runtime"
-& ./scripts/Install-Models.ps1 -Root $smoke -ModelIds glm-ocr,lighton3-1b,qwen35-2b
-if($LASTEXITCODE -ne 0){throw 'Actual model installation failed'}
-$env:NOTEGEN_LIVE_SERVER="$smoke/runtime/llama-server.exe"
+Push-Location $smoke
+try {
+ & ./notegen-cli.exe setup --runtime-only --backend cpu -o ./installed-ai-settings.json
+ if($LASTEXITCODE -ne 0){throw 'Native in-app runtime installation failed'}
+ & ./notegen-cli.exe --settings ./installed-ai-settings.json setup --models-only --model-ids glm-ocr,lighton3-1b,qwen35-2b -o ./installed-ai-settings.json
+ if($LASTEXITCODE -ne 0){throw 'Native in-app model download/verification/registration failed'}
+ $installedAI=Get-Content ./installed-ai-settings.json -Raw | ConvertFrom-Json
+} finally {Pop-Location}
+$env:NOTEGEN_LIVE_SERVER=$installedAI.server
 foreach($id in @('glm-ocr','lighton3-1b','qwen35-2b')){
- $pin=Get-Content "$smoke/assets/model-downloads.json" -Raw | ConvertFrom-Json | Where-Object id -EQ $id
+ $registered=Get-Content "$smoke/models/$id.notegen.json" -Raw | ConvertFrom-Json
  $env:NOTEGEN_LIVE_ID=$id
  $env:NOTEGEN_LIVE_ROOT="$smoke/results/$id"
- $env:NOTEGEN_LIVE_WEIGHTS="$smoke/models/$id/$($pin.weights.file)"
- $env:NOTEGEN_LIVE_PROJECTOR="$smoke/models/$id/$($pin.projector.file)"
+ $env:NOTEGEN_LIVE_WEIGHTS=$registered.weights
+ $env:NOTEGEN_LIVE_PROJECTOR=$registered.projector
  & cargo test --locked --features desktop --test engine live_model -j 2 -- --ignored --nocapture
  if($LASTEXITCODE -ne 0){throw "Real local inference failed: $id"}
 }
@@ -39,6 +45,7 @@ try{
  & ./notegen-cli.exe defaults -o $settings
  if($LASTEXITCODE -ne 0){throw 'CLI defaults failed'}
  $s=Get-Content $settings -Raw | ConvertFrom-Json
+ $s.server=$installedAI.server
  $s.preset='maximum';$s.backend='cpu';$s.handwriting=$true;$s.crop_retries=1
  $s.dpi=150;$s.max_tokens=2048;$s.request_timeout_secs=600;$s.auto_rotate=$false
  $s.pdfium="$sourceRoot/build/pdfium-rust/bin/pdfium.dll"

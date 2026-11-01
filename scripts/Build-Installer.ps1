@@ -3,7 +3,7 @@
 param(
  [Parameter(Mandatory)][string]$Payload,
  [Parameter(Mandatory)][string]$Compiler,
- [string]$Version='0.2.0',
+ [string]$Version='0.3.0',
  [string]$Output='dist/installer'
 )
 $ErrorActionPreference='Stop'
@@ -19,6 +19,9 @@ foreach($p in @('.notegen','package-test.docx','package-scan.docx')) {
  if(Test-Path $path){Remove-Item $path -Recurse -Force}
 }
 if(Test-Path (Join-Path $Payload 'models')){throw 'The installer payload must not contain downloaded model weights.'}
+Copy-Item (Join-Path $sourceRoot 'README.md') $Payload -Force
+Copy-Item (Join-Path $sourceRoot 'docs/STUDIO.md') (Join-Path $Payload 'docs') -Force
+Copy-Item (Join-Path $sourceRoot 'docs/TESTING.md') (Join-Path $Payload 'docs') -Force
 Copy-Item (Join-Path $PSScriptRoot 'Configure-AI.ps1') (Join-Path $Payload 'scripts') -Force
 Copy-Item (Join-Path $sourceRoot 'docs/INSTALLER.md') (Join-Path $Payload 'docs') -Force
 Get-Content (Join-Path $sourceRoot 'docs/INSTALLER.md') -Raw | Set-Content (Join-Path $Payload 'docs/INSTALLER.txt') -Encoding utf8

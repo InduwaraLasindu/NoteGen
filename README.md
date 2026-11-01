@@ -13,22 +13,27 @@ Python is not needed to run the current app.
 · [Portable builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 · [Studio guide](docs/STUDIO.md) · [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
 
-[Download NoteGen-Setup-0.2.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.2.0/NoteGen-Setup-0.2.0.exe)
-(about 61 MB), run it, and follow the wizard. It installs for your Windows account,
-adds Start menu shortcuts and an optional desktop shortcut, and includes an uninstaller.
-[Release page](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.2.0) · [Installer guide](docs/INSTALLER.md)
+Download the installer from [GitHub Releases](https://github.com/InduwaraLasindu/NoteGen/releases/latest),
+run it, and follow the wizard. It installs for your Windows account, adds Start menu
+shortcuts and an optional desktop shortcut, and includes an uninstaller.
 
-English printed OCR and Word export work immediately. For local AI, choose
-**NoteGen → Set up local AI** in the Start menu. The setup downloads the appropriate
-runtime and model weights for this PC. Restart NoteGen afterward. No Python or Rust
-installation is needed. Models and document data survive upgrades/uninstall; a selected
-CUDA/Vulkan runtime survives upgrades.
+English printed OCR and Word export work immediately. For local AI, click
+**Download & install AI** on the main screen or in **Studio → Readers**. The app selects
+fitting readers for your preset and available RAM/VRAM, downloads the compatible runtime
+and pinned model/projector pairs, verifies SHA256 and registers them. No restart is needed.
+The card shows the model names and download size before starting; runtime downloads are
+additional. Cancel preserves verified files and resumable partial downloads. Windows tries
+compatible CUDA versions and Vulkan before a permitted CPU fallback. Advanced controls
+include backend selection and a requirement for acceleration. No Python or Rust installation
+is needed. The Start menu setup helper remains available for manual setup.
 
-The [installer acceptance run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41185176403) passed actual installation,
-GUI launch, PDF rasterization/OCR, editable Word-table export, same-version upgrade,
-shortcut/registry registration, uninstall and data preservation. The original
-[application verification](docs/TESTING.md) passed 65 tests per OS and real CPU AI conversion.
-The release includes SHA256 and provenance files. The installer is unsigned.
+The **Overall progress** bar covers the whole queue, weighted by selected page counts.
+Its ETA learns rendering, model startup, reading, crop retry and export costs separately.
+Initial estimates are labelled, pauses and clarification waiting time are excluded, and
+extra crop retries can increase the ETA. Failed/cancelled work never appears complete.
+
+[Installer guide](docs/INSTALLER.md) · [Verification evidence](docs/TESTING.md).
+Releases contain SHA256 and provenance files. The installer is unsigned.
 
 Portable ZIPs remain available under the latest successful **Rust verification** workflow's
 **NoteGen-Rust-Windows-x64** artifact. Extract both ZIP layers and keep the folder together.
@@ -49,7 +54,8 @@ the query you type, after explicit opt-in. There is no cloud conversion fallback
 | Tables | Native ruled-grid recovery and HTML/Markdown/JSON tables; real Word cells, merges and repeated headers |
 | Diagrams | Source crop, visible evidence and qualified contextual interpretation kept separately; interpretations require review |
 | Scan preparation | Orientation detection, small-angle deskew, contrast normalization, blur warnings and image memory limits |
-| Live activity | Stage/page progress, elapsed/estimated time, filterable activity, NG error codes and remedies; full JSONL/native runtime logs |
+| Live activity | Page-weighted master queue bar, stage-based adaptive ETA, current document progress, byte download progress, active elapsed time, filterable JSONL/runtime logs and NG error remedies |
+| One-click AI setup | In-app compatible runtime + model installation, pinned SHA256, resumable downloads, automatic registration, GPU probes and verified model reuse |
 | Durable jobs | Queue, page ranges, pause, active-request cancellation, input/model/settings-bound checkpoints, restart recovery and protected output names |
 | Review | Side-by-side source boxes, editable text/cells/diagram explanations, reader evidence, validated page JSON and persistent human corrections |
 | Minimal native UI | Scanning-page motion graphic, orbiting accents, eased hover/preset transitions, progress sheen, completion check and animated drawers/windows; configurable in Advanced |

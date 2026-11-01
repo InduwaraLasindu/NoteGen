@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.2.0',[string]$Evidence='build/installer-evidence')
+param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.3.0',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='')
 $ErrorActionPreference='Stop'
 $Installer=(Resolve-Path $Installer).Path
 New-Item -ItemType Directory -Force $Evidence | Out-Null
@@ -23,7 +23,22 @@ function Test-Desktop([string]$name) {
  } finally {if(-not $p.HasExited){Stop-Process -Id $p.Id -Force}}
 }
 try {
+ if($PreviousInstaller){
+  $newInstaller=$Installer
+  $Installer=(Resolve-Path $PreviousInstaller).Path
+  Install-NoteGen 'previous-0.2-install'
+  $previousVersion=& (Join-Path $installDir 'notegen-cli.exe') --version
+  if($LASTEXITCODE -ne 0 -or $previousVersion -notmatch '0\.2\.0'){throw 'Previous installer did not contain NoteGen 0.2.0.'}
+  Test-Desktop 'previous 0.2 installation'
+  New-Item -ItemType Directory -Force (Join-Path $installDir 'user-data') | Out-Null
+  $legacyMarker=Join-Path $installDir 'user-data/legacy-0.2-document.txt'
+  [IO.File]::WriteAllText($legacyMarker,'EXISTING 0.2 DATA MUST SURVIVE')
+  $Installer=$newInstaller
+ }
  Install-NoteGen 'install'
+ if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING 0.2 DATA MUST SURVIVE'){throw 'Version 0.2 to 0.3 upgrade changed user data.'}
+ if($PreviousInstaller){$results.Add('Real 0.2.0 to 0.3.0 upgrade preserved existing user data and updated the executable')}
+
  foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/tesseract/tesseract.exe','runtime/llama-server.exe','vcruntime140.dll','runtime/vcruntime140.dll','scripts/Configure-AI.ps1','unins000.exe')) {
   if(-not(Test-Path (Join-Path $installDir $f))){throw "Installed dependency missing: $f"}
  }
@@ -41,6 +56,8 @@ try {
  Test-Desktop 'fresh installation'
  Push-Location $installDir
  try {
+  $reported=& ./notegen-cli.exe --version
+  if($LASTEXITCODE -ne 0 -or $reported -notmatch [regex]::Escape($Version)){throw 'Installed executable version does not match the release.'}
   & ./notegen-cli.exe self-test -o (Join-Path $Evidence 'installed-word.docx')
   if($LASTEXITCODE -ne 0){throw 'Installed CLI Word export failed.'}
   & ./runtime/tesseract/tesseract.exe --version
@@ -64,8 +81,32 @@ try {
    try{$xml=$reader.ReadToEnd()}finally{$reader.Dispose()}
    if($xml -notmatch '1250' -or $xml -notmatch '<w:tbl>'){throw 'Installed OCR/table export assertion failed.'}
   } finally {$archive.Dispose()}
+  $writer=(& ./notegen-cli.exe add-writer 'Installer QA writer') | ConvertFrom-Json
+  if($LASTEXITCODE -ne 0 -or -not $writer.id){throw 'Installed writer creation failed.'}
+  Add-Type -AssemblyName System.Drawing
+  $glyph=Join-Path $Evidence 'glyph-r.png'
+  $bitmap=[Drawing.Bitmap]::new(140,160);$graphics=[Drawing.Graphics]::FromImage($bitmap)
+  $typeface=[Drawing.Font]::new('Arial',100,[Drawing.FontStyle]::Regular,[Drawing.GraphicsUnit]::Pixel)
+  try{$graphics.Clear([Drawing.Color]::White);$graphics.DrawString('r',$typeface,[Drawing.Brushes]::Black,10,10);$bitmap.Save($glyph,[Drawing.Imaging.ImageFormat]::Png)}finally{$typeface.Dispose();$graphics.Dispose();$bitmap.Dispose()}
+  & ./notegen-cli.exe teach $writer.id $glyph r --glyph
+  if($LASTEXITCODE -ne 0){throw 'Installed confirmed handwriting learning failed.'}
+  & ./notegen-cli.exe export-writer $writer.id -o (Join-Path $Evidence 'installed-writer.zip')
+  if($LASTEXITCODE -ne 0){throw 'Installed profile export failed.'}
+  $fontPack=Join-Path $Evidence 'installed-font.zip'
+  & ./notegen-cli.exe font-pack $writer.id -o $fontPack --family 'Installer QA handwriting'
+  if($LASTEXITCODE -ne 0){throw 'Installed font pack export failed.'}
+  $fontArchive=[IO.Compression.ZipFile]::OpenRead($fontPack)
+  try{
+   $fontFile=Join-Path $Evidence 'installed-handwriting.ttf'
+   [IO.Compression.ZipFileExtensions]::ExtractToFile($fontArchive.GetEntry('Handwriting.ttf'),$fontFile,$true)
+  }finally{$fontArchive.Dispose()}
+  & (Join-Path $PSScriptRoot 'Test-Font.ps1') -Font $fontFile -Preview (Join-Path $Evidence 'installed-font.png')
+  if(-not $?){throw 'Windows rejected the installed-app font export.'}
+  $writerFile=Join-Path $installDir "user-data/writers/$($writer.id)/profile.json"
+  $writerHash=(Get-FileHash $writerFile -Algorithm SHA256).Hash
  } finally {Pop-Location}
  $results.Add('Installed CLI PDF rasterization, real OCR, editable Word table and native dependencies passed')
+ $results.Add('Installed writer creation, confirmed crop learning, profile/font export and native Windows TTF rendering passed')
  New-Item -ItemType Directory -Force (Join-Path $installDir 'models'),(Join-Path $installDir 'user-data') | Out-Null
  $model=Join-Path $installDir 'models/keep-user-model.marker'
  $document=Join-Path $installDir 'user-data/keep-user-document.txt'
@@ -78,6 +119,7 @@ try {
  Copy-Item (Join-Path $installDir 'notegen-cli.exe') $engine -Force
  $customEngineHash=(Get-FileHash $engine -Algorithm SHA256).Hash
  Install-NoteGen 'upgrade'
+ if((Get-FileHash $writerFile -Algorithm SHA256).Hash -ne $writerHash){throw 'Upgrade modified a handwriting profile.'}
  if([IO.File]::ReadAllText($model) -ne 'USER MODEL MUST SURVIVE' -or [IO.File]::ReadAllText($document) -ne 'USER DOCUMENT MUST SURVIVE'){throw 'Upgrade modified user data.'}
  if((Get-FileHash $engine -Algorithm SHA256).Hash -ne $customEngineHash){throw 'Upgrade overwrote the selected AI runtime.'}
  Copy-Item $engineBackup $engine -Force
@@ -92,7 +134,8 @@ try {
  if(Test-Path (Join-Path $programs 'NoteGen/NoteGen.lnk')){throw 'Uninstall left the Start menu shortcut behind.'}
  if(Test-Path (Join-Path $desktop 'NoteGen.lnk')){throw 'Uninstall left the desktop shortcut behind.'}
  if([IO.File]::ReadAllText($model) -ne 'USER MODEL MUST SURVIVE' -or [IO.File]::ReadAllText($document) -ne 'USER DOCUMENT MUST SURVIVE'){throw 'Uninstall deleted user data.'}
- $results.Add('Uninstall removed the app and shortcuts while preserving user data')
+ if((Get-FileHash $writerFile -Algorithm SHA256).Hash -ne $writerHash){throw 'Uninstall deleted a handwriting profile.'}
+ $results.Add('Uninstall removed the app and shortcuts while preserving user data and handwriting profiles')
  $results | Set-Content (Join-Path $Evidence 'passed.txt') -Encoding utf8
  Write-Host ($results -join "`n")
 } finally {

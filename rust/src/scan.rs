@@ -73,21 +73,7 @@ pub fn render_pdf(
         source.metadata()?.len() <= 2_000_000_000,
         Fault::new("NG100", "PDF exceeds 2 GB limit")
     );
-    let library = if library.is_file() {
-        library.to_path_buf()
-    } else {
-        library.join(Pdfium::pdfium_platform_library_name())
-    };
-    let bindings = if library.is_file() {
-        Pdfium::bind_to_library(&library)
-    } else {
-        Pdfium::bind_to_system_library()
-    };
-    let engine = match bindings {
-        Ok(bindings) => Pdfium::new(bindings),
-        Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Pdfium::default(),
-        Err(e) => return Err(Fault::new("NG100", format!("PDFium load failed: {e}")).into()),
-    };
+    let engine = pdfium(library)?;
     let doc = engine
         .load_pdf_from_file(source, None)
         .map_err(|_| Fault::new("NG100", "Unreadable or encrypted PDF"))?;
@@ -122,6 +108,40 @@ pub fn render_pdf(
         callback(*n, im)?;
     }
     Ok(selected)
+}
+fn pdfium(library: &Path) -> Result<Pdfium> {
+    let library = if library.is_file() {
+        library.to_path_buf()
+    } else {
+        library.join(Pdfium::pdfium_platform_library_name())
+    };
+    let bindings = if library.is_file() {
+        Pdfium::bind_to_library(&library)
+    } else {
+        Pdfium::bind_to_system_library()
+    };
+    Ok(match bindings {
+        Ok(bindings) => Pdfium::new(bindings),
+        Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Pdfium::default(),
+        Err(e) => return Err(Fault::new("NG100", format!("PDFium load failed: {e}")).into()),
+    })
+}
+/// Read selected page counts without rendering, OCR or loading AI weights.
+pub fn selected_page_count(source: &Path, library: &Path, pages: &str) -> Result<usize> {
+    anyhow::ensure!(
+        source.metadata()?.len() <= 2_000_000_000,
+        Fault::new("NG100", "PDF exceeds 2 GB limit")
+    );
+    let engine = pdfium(library)?;
+    let doc = engine
+        .load_pdf_from_file(source, None)
+        .map_err(|_| Fault::new("NG100", "Unreadable or encrypted PDF"))?;
+    let total = doc.pages().len() as usize;
+    anyhow::ensure!(
+        (1..=3000).contains(&total),
+        Fault::new("NG100", "PDF page count outside 1–3000")
+    );
+    Ok(pages_range(pages, total)?.len())
 }
 pub fn enhance(im: &DynamicImage) -> GrayImage {
     let mut g = im.to_luma8();

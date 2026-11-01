@@ -10,6 +10,7 @@ pub(super) enum StudioMessage {
     Update(models::Update),
     Web(Vec<assistance::WebSource>),
     Done(String),
+    Setup(Box<Settings>),
 }
 pub(super) struct Pending {
     pub batch: Batch,
@@ -131,6 +132,14 @@ impl Desktop {
     }
     pub(super) fn studio_message(&mut self, msg: StudioMessage, ctx: &egui::Context) {
         match msg {
+            StudioMessage::Setup(settings) => {
+                self.state.settings = *settings;
+                self.draft = self.state.settings.clone();
+                self.raw = serde_json::to_string_pretty(&self.draft).unwrap_or_default();
+                self.notice = "Local AI is installed and verified. You can convert now.".into();
+                self.refresh(ctx);
+            }
+
             StudioMessage::Update(u) => {
                 self.studio.updates.retain(|v| v.id != u.id);
                 self.notice = if u.previous_revision == u.revision {
@@ -162,12 +171,16 @@ impl Desktop {
         }
         self.busy_setup = false;
         self.stage = "Ready".into();
-        self.progress = 0.;
+        if let Some(e) = &mut self.estimate {
+            e.finish(self.clock.elapsed().as_secs_f64(), true);
+        }
+        self.progress = 1.;
+        self.transfer = None;
         self.started = None;
         self.completed_at = None;
         self.finished();
     }
-    fn studio_task<F>(&mut self, ctx: &egui::Context, task: F)
+    pub(super) fn studio_task<F>(&mut self, ctx: &egui::Context, task: F)
     where
         F: FnOnce(Control, Activity) -> Result<StudioMessage> + Send + 'static,
     {
@@ -183,6 +196,14 @@ impl Desktop {
         let tx = self.tx.clone();
         let cx = ctx.clone();
         self.busy_setup = true;
+        self.progress = 0.;
+        self.estimate = Some(Estimate::new(self.clock.elapsed().as_secs_f64()));
+        self.batch = None;
+        self.batch_index = None;
+        self.transfer = None;
+        self.started = Some(Instant::now());
+        self.error_code.clear();
+
         self.worker = Some(thread::spawn(move || {
             let events = tx.clone();
             let repaint = cx.clone();
@@ -617,6 +638,8 @@ impl Desktop {
         });
     }
     fn reader_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.ai_setup_controls(ui, ctx);
+        ui.add_space(12.);
         ui.label("Use compatible third-party GGUF + projector pairs, or an OpenAI-compatible vision server on this PC. Local server aliases must match /v1/models. Remote document inference stays blocked.");
         let installed = self.installed.clone();
         for m in &installed {

@@ -557,15 +557,48 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
     let content = scan::printed(im.as_ref().unwrap(), &s, &Control::default()).unwrap();
     assert!(content.plain().contains("1250"), "{}", content.plain());
     assert!(content.blocks.iter().any(|b| b.kind == "table"));
+    assert_eq!(
+        scan::selected_page_count(&source, &s.pdfium, "").unwrap(),
+        1
+    );
+    assert!(scan::selected_page_count(&source, &s.pdfium, "2").is_err());
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = events.clone();
+    let activity = Activity {
+        path: None,
+        callback: Some(std::sync::Arc::new(move |e| {
+            recorded.lock().unwrap().push(e)
+        })),
+    };
     let first = notegen::pipeline::convert(
         &source,
         &t.path().join("notes.docx"),
         &s,
         &Control::default(),
-        &Activity::default(),
+        &activity,
     )
     .unwrap();
     assert_eq!(first.pages, 1);
+    {
+        let logs = events.lock().unwrap();
+        let work = logs
+            .iter()
+            .filter_map(|e| e.work.as_ref())
+            .collect::<Vec<_>>();
+        assert!(
+            work.iter()
+                .any(|w| w.phase == notegen::progress::Phase::Render
+                    && w.done == 1
+                    && w.total == 1)
+        );
+        assert!(
+            work.iter()
+                .any(|w| w.phase == notegen::progress::Phase::Export
+                    && w.done == 1
+                    && w.total == 1)
+        );
+        assert_eq!(logs.last().unwrap().stage, "complete");
+    }
     let second = notegen::pipeline::convert(
         &source,
         &t.path().join("notes2.docx"),

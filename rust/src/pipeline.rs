@@ -1,6 +1,7 @@
 use crate::{
     consensus, hardware,
     planning::{self, Plan},
+    progress::{Phase, Work},
     runtime::{self, Server},
     scan,
     storage::*,
@@ -72,7 +73,36 @@ pub fn convert(
         models
     };
     let mut plan = planning::build(&hw, s, &installed)?;
-    for model in &mut plan.models {
+    let pages = scan::selected_page_count(source, &s.pdfium, &s.page_range)?;
+    let readers = plan.models.len();
+    let read_ms = if plan.backend == Backend::Cpu {
+        30000
+    } else {
+        8000
+    };
+    let crop_reserved = if s.preset == Preset::Maximum {
+        pages * readers * s.crop_retries.min(2)
+    } else {
+        0
+    };
+    for (phase, total, ms) in [
+        (Phase::Render, pages, 1500),
+        (Phase::Load, readers * 2, 5000),
+        (Phase::Read, pages * readers, read_ms),
+        (Phase::Crop, crop_reserved, read_ms / 2),
+        (Phase::Finalize, pages, 100),
+        (Phase::Export, 1, 2000),
+    ] {
+        activity.work(
+            Work::new(phase, 0, total, ms, false),
+            "Planning document work",
+        );
+    }
+    for (verified, model) in plan.models.iter_mut().enumerate() {
+        activity.work(
+            Work::new(Phase::Load, verified, readers * 2, 5000, true),
+            "Verifying reader files",
+        );
         c.check()?;
         if model.endpoint.is_some() {
             continue;
@@ -99,6 +129,10 @@ pub fn convert(
             );
         }
         model.sha256 = digest;
+        activity.work(
+            Work::new(Phase::Load, verified + 1, readers * 2, 5000, false),
+            "Reader files verified",
+        );
     }
     if s.preset != Preset::Fast && (s.handwriting || s.preset != Preset::Balanced) {
         anyhow::ensure!(
@@ -175,6 +209,10 @@ pub fn convert(
             let image = root.join(format!("page-{n:05}.png"));
             let checkpoint = root.join(format!("page-{n:05}.json"));
             selected.push(n);
+            log.work(
+                Work::new(Phase::Render, selected.len() - 1, pages, 1500, true),
+                "Preparing source pages",
+            );
             if image.exists()
                 && fs::File::open(&checkpoint)
                     .ok()
@@ -192,6 +230,10 @@ pub fn convert(
                     selected.len(),
                     0,
                     "",
+                );
+                log.work(
+                    Work::new(Phase::Render, selected.len(), pages, 1500, false),
+                    "Reused rendered checkpoint",
                 );
                 return Ok(());
             }
@@ -254,6 +296,10 @@ pub fn convert(
             p.source_warnings = p.content.warnings.clone();
             atomic_json(&checkpoint, &p)?;
             rendered.push(n);
+            log.work(
+                Work::new(Phase::Render, selected.len(), pages, 1500, false),
+                "Source page prepared",
+            );
             log.emit(
                 "ocr",
                 "Printed OCR checkpoint saved",
@@ -278,7 +324,13 @@ pub fn convert(
     let context_notes = guidance.notes.join("\n");
     let total = selected.len() * (plan.models.len() + 1) + 1;
     let mut done = selected.len();
+    let mut read_done = 0;
+    let mut crop_done = 0;
     for (model_index, model) in plan.models.clone().iter().enumerate() {
+        log.work(
+            Work::new(Phase::Load, readers + model_index, readers * 2, 5000, true),
+            "Preparing local reader",
+        );
         c.check()?;
         let tasks = selected
             .iter()
@@ -292,12 +344,42 @@ pub fn convert(
             .collect::<Vec<_>>();
         if tasks.is_empty() {
             done += selected.len();
+            read_done += selected.len();
+            log.work(
+                Work::new(Phase::Read, read_done, pages * readers, read_ms, false),
+                "Reused reader checkpoints",
+            );
+            log.work(
+                Work::new(
+                    Phase::Load,
+                    readers + model_index + 1,
+                    readers * 2,
+                    5000,
+                    false,
+                ),
+                "Reader already complete",
+            );
             continue;
         }
         // Re-admit against current free memory before allocating model weights.
         let current = hardware::detect_for(s, c);
         let fresh = planning::build(&current, s, std::slice::from_ref(model))?;
         if fresh.models.is_empty() {
+            read_done += selected.len();
+            log.work(
+                Work::new(Phase::Read, read_done, pages * readers, read_ms, false),
+                "Reader skipped by memory admission",
+            );
+            log.work(
+                Work::new(
+                    Phase::Load,
+                    readers + model_index + 1,
+                    readers * 2,
+                    5000,
+                    false,
+                ),
+                "Memory admission checked",
+            );
             log.emit(
                 "resource",
                 "Model no longer fits free memory; preserving current readers",
@@ -360,6 +442,21 @@ pub fn convert(
                 if e.downcast_ref::<Fault>().is_some_and(|f| f.code == "NG900") {
                     return Err(e);
                 }
+                read_done += selected.len();
+                log.work(
+                    Work::new(Phase::Read, read_done, pages * readers, read_ms, false),
+                    "Unavailable reader skipped; review required",
+                );
+                log.work(
+                    Work::new(
+                        Phase::Load,
+                        readers + model_index + 1,
+                        readers * 2,
+                        5000,
+                        false,
+                    ),
+                    "Reader startup finished",
+                );
                 log.emit(
                     "model",
                     format!(
@@ -374,14 +471,33 @@ pub fn convert(
                 continue;
             }
         };
+        log.work(
+            Work::new(
+                Phase::Load,
+                readers + model_index + 1,
+                readers * 2,
+                5000,
+                false,
+            ),
+            "Local reader ready",
+        );
         for n in &selected {
             c.check()?;
             let mut page = project.load(*n)?;
             if !tasks.contains(n) {
                 done += 1;
+                read_done += 1;
+                log.work(
+                    Work::new(Phase::Read, read_done, pages * readers, read_ms, false),
+                    "Reader checkpoint reused",
+                );
                 continue;
             }
             let started = Instant::now();
+            log.work(
+                Work::new(Phase::Read, read_done, pages * readers, read_ms, true),
+                "Reading source page",
+            );
             log.emit(
                 "inference",
                 format!(
@@ -459,6 +575,11 @@ pub fn convert(
                     );
                 }
             }
+            read_done += 1;
+            log.work(
+                Work::new(Phase::Read, read_done, pages * readers, read_ms, false),
+                "Full-page reading finished",
+            );
             let (mut content, agreement) =
                 consensus::select(&page.candidates, s.consensus_min, s.agreement_threshold);
             // Low-confidence source crops provide high effective DPI without sending a huge whole-page image.
@@ -466,6 +587,16 @@ pub fn convert(
                 let regions = scan::crop_regions(&content, &im, s);
                 for (i, (bbox, crop)) in regions.into_iter().enumerate() {
                     c.check()?;
+                    log.work(
+                        Work::new(
+                            Phase::Crop,
+                            crop_done,
+                            crop_reserved.max(crop_done + 1),
+                            read_ms / 2,
+                            true,
+                        ),
+                        "Reading a difficult crop",
+                    );
                     log.emit(
                         "crop",
                         format!("Re-reading difficult region {} with {}", i + 1, model.name),
@@ -485,6 +616,17 @@ pub fn convert(
                     } else {
                         server.read(&crop, "", &context, &active_settings, c, &log, *n)
                     };
+                    crop_done += 1;
+                    log.work(
+                        Work::new(
+                            Phase::Crop,
+                            crop_done,
+                            crop_reserved.max(crop_done),
+                            read_ms / 2,
+                            false,
+                        ),
+                        "Crop reading finished",
+                    );
                     if let Err(error) = &reading {
                         if error
                             .downcast_ref::<Fault>()
@@ -552,10 +694,18 @@ pub fn convert(
         }
         drop(server);
     }
+    log.work(
+        Work::new(Phase::Crop, crop_done, crop_done, read_ms / 2, false),
+        "Difficult-region passes finished",
+    );
     atomic_json(&root.join("hardware.json"), &hw)?;
     atomic_json(&root.join("plan.json"), &plan)?;
     let mut review = 0;
-    for n in &selected {
+    for (index, n) in selected.iter().enumerate() {
+        log.work(
+            Work::new(Phase::Finalize, index, pages, 100, true),
+            "Reconciling page evidence",
+        );
         let mut p = project.load(*n)?;
         if !p.edited && !p.reviewed {
             consensus::refine_regions(&mut p, s);
@@ -582,6 +732,10 @@ pub fn convert(
             project.save(&p)?;
         }
     }
+    log.work(
+        Work::new(Phase::Finalize, pages, pages, 100, false),
+        "Page evidence ready for review",
+    );
     if s.assistance.ask_questions && s.assistance.max_questions > 0 {
         let questions =
             crate::assistance::questions(&project, s.assistance.max_questions, s.review_threshold)?;
@@ -652,7 +806,15 @@ pub fn convert(
         total,
         "",
     );
+    log.work(
+        Work::new(Phase::Export, 0, 1, 2000, true),
+        "Writing Word document",
+    );
     word::export(&project, output, c)?;
+    log.work(
+        Work::new(Phase::Export, 1, 1, 2000, false),
+        "Word document saved",
+    );
     log.emit(
         "complete",
         format!("Word file saved · {review} pages to review"),
