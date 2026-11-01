@@ -21,15 +21,11 @@ Download the installer from [GitHub Releases](https://github.com/InduwaraLasindu
 run it, and follow the wizard. It installs for your Windows account, adds Start menu
 shortcuts and an optional desktop shortcut, and includes an uninstaller.
 
-English printed OCR and Word export work immediately. For local AI, click
-**Download & install AI** on the main screen or in **Studio → Readers**. The app selects
-fitting readers for your preset and available RAM/VRAM, downloads the compatible runtime
-and pinned model/projector pairs, verifies SHA256 and registers them. No restart is needed.
-The card shows the model names and download size before starting; runtime downloads are
-additional. Cancel preserves verified files and resumable partial downloads. Windows tries
-compatible CUDA versions and Vulkan before a permitted CPU fallback. Advanced controls
-include backend selection and a requirement for acceleration. No Python or Rust installation
-is needed. The Start menu setup helper remains available for manual setup.
+English printed OCR, PDF rendering, English language data and native dependencies work immediately. Leave **Install local AI and all required models for this PC** selected in the installer to finish AI setup inside the wizard, with progress and cancellation. Uncheck it for an offline installation.
+
+The same complete setup is available under **Settings > Updates & installation**, on the main screen, and in Studio. It selects the fitting reader families needed for Maximum Accuracy, verifies publisher-pinned files, reuses healthy installed versions and activates a compatible CUDA, Vulkan or CPU runtime. Model downloads can require several GB; source scans stay local.
+
+Settings also offers verified model/runtime updates, app updates for bundled dependencies, a measured synthetic hardware test with apply/undo, and a searchable description of every configuration option. The live AI panel shows the current source/crop and generated draft recognition. Advanced retains the power-user controls and validated JSON configuration.
 
 The **Overall progress** bar covers the whole queue, weighted by selected page counts.
 Its ETA learns rendering, model startup, reading, crop retry and export costs separately.
@@ -60,6 +56,10 @@ the query you type, after explicit opt-in. There is no cloud conversion fallback
 | Scan preparation | Orientation detection, small-angle deskew, contrast normalization, blur warnings and image memory limits |
 | Live activity | Page-weighted master queue bar, stage-based adaptive ETA, current document progress, byte download progress, active elapsed time, filterable JSONL/runtime logs and NG error remedies |
 | One-click AI setup | In-app compatible runtime + model installation, pinned SHA256, resumable downloads, automatic registration, GPU probes and verified model reuse |
+| Updates | Daily optional publisher checks, explicit verified model/runtime installation, runtime/model rollback and app-installer dependency updates |
+| Hardware test | Bounded CPU and AI probes on synthetic data; exact-number checks, real offload evidence, proposed workers and apply/undo |
+| Live AI view | Current source/crop, active reader and streamed draft answer; provisional output, optional display and clear control |
+| Understandable settings | Everyday controls with explanations, searchable reference, and Advanced controls/JSON for power users |
 | Durable jobs | Queue, page ranges, pause, active-request cancellation, input/model/settings-bound checkpoints, restart recovery and protected output names |
 | Review | Side-by-side source boxes, editable text/cells/diagram explanations, reader evidence, validated page JSON and persistent human corrections |
 | Minimal native UI | Scanning-page motion graphic, orbiting accents, eased hover/preset transitions, progress sheen, completion check and animated drawers/windows; configurable in Advanced |
