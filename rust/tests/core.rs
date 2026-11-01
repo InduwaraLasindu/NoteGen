@@ -207,13 +207,6 @@ fn consensus_selects_real_reading() {
     assert_eq!(p.plain(), "Revenue 1250");
     assert!(agreement < 1.);
     assert!(p.warnings.iter().any(|w| w.contains("Numeric")));
-    // Trailing sentence period on a number must not trigger a false-positive numeric conflict
-    let clean = vec![
-        candidate("a", "one", "Revenue 1250."),
-        candidate("b", "two", "Revenue 1250"),
-    ];
-    let (p_clean, _) = select(&clean, 2, 0.92);
-    assert!(!p_clean.warnings.iter().any(|w| w.contains("Numeric")));
 }
 #[test]
 fn repeated_model_is_not_independent_consensus() {

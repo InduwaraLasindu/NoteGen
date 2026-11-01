@@ -3,35 +3,24 @@ on:
   push:
     branches: [main]
     paths:
-      - Cargo.toml
-      - README.md
-      - rust/**
       - installer/**
       - scripts/Build-Installer.ps1
       - scripts/Test-Installer.ps1
       - scripts/Configure-AI.ps1
-      - docs/INSTALLER.md
-      - docs/STUDIO.md
-      - docs/WINDOWS.md
-      - docs/TESTING.md
       - .github/workflows/release-installer.yml
-  workflow_run:
-    workflows: ["Rust verification and Windows executable"]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       version:
         description: Installer release version
-        default: '0.3.0'
+        default: '0.2.0'
         required: true
       source_run:
-        description: Successful Rust verification workflow run ID (or 'latest' for latest verified run on main)
-        default: 'latest'
+        description: Successful Rust verification workflow run
+        default: '41168595803'
         required: true
       source_sha:
-        description: Exact verified Rust source commit (or 'latest' to match the verified run head SHA)
-        default: 'latest'
+        description: Exact verified Rust source commit
+        default: '1dd2606040305fc12c06b8396004c81485c0917b'
         required: true
 permissions:
   contents: read
@@ -41,16 +30,15 @@ concurrency:
   cancel-in-progress: false
 jobs:
   installer:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 20
     outputs:
       version: ${{ steps.payload.outputs.version }}
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_VERSION: ${{ inputs.version || '0.3.0' }}
-      SOURCE_RUN: ${{ inputs.source_run || (github.event_name == 'workflow_run' && github.event.workflow_run.id) || 'latest' }}
-      SOURCE_SHA: ${{ inputs.source_sha || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha) || 'latest' }}
+      RELEASE_VERSION: ${{ inputs.version || '0.2.0' }}
+      SOURCE_RUN: ${{ inputs.source_run || '41168595803' }}
+      SOURCE_SHA: ${{ inputs.source_sha || '1dd2606040305fc12c06b8396004c81485c0917b' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Verify and download the proven Rust build
@@ -58,24 +46,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          if($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$'){throw 'Invalid release version'}
-          if($env:SOURCE_RUN -eq 'latest' -or [string]::IsNullOrWhiteSpace($env:SOURCE_RUN)){
-            $runs=(& gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/verify-and-build.yml/runs?branch=main&status=completed&per_page=10") | ConvertFrom-Json
-            if($LASTEXITCODE -ne 0){throw 'Latest verified workflow lookup failed'}
-            $run=$runs.workflow_runs | Where-Object {$_.conclusion -eq 'success'} | Select-Object -First 1
-            if(-not $run){throw 'No completed successful verify-and-build.yml run found on main'}
-            $env:SOURCE_RUN=[string]$run.id
-            if($env:SOURCE_SHA -eq 'latest' -or [string]::IsNullOrWhiteSpace($env:SOURCE_SHA)){$env:SOURCE_SHA=$run.head_sha}
-          } else {
-            if($env:SOURCE_RUN -notmatch '^\d+$' -or $env:SOURCE_SHA -notmatch '^[a-f0-9]{40}$'){throw 'Invalid release inputs'}
-            $run=(& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN") | ConvertFrom-Json
-            if($LASTEXITCODE -ne 0){throw 'Source workflow lookup failed'}
-          }
+          if($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$' -or $env:SOURCE_RUN -notmatch '^\d+$' -or $env:SOURCE_SHA -notmatch '^[a-f0-9]{40}$'){throw 'Invalid release inputs'}
+          $run=(& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN") | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0){throw 'Source workflow lookup failed'}
           if($run.conclusion -ne 'success' -or $run.status -ne 'completed' -or $run.head_sha -ne $env:SOURCE_SHA -or $run.path -ne '.github/workflows/verify-and-build.yml'){throw 'Source build is not the expected verified Rust workflow'}
           $artifacts=(& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/artifacts") | ConvertFrom-Json
           if($LASTEXITCODE -ne 0){throw 'Artifact lookup failed'}
           $artifact=$artifacts.artifacts | Where-Object name -EQ 'NoteGen-Rust-Windows-x64' | Select-Object -First 1
           if(-not $artifact -or $artifact.expired -or -not $artifact.digest.StartsWith('sha256:')){throw 'Verified source artifact is unavailable'}
+          if($env:SOURCE_RUN -eq '41168595803' -and $artifact.digest -ne 'sha256:37956f4dd333aa61e71b242ae63ff73dafc17309c9562ca583e34477eb2c29d9'){throw 'Pinned source artifact digest changed'}
           & gh run download $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --name NoteGen-Rust-Windows-x64 --dir build/verified-artifact
           if($LASTEXITCODE -ne 0){throw 'Verified artifact download failed'}
           $zip='build/verified-artifact/NoteGen-Rust-Windows-x64.zip'
@@ -83,12 +62,6 @@ jobs:
           $actual=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if($expected -notmatch '^[a-f0-9]{64}$' -or $actual -ne $expected){throw 'Portable ZIP checksum mismatch'}
           Expand-Archive $zip build/installer-payload -Force
-          New-Item -ItemType Directory -Force dist/installer | Out-Null
-          Copy-Item $zip,"$zip.sha256" dist/installer -Force
-          $portableExe="dist/installer/NoteGen-$env:RELEASE_VERSION.exe"
-          Copy-Item build/installer-payload/NoteGen/NoteGen.exe $portableExe -Force
-          $portableHash=(Get-FileHash $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$portableHash  NoteGen-$env:RELEASE_VERSION.exe" | Set-Content "$portableExe.sha256" -Encoding ascii
           $manifest=@{version=$env:RELEASE_VERSION;source_run=[long]$env:SOURCE_RUN;source_sha=$env:SOURCE_SHA;source_artifact=$artifact.id;source_artifact_digest=$artifact.digest;portable_zip_sha256=$actual;installer_source_sha=$env:GITHUB_SHA}
           $manifest | ConvertTo-Json | Set-Content build/installer-provenance.json -Encoding utf8
           "version=$env:RELEASE_VERSION" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -131,30 +104,26 @@ jobs:
           $manifest.validation=@(Get-Content build/installer-evidence/passed.txt)
           $manifest | ConvertTo-Json -Depth 8 | Set-Content dist/installer/installer-manifest.json -Encoding utf8
           @"
-          ## NoteGen $env:RELEASE_VERSION — Studio, Handwriting Profiles, TrueType Font Export & 3rd-Party AI
+          Install NoteGen directly on Windows 10/11 x64-compatible systems.
 
-          Install NoteGen $env:RELEASE_VERSION directly on Windows 10/11 x64-compatible systems.
-
-          Download **NoteGen-Setup-$env:RELEASE_VERSION.exe** (installer wizard), **NoteGen-$env:RELEASE_VERSION.exe** (standalone executable), or **NoteGen-Rust-Windows-x64.zip** below.
+          Download **NoteGen-Setup-$env:RELEASE_VERSION.exe** below and run the wizard.
           Installation is per user and does not require administrator rights. Start menu
           shortcuts and an optional desktop shortcut are included. Uninstall from Windows
-          Settings; user models, writer profiles, and document projects are preserved.
+          Settings; user models and document data are preserved.
 
-          ### What's New in NoteGen $env:RELEASE_VERSION
-          - **NoteGen Studio (`Context & Writers`)**: Unified studio for document subject/glossary guidance, interactive clarification questions, writer handwriting profiles, personal TrueType (`.ttf`) font pack export, 3rd-party AI model registration, and public Wikipedia/search grounding.
-          - **Interactive Clarification Inbox ("A little help with this page")**: Prompts for unrecognizable words, conflicting numbers/table cells, and diagram interpretations with zoomed page crops, one-click reader alternatives, and contextual AI re-reading.
-          - **Writer Handwriting Profiles & Personal TrueType (`.ttf`) Font Pack Export**: Learn individual writers' English letter/word patterns across pages, attach confirmed glyph reference sheets to vision models, average up to 32 samples per character, and export an installable `.ttf` font + SVG glyphs.
-          - **3rd-Party AI Models & SHA256 Publisher Updates**: Register local GGUF + projector pairs or loopback OpenAI-compatible vision servers (`LM Studio`, `Ollama`, `vLLM`), and check/apply SHA256-verified publisher updates with one-click rollback.
-          - **Audit & Stability Fixes**: Fixed 4-edge perimeter dark-background guard on tight glyph crops (`writers.rs`), trailing sentence punctuation normalization in numeric consensus (`consensus.rs`), and digest-aware clarification re-prompting (`assistance.rs`).
-
-          ### Local AI & Verification
-          English printed OCR and Word export work immediately. For local AI, choose
+          English printed OCR and Word export work immediately. For AI, choose
           **NoteGen → Set up local AI** in the Start menu. Runtime and model downloads are
-          selected for available RAM/VRAM and verified with SHA256 before use.
+          separate, selected for available RAM/VRAM, and verified before use. Conversion
+          remains local. No Python or Rust installation is needed.
 
-          The executable payload is the verified Rust build from run $env:SOURCE_RUN
-          at commit $env:SOURCE_SHA.
-          [Installer Guide](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/INSTALLER.md) · [NoteGen Studio Guide](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/STUDIO.md)
+          Validation: actual Windows install, native dependencies, GUI launch, Word export,
+          same-version upgrade/reinstall, shortcut registration and uninstall/data preservation.
+          The executable payload is the exact Rust build from successful run $env:SOURCE_RUN
+          at commit $env:SOURCE_SHA, with 65 tests per OS and real CPU model conversion checks.
+          Actual RTX performance and broad difficult-handwriting accuracy remain unmeasured.
+
+          The installer is unsigned. SHA256 and provenance are included with the assets.
+          [Usage and AI setup](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/INSTALLER.md)
           "@ | Set-Content dist/installer/release-notes.md -Encoding utf8
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -187,13 +156,10 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum --check "NoteGen-Setup-$RELEASE_VERSION.exe.sha256"
-          sha256sum --check "NoteGen-$RELEASE_VERSION.exe.sha256"
-          sha256sum --check "NoteGen-Rust-Windows-x64.zip.sha256"
           tag="v$RELEASE_VERSION"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" "NoteGen-$RELEASE_VERSION.exe" "NoteGen-$RELEASE_VERSION.exe.sha256" "NoteGen-Rust-Windows-x64.zip" "NoteGen-Rust-Windows-x64.zip.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "NoteGen $RELEASE_VERSION — Studio, Handwriting Profiles & Windows Installer" --notes-file release-notes.md --draft=false --latest
-          else
-            gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" "NoteGen-$RELEASE_VERSION.exe" "NoteGen-$RELEASE_VERSION.exe.sha256" "NoteGen-Rust-Windows-x64.zip" "NoteGen-Rust-Windows-x64.zip.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Studio, Handwriting Profiles & Windows Installer" --notes-file release-notes.md --draft
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+            echo 'This release version already exists; use a new version instead of replacing published binaries.'
+            exit 1
           fi
+          gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Windows installer" --notes-file release-notes.md --draft
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest

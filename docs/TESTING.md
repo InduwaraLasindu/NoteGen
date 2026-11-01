@@ -1,21 +1,8 @@
-# Rust & Studio verification record (NoteGen 0.3.0)
+# Rust verification record
 
 Implemented behavior, mocked/protocol tests and physical quality evidence are separate.
 Use [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
-and [GitHub Releases (`v0.3.0`)](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.3.0)
-for exact Windows/Linux results, native visual evidence and the `NoteGen-Setup-0.3.0.exe` / `NoteGen-0.3.0.exe` downloads.
-
-## NoteGen 0.3.0 Release & 7-Chunk Verification Gate — 31 October 2026
-
-| Chunk | Scope | Result |
-|---|---|---|
-| **Chunk 1** | `rust/src/consensus.rs` + `src/utils/engine.ts` | **PASS** — Independent family deduplication, weighted medoid selection, and punctuation-safe numeric conflict detection (`NG-AUDIT-02`) |
-| **Chunk 2** | `rust/src/writers.rs` + `src/utils/engine.ts` | **PASS** — 4-edge perimeter glyph normalization guard (`NG-AUDIT-01`), 62-char coverage, and 16×20 multi-sample ink averaging |
-| **Chunk 3** | `rust/src/fontpack.rs` + `src/utils/fontpack.ts` | **PASS** — Clockwise outer contour winding, ascending `cmap` Format 4 table, and `0xB1B0AFBA` TrueType master checksum (`NG-AUDIT-04`) |
-| **Chunk 4** | `rust/src/assistance.rs` + `src/utils/engine.ts` | **PASS** — Interactive clarification question generation and FNV-1a/SHA256 block digest guard (`NG-AUDIT-03`) |
-| **Chunk 5** | `rust/src/models.rs` + `src/utils/engine.ts` | **PASS** — 3rd-party GGUF/loopback reader validation (`NG203` remote host block), HTTP 206 `Content-Range` check, and SHA256 rollback |
-| **Chunk 6** | `rust/src/word.rs` + `src/utils/docx.ts` | **PASS** — Reconstructed OOXML `TableGrid`, horizontal/vertical cell merges, diagram context, and PKZIP `.docx` archive |
-| **Chunk 7** | `src/utils/releaseBuilder.ts` + `installer/NoteGen.iss` | **PASS** — `NoteGen-Setup-0.3.0.exe` & `NoteGen-0.3.0.exe` (`PE32+` x64), `.ttf`, `.docx`, `installer-manifest.json`, and SHA256 verification |
+for exact Windows/Linux results, native visual evidence and the executable download.
 
 ## Verified build — 31 October 2026
 

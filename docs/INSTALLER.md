@@ -1,6 +1,6 @@
-# Install NoteGen 0.3.0 on Windows
+# Install NoteGen on Windows
 
-Download **NoteGen-Setup-0.3.0.exe** from the [GitHub Releases page](https://github.com/InduwaraLasindu/NoteGen/releases/latest).
+Download **NoteGen-Setup-0.2.0.exe** from the [GitHub Releases page](https://github.com/InduwaraLasindu/NoteGen/releases/latest).
 Run it and follow the wizard. The installer targets Windows 10 build 19041 or newer,
 Windows 11, and x64-compatible systems. It installs for your Windows account without
 requesting administrator rights. The wizard follows the Windows light/dark appearance.
@@ -8,14 +8,6 @@ requesting administrator rights. The wizard follows the Windows light/dark appea
 The default folder is `%LOCALAPPDATA%\Programs\NoteGen`. Start menu shortcuts are created;
 a desktop shortcut is optional. English printed OCR and editable Word export are included.
 No Python, Rust toolchain, Office installation or developer tools are required to run it.
-
-## What's New in NoteGen 0.3.0
-
-- **NoteGen Studio (`Context & Writers`)**: Unified studio for document subject/glossary guidance, interactive clarification questions, writer handwriting profiles, personal TrueType (`.ttf`) font pack export, 3rd-party AI model registration, and public Wikipedia/search grounding.
-- **Interactive Clarification Prompts ("A little help with this page")**: Automatically identifies low-confidence words, conflicting numbers/table cells, and diagram interpretations, showing the exact page crop and alternative reader candidates before Word export.
-- **Handwriting Writer Profiles & TrueType (`.ttf`) Font Export**: Learn individual writers' English letter and word patterns across pages, send confirmed visual reference sheets to compatible vision models, average up to 32 glyph samples per character, and export an installable `.ttf` font pack + SVG glyphs.
-- **3rd-Party AI Readers & Verified Publisher Updates**: Register local GGUF + projector pairs or loopback OpenAI-compatible vision servers (`LM Studio`, `Ollama`, `vLLM`), and check/apply SHA256-verified publisher updates with one-click rollback.
-- **Appearance & Motion Customization**: Configure dark/light surfaces, accent palette, motion speed, orbital particle density, and reduced-motion accessibility.
 
 ## Set up local AI
 
@@ -31,14 +23,27 @@ For an older driver, open PowerShell in the installation folder and run:
 ```
 
 Other choices are `Auto`, `Vulkan` and `CPU`. Add `-Balanced` for the smaller initial
-reader set. See [Windows usage](WINDOWS.md) and [NoteGen Studio guide](STUDIO.md) for conversion, review, and handwriting font export.
+reader set. Runtime/model compatibility and actual RTX performance still require
+validation on the target PC. See [Windows usage](WINDOWS.md) for conversion and review.
 
 ## Upgrade or uninstall
 
-Run the **NoteGen-Setup-0.3.0.exe** installer to upgrade an existing installation. Your selected CUDA/Vulkan
-AI runtime, models, writer profiles, setup logs, settings and document projects are retained.
-Uninstall from Windows **Settings → Apps → Installed apps** or the Start menu.
+Run a newer NoteGen installer to upgrade the same installation. Your selected CUDA/Vulkan
+AI runtime is retained; run AI setup again when you want to update it. Uninstall from Windows
+**Settings → Apps → Installed apps** or the Start menu. Models, setup logs, settings and
+document projects are retained. Back up your projects before manually deleting data.
 
-The installer is published after Windows install, dependency, GUI launch, Word export,
-TrueType font validation, upgrade and uninstall tests pass. The release includes its SHA256
-file and a provenance manifest identifying the verified Rust build.
+The installer is unsigned. It is published only after real Windows install, dependency,
+GUI launch, Word export, upgrade and uninstall tests pass. The release includes its SHA256
+file and a manifest identifying the original verified Rust build. The base app passed
+65 Rust tests on Windows/Linux and real CPU AI conversion tests; installer packaging
+does not change its executable code.
+
+## Reproduce the installer
+
+The `Windows installer and GitHub Release` workflow downloads the immutable successful
+Rust build, verifies provenance/checksums, bundles the app-local Microsoft CRT, and uses
+the official SHA256-pinned Inno Setup 7.1.1 compiler. It tests installation in a path
+containing spaces and checks preservation of user-created files before publishing.
+The AI setup dry run performs no downloads. This pipeline does not repeat unaffected
+Rust/model tests; those are attached to the verified source build.

@@ -3,7 +3,7 @@
 param(
  [Parameter(Mandatory)][string]$Payload,
  [Parameter(Mandatory)][string]$Compiler,
- [string]$Version='0.3.0',
+ [string]$Version='0.2.0',
  [string]$Output='dist/installer'
 )
 $ErrorActionPreference='Stop'
@@ -20,9 +20,7 @@ foreach($p in @('.notegen','package-test.docx','package-scan.docx')) {
 }
 if(Test-Path (Join-Path $Payload 'models')){throw 'The installer payload must not contain downloaded model weights.'}
 Copy-Item (Join-Path $PSScriptRoot 'Configure-AI.ps1') (Join-Path $Payload 'scripts') -Force
-foreach($doc in @('docs/INSTALLER.md','docs/STUDIO.md','docs/V03_PLAN.md')) {
- if(Test-Path (Join-Path $sourceRoot $doc)){Copy-Item (Join-Path $sourceRoot $doc) (Join-Path $Payload 'docs') -Force}
-}
+Copy-Item (Join-Path $sourceRoot 'docs/INSTALLER.md') (Join-Path $Payload 'docs') -Force
 Get-Content (Join-Path $sourceRoot 'docs/INSTALLER.md') -Raw | Set-Content (Join-Path $Payload 'docs/INSTALLER.txt') -Encoding utf8
 # App-local CRT files allow the per-user installation to start without developer tools.
 $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
