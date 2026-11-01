@@ -326,6 +326,8 @@ impl Desktop {
                     ui.colored_label(Color32::from_rgb(241, 166, 137), &self.studio.error);
                 }
                 if self.busy_setup {
+                    ui.separator();
+                    self.progress_ui(ui);
                     ui.horizontal(|ui| {
                         self.activity_indicator(ui);
                         ui.label(&self.stage);

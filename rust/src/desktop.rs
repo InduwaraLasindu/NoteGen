@@ -488,19 +488,15 @@ impl Desktop {
                     .map(|(i, _)| (i, 1)),
             ));
         }
-        let preflight = true;
         self.batch_index = Some(i);
-        let count_jobs = if preflight {
-            self.state
-                .queue
-                .iter()
-                .enumerate()
-                .filter(|(_, j)| j.status == JobStatus::Pending)
-                .map(|(i, j)| (i, j.input.clone()))
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
+        let count_jobs = self
+            .state
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j.status == JobStatus::Pending)
+            .map(|(i, j)| (i, j.input.clone()))
+            .collect::<Vec<_>>();
         let input = self.state.queue[i].input.clone();
         let folder = if self.state.output_dir.trim().is_empty() {
             input.parent().unwrap_or(Path::new(".")).to_path_buf()
@@ -652,6 +648,9 @@ impl Desktop {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
                     if ui.button("Advanced").clicked(){
                         self.advanced_open();
+                    }
+                    if self.installed.is_empty() && ui.add_enabled(self.worker.is_none() && self.hardware.is_some(),egui::Button::new(RichText::new("Install AI").color(self.accent_text())).fill(self.accent())).on_hover_text("Download and verify the recommended local runtime and AI models. Model names and sizes are shown below.").clicked() {
+                        self.begin_ai_setup(&ctx);
                     }
                     if ui.button("Open project").clicked() && let Some(p)=rfd::FileDialog::new().set_title("Open NoteGen project.json").add_filter("NoteGen project",&["json"]).pick_file(){
                         self.open_review(p.parent().unwrap_or(Path::new(".")).into(),&ctx);
@@ -1000,7 +999,7 @@ impl Desktop {
         egui::Frame::new().fill(self.surface()).corner_radius(12).inner_margin(14).show(ui,|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Local AI · one-click setup");
-                if ui.add_enabled(self.worker.is_none() && self.hardware.is_some(),egui::Button::new("Download & install AI").fill(self.accent()).stroke(egui::Stroke::NONE)).clicked() {
+                if ui.add_enabled(self.worker.is_none() && self.hardware.is_some(),egui::Button::new(RichText::new("Download & install AI").color(self.accent_text())).fill(self.accent()).stroke(egui::Stroke::NONE)).clicked() {
                     self.begin_ai_setup(ctx);
                 }
             });
