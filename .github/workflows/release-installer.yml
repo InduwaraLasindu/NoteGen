@@ -1,5 +1,8 @@
 name: Windows installer and GitHub Release
 on:
+  push:
+    branches: [main]
+    paths: ['installer/**', 'scripts/Build-Installer.ps1', 'scripts/Test-Installer.ps1', 'scripts/Configure-AI.ps1', '.github/workflows/release-installer.yml']
   workflow_run:
     workflows: [Rust verification and Windows executable]
     types: [completed]
@@ -25,7 +28,7 @@ concurrency:
 jobs:
   installer:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
@@ -37,8 +40,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_VERSION: ${{ inputs.version || '0.4.0' }}
-      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '' }}
-      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || '' }}
+      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '41346953925' }}
+      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || 'fc6738922742685d8a12882c9b591b43003b01dc' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
