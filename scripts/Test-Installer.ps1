@@ -147,7 +147,18 @@ try {
  if($aiLog -notmatch 'NOTEGEN_AI_SETUP_VERIFIED' -or $aiLog -notmatch 'NGPROGRESS\|1000\|'){throw 'Installer did not finish its integrated AI progress/setup branch.'}
  $aiProfile=Join-Path $installDir 'ai-settings.json'
  $ai=Get-Content $aiProfile -Raw | ConvertFrom-Json
- if(-not(Test-Path $ai.server)){throw 'Installer AI runtime was not activated.'}
+ Copy-Item -LiteralPath $aiProfile -Destination (Join-Path $Evidence 'installed-ai-settings.json') -Force
+ $activeServer=[string]$ai.server
+ if(-not [IO.Path]::IsPathRooted($activeServer)){$activeServer=Join-Path $installDir $activeServer}
+ Write-Host "[QA] Active AI runtime: $activeServer"
+ # Rust canonical paths can use the Windows extended prefix; ? is a wildcard to Test-Path.
+ if(-not [IO.File]::Exists($activeServer)){throw "Installer AI runtime path is missing: $activeServer"}
+ Push-Location $installDir
+ try {
+  & ./notegen-cli.exe --settings ./ai-settings.json plan | Out-File (Join-Path $Evidence 'installed-ai-plan.json') -Encoding utf8
+  if($LASTEXITCODE -ne 0){throw 'Installed AI settings could not produce a valid native plan.'}
+ } finally {Pop-Location}
+ Test-Desktop 'after integrated AI setup'
  $registrations=@(Get-ChildItem (Join-Path $installDir 'models') -File -Filter '*.notegen.json')
  $families=@($registrations | ForEach-Object {(Get-Content $_ -Raw | ConvertFrom-Json).family} | Sort-Object -Unique)
  if($families.Count -lt 3){throw "Installer Maximum setup expected 3 independent fitting AI families, got $($families.Count)."}
