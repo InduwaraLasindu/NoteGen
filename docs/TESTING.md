@@ -164,3 +164,33 @@ The final follow-up uses the operating system certificate store for HTTPS downlo
 (TLS verification remains mandatory). A real GLM-OCR model download exercises that
 path. Setup reserves model work before runtime loading so the overall bar does not
 approach completion before large model downloads begin; a regression test covers it.
+
+
+## Released 0.3.0 — final verification (2026-11-01)
+
+[Download the tested installer](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.3.0).
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Formatting, strict Clippy and ordinary Rust tests | Passed on Windows and Linux; 94 tests per OS, plus the separately invoked model gate | [Source workflow 41306134366](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41306134366) |
+| Native desktop, source/review screens and font support | Passed; Windows loaded/rendered the exported TrueType font | Source workflow artifacts |
+| Native one-click setup | Downloaded, SHA256-verified and registered the CPU runtime and GLM-OCR, LightOnOCR-3-1B and Qwen3.5-2B | Real Windows model evidence |
+| Live AI and Maximum Accuracy | All three reader tests passed, including writer-reference requests, table crops, diagram preservation and model-major Word conversion | Source workflow; Maximum Accuracy synthetic page took 889.22 seconds on the CPU runner |
+| Installed application | Launch, real PDF OCR, editable Word table, writer/glyph teaching, font/profile export and Windows font rendering passed | [Installer workflow 41312695109](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41312695109) |
+| Upgrade and uninstall | Actual 0.2 → 0.3 upgrade, same-version reinstall and uninstall passed; models, documents and handwriting profiles preserved; selected runtime preserved across reinstall | Installer validation evidence |
+
+The installer packages the immutable application build from
+`0a873138d7eac358ba3ff7ae9e9e6f2de793f53e`. Installer controls and acceptance use
+`e9b73fa16cd436b851289b74b27775f1b851c46c`; only installer/test metadata differs.
+The installer harness now uses bounded process waits and stage logs. This avoids an
+unbounded wait for unrelated descendant processes; its complete retry passed in under
+a minute. Binary provenance, ZIP/artifact digests and all installer validation records
+are included in the release's `installer-manifest.json`.
+
+Installer SHA256:
+`9c64831e0b10e8d32bb57b3faf89df7a242dbb089533cb6cd3f00545de02501e`.
+
+These are synthetic worksheet and feature checks, not a broad handwriting benchmark.
+Actual RTX throughput/VRAM and difficult natural-handwriting accuracy remain unmeasured.
+The installer is unsigned. No optimized Linux release package is claimed; Linux evidence
+covers the source suite and native desktop/Word checks.
