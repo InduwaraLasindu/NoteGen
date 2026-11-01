@@ -50,7 +50,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rayon = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 base64 = "0.22"
 regex = "1"

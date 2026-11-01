@@ -108,6 +108,33 @@ pub fn saved_runtime(root: &Path) -> Option<RuntimeRecord> {
         storage::read_json(&root.join("active-ai-runtime.json"), 100_000).ok()?;
     record.server.is_file().then_some(record)
 }
+fn initial_work(hw: &Hardware, s: &Settings, options: &Options) -> Result<Vec<Work>> {
+    if options.runtime_only {
+        return Ok(vec![]);
+    }
+    // Reserve the model work before the runtime starts. Otherwise a quick runtime
+    // install could make the master bar appear nearly finished before multi-GB downloads.
+    let mut preview = s.clone();
+    preview.require_acceleration = false;
+    let models = if options.model_ids.is_empty() {
+        recommend(hw, &preview)?.models
+    } else {
+        options
+            .model_ids
+            .iter()
+            .map(|id| pinned(id).map(|v| v.0))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let mut bytes = 0u64;
+    for m in &models {
+        let (_, u) = pinned(&m.id)?;
+        bytes += u.weights.bytes + u.projector.bytes;
+    }
+    Ok(vec![
+        Work::new(Phase::Download, 0, bytes.div_ceil(1024) as usize, 2, false),
+        Work::new(Phase::Activate, 0, models.len(), 1500, false),
+    ])
+}
 
 pub fn install(s: &Settings, options: &Options, c: &Control, log: &Activity) -> Result<Settings> {
     anyhow::ensure!(
@@ -116,6 +143,9 @@ pub fn install(s: &Settings, options: &Options, c: &Control, log: &Activity) -> 
     );
     c.check()?;
     let mut next = s.clone();
+    for work in initial_work(&hardware::detect(), s, options)? {
+        log.work(work, "Planning the complete local AI installation");
+    }
     log.work(
         Work::new(
             Phase::Runtime,
@@ -556,6 +586,23 @@ mod tests {
         assert!(large.bytes > small.bytes);
         assert!(small.models.iter().all(|m| m.resident_mib < 4096));
         assert!(large.models.iter().any(|m| m.resident_mib > 16000));
+    }
+    #[test]
+    fn runtime_completion_does_not_hide_the_remaining_model_downloads() {
+        let hw = Hardware {
+            ram_mib: 16000,
+            free_ram_mib: 14000,
+            logical_cores: 8,
+            ..Default::default()
+        };
+        let mut estimate = crate::progress::Estimate::new(0.);
+        for w in initial_work(&hw, &Settings::default(), &Options::default()).unwrap() {
+            estimate.update(&w, 0.);
+        }
+        estimate.update(&Work::new(Phase::Runtime, 0, 1, 15000, true), 0.);
+        estimate.update(&Work::new(Phase::Runtime, 1, 1, 15000, false), 15.);
+        assert!(estimate.snapshot(15.).fraction < 0.05);
+        assert!(estimate.snapshot(15.).remaining.unwrap() > 100.);
     }
     #[test]
     fn runtime_fallback_respects_explicit_backend_and_acceleration() {

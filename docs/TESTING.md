@@ -154,8 +154,13 @@ and downloads/activates three real readers through `notegen-cli setup` before in
 The new candidate's final result and release provenance are recorded after CI and installer
 acceptance. Earlier test counts above describe earlier revisions.
 
-Local restored-source candidate: **93 passed, 1 explicitly ignored real-model test**.
+Local restored-source candidate: **94 passed, 1 explicitly ignored real-model test**.
 `cargo fmt --all --check` and strict all-feature/all-target Clippy passed. The ordinary
 suite includes native raster-PDF/Tesseract/Word conversion and the new progress/setup
 regressions. Real Windows runtime/model installation, inference, packaging and installer
 acceptance are separate CI gates; their evidence is attached to the successful release.
+
+The final follow-up uses the operating system certificate store for HTTPS downloads
+(TLS verification remains mandatory). A real GLM-OCR model download exercises that
+path. Setup reserves model work before runtime loading so the overall bar does not
+approach completion before large model downloads begin; a regression test covers it.
