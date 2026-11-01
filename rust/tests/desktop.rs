@@ -91,6 +91,20 @@ fn native_ui_renders_light_dark_and_reduced_motion() {
     }
 }
 
+#[test]
+fn everyday_update_hardware_and_reference_screens_render() {
+    let mut app = Desktop::new(Workspace::default());
+    let ctx = egui::Context::default();
+    for tab in 0..4 {
+        app.settings_open(tab);
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.render(ui));
+            assert!(!output.shapes.is_empty());
+            output.textures_delta.clear();
+        }
+    }
+}
+
 fn render_snapshot(app: &mut Desktop, ctx: &egui::Context, time: f64) -> String {
     let mut out = ctx.run_ui(
         egui::RawInput {

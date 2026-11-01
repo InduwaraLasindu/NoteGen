@@ -123,6 +123,15 @@ fn main() -> eframe::Result {
                 state.settings.writer.id = Some(profile.id);
             }
             let mut app = Desktop::new(state);
+            if mode == "settings" {
+                app.settings_open(0);
+            }
+            if mode == "updates" {
+                app.settings_open(1);
+            }
+            if mode == "hardware" {
+                app.settings_open(2);
+            }
             app.hardware = Some(hardware::detect());
             if mode == "studio" {
                 app.studio_open(0);

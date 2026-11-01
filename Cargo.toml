@@ -1,6 +1,6 @@
 [package]
 name = "notegen"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -32,10 +32,10 @@ path = "rust/tests/engine.rs"
 
 [dev-dependencies]
 imageproc = { version = "0.25", default-features = false }
-ab_glyph = "0.2"
 ttf-parser = "0.25"
 
 [dependencies]
+ab_glyph = "0.2"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -97,4 +97,8 @@ path = "rust/tests/motion.rs"
 [[test]]
 name = "studio"
 path = "rust/tests/studio.rs"
+
+[[test]]
+name = "experience"
+path = "rust/tests/experience.rs"
 

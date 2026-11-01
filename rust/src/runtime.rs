@@ -543,6 +543,7 @@ pub fn chat(
         let mut bytes = Vec::new();
         let mut decoded = StreamText::default();
         let mut heartbeat = Instant::now();
+        let mut preview_at = Instant::now();
         loop {
             let chunk = tokio::select! {
                 r = response.chunk() => r.map_err(|e| Fault::new("NG200", format!("Local response interrupted: {e}")))?,
@@ -554,6 +555,10 @@ pub fn chat(
                 bytes.extend_from_slice(&chunk);
             } else {
                 decoded.feed(&chunk)?;
+                if s.experience.live_preview && preview_at.elapsed() >= Duration::from_millis(400) {
+                    log.preview(crate::telemetry::Preview::draft(page, &decoded.output));
+                    preview_at = Instant::now();
+                }
                 if heartbeat.elapsed() > Duration::from_secs(3) {
                     log.emit("inference", format!("Local reader active · {} text fragments received", decoded.fragments), page, 0, 0, "");
                     heartbeat = Instant::now();
@@ -567,9 +572,12 @@ pub fn chat(
             decoded.packet(&packet)?;
             let text = packet.pointer("/choices/0/message/content").and_then(Value::as_str).ok_or_else(|| Fault::new("NG201", "Server returned no text content"))?;
             anyhow::ensure!(decoded.finished && !text.trim().is_empty(), Fault::new("NG201", "Incomplete non-streaming result"));
+            if s.experience.live_preview { log.preview(crate::telemetry::Preview::draft(page, text)); }
             return Ok(text.to_owned());
         }
-        decoded.finish()
+        let text = decoded.finish()?;
+        if s.experience.live_preview { log.preview(crate::telemetry::Preview::draft(page, &text)); }
+        Ok(text)
     })
 }
 

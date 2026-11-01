@@ -1,3 +1,7 @@
+<!-- Latest release features -->
+
+**0.4.0:** AI setup directly in the Windows installer, verified model/runtime updates, measured hardware tuning, live source-and-draft preview, and clearer settings with a searchable configuration reference. [Release details](docs/RELEASE_0.4.0.md).
+
 # NoteGen
 
 **Scanned PDF → editable Word. Rust desktop. Local AI. Adaptive NVIDIA acceleration.**

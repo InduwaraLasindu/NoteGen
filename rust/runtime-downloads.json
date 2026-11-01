@@ -3,36 +3,36 @@
     "file": "cudart-llama-bin-win-cuda-12.4-x64.zip",
     "bytes": 391443627,
     "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11998/cudart-llama-bin-win-cuda-12.4-x64.zip"
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12032/cudart-llama-bin-win-cuda-12.4-x64.zip"
   },
   {
     "file": "cudart-llama-bin-win-cuda-13.4-x64.zip",
     "bytes": 423535356,
     "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11998/cudart-llama-bin-win-cuda-13.4-x64.zip"
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12032/cudart-llama-bin-win-cuda-13.4-x64.zip"
   },
   {
-    "file": "llama-b11998-bin-win-cpu-x64.zip",
-    "bytes": 24423451,
-    "sha256": "2cdb7ff52769dff9bf19c4cf7d6b6e136e7b46249679d5d92ecd92631b8f7fb2",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11998/llama-b11998-bin-win-cpu-x64.zip"
+    "file": "llama-b12032-bin-win-cpu-x64.zip",
+    "bytes": 24582754,
+    "sha256": "5296f5d18bb7d422c7c26f4bb9bc796d9d4f41e1312a8c296cff475bdc60d0d4",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12032/llama-b12032-bin-win-cpu-x64.zip"
   },
   {
-    "file": "llama-b11998-bin-win-cuda-12.4-x64.zip",
-    "bytes": 279781938,
-    "sha256": "a52b4f9de136e6fe245e2aa0c35b36d6886f79de3f71bfe04278b11b3113f49b",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11998/llama-b11998-bin-win-cuda-12.4-x64.zip"
+    "file": "llama-b12032-bin-win-cuda-12.4-x64.zip",
+    "bytes": 279952566,
+    "sha256": "36c7e24ad048cceabf00c1b49d0f0411b954c6a410a7ff4300af8721a94fd00a",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12032/llama-b12032-bin-win-cuda-12.4-x64.zip"
   },
   {
-    "file": "llama-b11998-bin-win-cuda-13.4-x64.zip",
-    "bytes": 165003467,
-    "sha256": "ede53b39ce75578957d6ecba15a19dae723317313d39c051297aa73af13c4ce1",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11998/llama-b11998-bin-win-cuda-13.4-x64.zip"
+    "file": "llama-b12032-bin-win-cuda-13.4-x64.zip",
+    "bytes": 165164493,
+    "sha256": "4b2d4c4678192fbadc443e2c406fef06356d1b064ae9ab79b9f67e4329903511",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12032/llama-b12032-bin-win-cuda-13.4-x64.zip"
   },
   {
-    "file": "llama-b11998-bin-win-vulkan-x64.zip",
-    "bytes": 37363562,
-    "sha256": "47a32e3d164f8221658009d7f48794aed36ab9064791a5e04204a39d6eaf839a",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11998/llama-b11998-bin-win-vulkan-x64.zip"
+    "file": "llama-b12032-bin-win-vulkan-x64.zip",
+    "bytes": 37523450,
+    "sha256": "19a8bbf269fa683ae7bc04f886c9c2a93e0655c2606f37d2b60069bf9e8bcc32",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12032/llama-b12032-bin-win-vulkan-x64.zip"
   }
 ]

@@ -3,7 +3,7 @@
 param(
  [Parameter(Mandatory)][string]$Payload,
  [Parameter(Mandatory)][string]$Compiler,
- [string]$Version='0.3.0',
+ [string]$Version='0.4.0',
  [string]$Output='dist/installer'
 )
 $ErrorActionPreference='Stop'

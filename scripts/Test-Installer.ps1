@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.3.0',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='')
+param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.4.0',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='')
 $ErrorActionPreference='Stop'
 $Installer=(Resolve-Path $Installer).Path
 New-Item -ItemType Directory -Force $Evidence | Out-Null
@@ -18,11 +18,12 @@ function Wait-QAProcess([Diagnostics.Process]$process,[string]$stage,[int]$secon
  Write-Host "[QA] $stage exited with code $code"
  return $code
 }
-function Install-NoteGen([string]$name) {
+function Install-NoteGen([string]$name,[switch]$AI) {
  Write-Host "[QA] Installing: $name"
  $installArgs=@('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/TASKS=desktopicon',('/DIR="{0}"' -f $installDir),('/LOG="{0}"' -f (Join-Path $Evidence "$name.log")))
+ if($AI){$installArgs+=@('/AI=1','/AIBACKEND=cpu')}
  $p=Start-Process -FilePath $Installer -ArgumentList $installArgs -PassThru
- $exit=Wait-QAProcess $p "Installer $name"
+ $exit=Wait-QAProcess $p "Installer $name" $(if($AI){900}else{180})
  if($exit -ne 0){throw "Installer failed ($name): $exit"}
 }
 function Test-Desktop([string]$name) {
@@ -39,19 +40,19 @@ try {
  if($PreviousInstaller){
   $newInstaller=$Installer
   $Installer=(Resolve-Path $PreviousInstaller).Path
-  Install-NoteGen 'previous-0.2-install'
+  Install-NoteGen 'previous-0.3-install'
  Write-Host "[QA] Previous installation: CLI version"
   $previousVersion=& (Join-Path $installDir 'notegen-cli.exe') --version
-  if($LASTEXITCODE -ne 0 -or $previousVersion -notmatch '0\.2\.0'){throw 'Previous installer did not contain NoteGen 0.2.0.'}
-  Test-Desktop 'previous 0.2 installation'
+  if($LASTEXITCODE -ne 0 -or $previousVersion -notmatch '0\.3\.0'){throw 'Previous installer did not contain NoteGen 0.3.0.'}
+  Test-Desktop 'previous 0.3 installation'
   New-Item -ItemType Directory -Force (Join-Path $installDir 'user-data') | Out-Null
-  $legacyMarker=Join-Path $installDir 'user-data/legacy-0.2-document.txt'
-  [IO.File]::WriteAllText($legacyMarker,'EXISTING 0.2 DATA MUST SURVIVE')
+  $legacyMarker=Join-Path $installDir 'user-data/legacy-0.3-document.txt'
+  [IO.File]::WriteAllText($legacyMarker,'EXISTING 0.3 DATA MUST SURVIVE')
   $Installer=$newInstaller
  }
  Install-NoteGen 'install'
- if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING 0.2 DATA MUST SURVIVE'){throw 'Version 0.2 to 0.3 upgrade changed user data.'}
- if($PreviousInstaller){$results.Add('Real 0.2.0 to 0.3.0 upgrade preserved existing user data and updated the executable')}
+ if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING 0.3 DATA MUST SURVIVE'){throw 'Version 0.3 to 0.4 upgrade changed user data.'}
+ if($PreviousInstaller){$results.Add('Real 0.3.0 to 0.4.0 upgrade preserved existing user data and updated the executable')}
 
  foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/tesseract/tesseract.exe','runtime/llama-server.exe','vcruntime140.dll','runtime/vcruntime140.dll','scripts/Configure-AI.ps1','unins000.exe')) {
   if(-not(Test-Path (Join-Path $installDir $f))){throw "Installed dependency missing: $f"}
@@ -127,6 +128,26 @@ try {
  } finally {Pop-Location}
  $results.Add('Installed CLI PDF rasterization, real OCR, editable Word table and native dependencies passed')
  $results.Add('Installed writer creation, confirmed crop learning, profile/font export and native Windows TTF rendering passed')
+ Write-Host '[QA] One-click AI setup through the actual installer'
+ Install-NoteGen 'integrated-ai-setup' -AI
+ $aiLog=Get-Content (Join-Path $Evidence 'integrated-ai-setup.log') -Raw
+ if($aiLog -notmatch 'NOTEGEN_AI_SETUP_VERIFIED' -or $aiLog -notmatch 'NGPROGRESS\|1000\|'){throw 'Installer did not finish its integrated AI progress/setup branch.'}
+ $aiProfile=Join-Path $installDir 'ai-settings.json'
+ $ai=Get-Content $aiProfile -Raw | ConvertFrom-Json
+ if(-not(Test-Path $ai.server)){throw 'Installer AI runtime was not activated.'}
+ $registrations=@(Get-ChildItem (Join-Path $installDir 'models') -File -Filter '*.notegen.json')
+ $families=@($registrations | ForEach-Object {(Get-Content $_ -Raw | ConvertFrom-Json).family} | Sort-Object -Unique)
+ if($families.Count -lt 3){throw "Installer Maximum setup expected 3 independent fitting AI families, got $($families.Count)."}
+ Copy-Item $aiProfile (Join-Path $Evidence 'installed-ai-settings.json')
+ $results.Add('Actual installer one-click AI setup downloaded, checksum verified and activated a CPU runtime and three independent fitting model families with live progress')
+ Push-Location $installDir
+ try {
+  $cancel=Join-Path $Evidence 'cancel-ai';[IO.File]::WriteAllText($cancel,'cancel')
+  & ./notegen-cli.exe --settings ./ai-settings.json --cancel-file $cancel --installer-progress setup --models-only --output ./cancelled-ai-settings.json 2>&1 | Out-File (Join-Path $Evidence 'ai-cancel.log')
+  if($LASTEXITCODE -eq 0 -or (Test-Path './cancelled-ai-settings.json')){throw 'Cancelled setup unexpectedly succeeded.'}
+  if((Get-Content (Join-Path $Evidence 'ai-cancel.log') -Raw) -notmatch 'NG900'){throw 'Setup cancellation did not return its explicit cancellation code.'}
+ } finally {Pop-Location}
+ $results.Add('Native AI setup cancellation preserved the active runtime/model installation')
  New-Item -ItemType Directory -Force (Join-Path $installDir 'models'),(Join-Path $installDir 'user-data') | Out-Null
  $model=Join-Path $installDir 'models/keep-user-model.marker'
  $document=Join-Path $installDir 'user-data/keep-user-document.txt'

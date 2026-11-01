@@ -11,18 +11,13 @@ No Python, Rust toolchain, Office installation or developer tools are required t
 
 ## Set up local AI
 
-Click **Download & install AI** inside NoteGen. The card lists the recommended
-readers and model download size. It uses the current preset (Fast installs the Accuracy
-reader set) and available memory. Setup downloads a native Windows runtime and matching
-model/projector pairs, verifies SHA256, probes runtime/GPU access and registers the readers.
-You can start converting without restarting. CUDA 13/12, Vulkan and permitted CPU fallback
-are tried as needed; Advanced → Hardware lets you select a backend or require acceleration.
+Leave **Install local AI and all required models for this PC** selected in the installer. The wizard detects hardware, downloads a compatible native runtime and all fitting reader families needed for Maximum Accuracy, verifies checksums, and activates them. It shows progress, supports cancellation and resumes partial downloads. Uncheck the option for an offline printed-OCR installation. AI models can require several GB.
 
-Downloads can require several GB, plus runtime files. The overall and byte progress bars
-remain visible. Cancel preserves existing active versions and resumable partial downloads.
-Retrying reuses checksum-verified models, including newer publisher revisions.
-Conversion does not upload documents. Studio → Readers offers custom readers, explicit
-publisher update checks and rollback.
+Inside NoteGen, **Settings > Updates & installation > Install all required AI for this PC** performs the same setup. CUDA 13/12, Vulkan and permitted CPU fallback are probed as needed. Models and documents stay local. Healthy installed models and newer runtime versions are reused.
+
+The same Settings window offers publisher update checks, verified model/runtime updates, app updates for bundled dependencies, and runtime rollback. **Hardware test** measures CPU workers and up to two synthetic AI readings; review and apply its recommendation. **Everyday settings** has descriptions and a live-preview option; **Setting descriptions** covers the full Advanced configuration.
+
+Silent installs do not download AI unless `/AI=1` is explicitly supplied. See [0.4.0 release details](RELEASE_0.4.0.md) for deployment flags, cancellation, update authentication and validation scope.
 
 The Start menu **Set up local AI** helper remains a manual alternative. CLI automation:
 

@@ -43,6 +43,7 @@ pub struct Workspace {
     pub queue: Vec<Job>,
     pub output_dir: String,
     pub recent: Vec<PathBuf>,
+    pub installation_stamp: String,
 }
 impl Workspace {
     pub fn recover(&mut self) {
@@ -117,10 +118,13 @@ fn evidence_label(page: &Page) -> String {
         ),
     }
 }
+#[path = "experience.rs"]
+mod experience;
 #[path = "studio.rs"]
 mod studio;
 
 enum Message {
+    Maintenance(Box<std::result::Result<crate::maintenance::Report, String>>),
     Studio(studio::StudioMessage),
     Clarify(
         crate::assistance::Batch,
@@ -189,6 +193,7 @@ impl Review {
 }
 pub struct Desktop {
     studio: studio::Studio,
+    experience: experience::Experience,
     pub state: Workspace,
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
@@ -236,6 +241,7 @@ impl Desktop {
         let studio = studio::Studio::new(&state.settings);
         Self {
             studio,
+            experience: experience::Experience::default(),
             state,
             tx,
             rx,
@@ -284,6 +290,18 @@ impl Desktop {
             .filter(|s| s.settings.validate().is_ok())
             .unwrap_or_default();
         state.recover();
+        // Installer settings are imported once per setup change, preserving user
+        // appearance, queue and document settings during upgrades.
+        if let Ok(profile) = read_json::<Settings>(Path::new("ai-settings.json"), 1_000_000)
+            && profile.validate().is_ok()
+            && let Ok(stamp) = fingerprint(&(&profile.server, profile.backend, &profile.models_dir))
+            && state.installation_stamp != stamp
+        {
+            state.settings.server = profile.server;
+            state.settings.backend = profile.backend;
+            state.settings.models_dir = profile.models_dir;
+            state.installation_stamp = stamp;
+        }
         let mut app = Self::new(state);
         app.refresh(&cc.egui_ctx);
         app
@@ -333,6 +351,17 @@ impl Desktop {
         for _ in 0..500 {
             let Ok(msg) = self.rx.try_recv() else { break };
             match msg {
+                Message::Maintenance(report) => {
+                    self.experience.checking = false;
+                    match *report {
+                        Ok(report) => {
+                            self.experience.updates = Some(report);
+                        }
+                        Err(e) => {
+                            self.experience.error = e;
+                        }
+                    }
+                }
                 Message::Studio(v) => self.studio_message(v, ctx),
                 Message::Clarify(batch, reply) => {
                     self.studio.pending = Some(studio::Pending::new(batch, Some(reply)));
@@ -342,6 +371,10 @@ impl Desktop {
                     }
                 }
                 Message::Event(e) => {
+                    if let Some(preview) = e.preview {
+                        self.experience.preview(preview, ctx);
+                        continue;
+                    }
                     if let Some(work) = &e.work
                         && let Some(estimate) = &mut self.estimate
                     {
@@ -613,6 +646,7 @@ impl Desktop {
         let now = ctx.input(|i| i.time);
         self.opened_at.get_or_insert(now);
         self.poll(&ctx);
+        self.check_updates_when_idle(&ctx);
         self.theme(&ctx);
         let files = ctx.input(|i| i.raw.dropped_files.clone());
         for f in files {
@@ -646,6 +680,7 @@ impl Desktop {
                 ui.label(RichText::new("NoteGen").size(23.).strong());
                 ui.label(RichText::new("LOCAL STUDIO").size(10.).color(self.muted()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                    if ui.button("Settings").clicked() { self.experience.open = true; }
                     if ui.button("Advanced").clicked(){
                         self.advanced_open();
                     }
@@ -725,6 +760,7 @@ impl Desktop {
                 );
                 ui.add_space(17.);
                 self.progress_ui(ui);
+                self.live_preview_ui(ui);
                 if !self.notice.is_empty(){
                     egui::Frame::new().fill(if self.error_code.is_empty(){
                         self.surface()}
@@ -761,6 +797,7 @@ impl Desktop {
         }
         );
         self.advanced_ui(&ctx);
+        self.settings_ui(&ctx);
         self.review_ui(&ctx);
         self.studio_ui(&ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
@@ -992,10 +1029,12 @@ impl Desktop {
         self.ai_setup_controls(ui, &ctx);
     }
     pub(super) fn ai_setup_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut setup_settings = self.state.settings.clone();
+        setup_settings.preset = Preset::Maximum;
         let recommendation = self
             .hardware
             .as_ref()
-            .and_then(|h| crate::setup::recommend(h, &self.state.settings).ok());
+            .and_then(|h| crate::setup::recommend(h, &setup_settings).ok());
         egui::Frame::new().fill(self.surface()).corner_radius(12).inner_margin(14).show(ui,|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Local AI · one-click setup");
@@ -1010,10 +1049,14 @@ impl Desktop {
         });
     }
     fn begin_ai_setup(&mut self, ctx: &egui::Context) {
-        let settings = self.state.settings.clone();
+        let mut settings = self.state.settings.clone();
+        let preset = settings.preset;
+        settings.preset = Preset::Maximum;
         self.studio_task(ctx, move |c, log| {
-            let next =
+            let mut next =
                 crate::setup::install(&settings, &crate::setup::Options::default(), &c, &log)?;
+            next.preset = preset;
+            atomic_json(Path::new("ai-settings.json"), &next)?;
             Ok(studio::StudioMessage::Setup(Box::new(next)))
         });
     }
@@ -2256,6 +2299,7 @@ mod acceptance {
                     code: String::new(),
                     warning: false,
                     work: None,
+                    preview: None,
                 }))
                 .unwrap();
         }

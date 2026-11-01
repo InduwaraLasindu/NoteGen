@@ -20,3 +20,7 @@ outputs/
 
 /target/
 *.part
+
+/ai-settings.json
+/updates/
+/user-data/

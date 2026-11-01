@@ -1,8 +1,5 @@
 name: Windows installer and GitHub Release
 on:
-  push:
-    branches: [main]
-    paths: ['installer/**', 'scripts/Build-Installer.ps1', 'scripts/Test-Installer.ps1', 'scripts/Configure-AI.ps1', '.github/workflows/release-installer.yml']
   workflow_run:
     workflows: [Rust verification and Windows executable]
     types: [completed]
@@ -11,15 +8,13 @@ on:
     inputs:
       version:
         description: Installer release version
-        default: '0.3.0'
+        default: '0.4.0'
         required: true
       source_run:
         description: Successful Rust verification workflow run
-        default: '41306134366'
         required: true
       source_sha:
         description: Exact verified Rust source commit
-        default: '0a873138d7eac358ba3ff7ae9e9e6f2de793f53e'
         required: true
 permissions:
   contents: read
@@ -30,20 +25,20 @@ concurrency:
 jobs:
   installer:
     if: >-
-      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.payload.outputs.version }}
       source_sha: ${{ steps.payload.outputs.source_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_VERSION: ${{ inputs.version || '0.3.0' }}
-      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '41306134366' }}
-      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || '0a873138d7eac358ba3ff7ae9e9e6f2de793f53e' }}
+      RELEASE_VERSION: ${{ inputs.version || '0.4.0' }}
+      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '' }}
+      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -107,19 +102,19 @@ jobs:
       - name: Download the previous published installer for cross-version upgrade testing
         shell: pwsh
         run: |
-          & gh release download v0.2.0 --repo $env:GITHUB_REPOSITORY --pattern NoteGen-Setup-0.2.0.exe --dir build/previous-installer
+          & gh release download v0.3.0 --repo $env:GITHUB_REPOSITORY --pattern NoteGen-Setup-0.3.0.exe --dir build/previous-installer
           if($LASTEXITCODE -ne 0){throw 'Previous installer download failed'}
-          if((Get-FileHash build/previous-installer/NoteGen-Setup-0.2.0.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c6b564a251352ac0c07235d9b9dca57a49f8333bc936003c6b115b7e6a236df8'){throw 'Previous installer checksum mismatch'}
+          if((Get-FileHash build/previous-installer/NoteGen-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9c64831e0b10e8d32bb57b3faf89df7a242dbb089533cb6cd3f00545de02501e'){throw 'Previous installer checksum mismatch'}
       - name: Install, launch, upgrade and uninstall the actual EXE
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $test=(Resolve-Path ./scripts/Test-Installer.ps1).Path
           $setup=(Resolve-Path "./dist/installer/NoteGen-Setup-$env:RELEASE_VERSION.exe").Path
-          $previous=(Resolve-Path "./build/previous-installer/NoteGen-Setup-0.2.0.exe").Path
+          $previous=(Resolve-Path "./build/previous-installer/NoteGen-Setup-0.3.0.exe").Path
           $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $test),'-Installer',('"{0}"' -f $setup),'-Version',$env:RELEASE_VERSION,'-PreviousInstaller',('"{0}"' -f $previous))
           $process=Start-Process pwsh -ArgumentList $arguments -PassThru -NoNewWindow
-          if(-not $process.WaitForExit(480000)){try{$process.Kill($true)}catch{};throw 'Installer acceptance exceeded eight minutes; see stage logs'}
+          if(-not $process.WaitForExit(1200000)){try{$process.Kill($true)}catch{};throw 'Installer acceptance exceeded twenty minutes; see stage logs'}
           if($process.ExitCode -ne 0){throw "Installer acceptance failed: $($process.ExitCode)"}
       - name: Seal the tested release manifest
         shell: pwsh
@@ -140,28 +135,24 @@ jobs:
           shortcuts and an optional desktop shortcut are included. Uninstall from Windows
           Settings; user models and document data are preserved.
 
-          This update adds writer profiles with confirmed visual handwriting memory,
-          interactive clarification for unclear text/numbers/diagrams, contextual re-reading,
-          real TrueType font packs, third-party local vision readers, publisher model updates
-          with SHA256 verification and rollback, optional sourced public-topic lookup, Studio
-          controls and theme presets. Human corrections and original reader evidence are preserved.
+          Version 0.4.0 adds AI installation directly in this installer, with live download
+          progress, cancellation and resumable verified downloads. The default AI selection
+          installs all fitting reader families needed for Maximum Accuracy on this PC.
+          Printed OCR, PDF rendering, English data and native dependencies are included.
 
-          This release also restores the original 0.3 source, adds a page-weighted master
-          progress bar with stage-based ETA, and one-click in-app AI runtime/model installation.
+          Settings now includes an update center for models, the native AI runtime and
+          bundled app dependencies, a measured synthetic hardware optimization test,
+          understandable everyday controls and a searchable description of every setting.
+          A live AI view shows the current source/crop and streamed draft recognition.
+          The master bar estimates remaining work across readers, crops, export and queue.
+          All conversion stays local. No Python or Rust installation is needed.
 
-          English printed OCR and Word export work immediately. For AI, click
-          **Download & install AI** inside NoteGen. Runtime and model downloads are
-          selected for available RAM/VRAM and verified before use. Conversion
-          remains local. No Python or Rust installation is needed.
-
-          Validation: actual Windows install, native dependencies, GUI launch, Word export,
-          same-version upgrade/reinstall, shortcut registration and uninstall/data preservation,
-          plus installed-app writer creation, confirmed crop teaching, font/profile export,
-          Windows native font rendering and handwriting-profile retention through reinstall/uninstall.
-          The executable payload is the exact Rust build from successful run $env:SOURCE_RUN
-          at commit $env:SOURCE_SHA, with the full test suite per OS and real CPU model conversion checks,
-          including visual writer-reference requests and third-party managed reader registration.
-          Actual RTX performance and broad difficult-handwriting accuracy remain unmeasured.
+          Validation includes the full test suite on Windows and Linux, real CPU inference
+          with three independent AI families, exact-number/table/figure checks, writer
+          references, a real installer AI-setup run, upgrade from 0.3.0, native dependencies,
+          GUI launch, Word/font export, reinstall, cancellation and retained user data.
+          The executable payload is from successful run $env:SOURCE_RUN at $env:SOURCE_SHA.
+          GPU performance and broad natural-handwriting accuracy remain unmeasured.
 
           The installer is unsigned. SHA256 and provenance are included with the assets.
           [Usage and AI setup](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/INSTALLER.md)

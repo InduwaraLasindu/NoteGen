@@ -1,6 +1,6 @@
 # Real Windows inference and installer acceptance; not used by the application.
 [CmdletBinding()]
-param()
+param([switch]$FullQuality)
 $ErrorActionPreference='Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 $sourceRoot=(Get-Location).Path
@@ -18,6 +18,7 @@ try {
  $installedAI=Get-Content ./installed-ai-settings.json -Raw | ConvertFrom-Json
 } finally {Pop-Location}
 $env:NOTEGEN_LIVE_SERVER=$installedAI.server
+if(-not $FullQuality){$env:NOTEGEN_TEST_IMAGE_EDGE='768'}
 foreach($id in @('glm-ocr','lighton3-1b','qwen35-2b')){
  $registered=Get-Content "$smoke/models/$id.notegen.json" -Raw | ConvertFrom-Json
  $env:NOTEGEN_LIVE_ID=$id
@@ -31,6 +32,10 @@ foreach($id in @('glm-ocr','lighton3-1b','qwen35-2b')){
 $settings=Join-Path $smoke 'smoke-settings.json'
 Push-Location $smoke
 try{
+ & ./notegen-cli.exe --settings ./installed-ai-settings.json optimize -o ./hardware-report.json
+ if($LASTEXITCODE -ne 0){throw 'Measured hardware test failed'}
+ $tuning=Get-Content ./hardware-report.json -Raw | ConvertFrom-Json
+ if(-not $tuning.measured_ai -or @($tuning.ai | Where-Object correct).Count -lt 1){throw 'Hardware test had no successful AI trial'}
  & ./notegen-cli.exe check-update glm-ocr | Out-File './publisher-update-metadata.json' -Encoding utf8
  if($LASTEXITCODE -ne 0){throw 'Real publisher update metadata validation failed'}
  # Exercise the third-party managed-reader registration through the real native pipeline.
@@ -47,7 +52,7 @@ try{
  $s=Get-Content $settings -Raw | ConvertFrom-Json
  $s.server=$installedAI.server
  $s.preset='maximum';$s.backend='cpu';$s.handwriting=$true;$s.crop_retries=1
- $s.dpi=150;$s.max_tokens=2048;$s.request_timeout_secs=600;$s.auto_rotate=$false
+ $s.dpi=150;if(-not $FullQuality){$s.image_edge=768};$s.max_tokens=2048;$s.request_timeout_secs=600;$s.auto_rotate=$false
  $s.pdfium="$sourceRoot/build/pdfium-rust/bin/pdfium.dll"
  [IO.File]::WriteAllText($settings,($s|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
  & ./notegen-cli.exe --settings $settings convert "$sourceRoot/build/native-fixture/scan.pdf" --preset maximum --handwriting -o ./maximum-smoke.docx

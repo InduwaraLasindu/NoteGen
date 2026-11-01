@@ -11,6 +11,9 @@ pub(super) enum StudioMessage {
     Web(Vec<assistance::WebSource>),
     Done(String),
     Setup(Box<Settings>),
+    Tuned(Box<crate::tuning::Report>),
+    Updated(Box<Settings>),
+    Installer(PathBuf),
 }
 pub(super) struct Pending {
     pub batch: Batch,
@@ -132,6 +135,26 @@ impl Desktop {
     }
     pub(super) fn studio_message(&mut self, msg: StudioMessage, ctx: &egui::Context) {
         match msg {
+            StudioMessage::Tuned(report) => {
+                self.notice =
+                    "Hardware test complete. Review the measured results in Settings > Hardware."
+                        .into();
+                self.experience.tuning = Some(*report);
+                self.experience.open = true;
+                self.experience.tab = 2;
+            }
+            StudioMessage::Updated(settings) => {
+                self.state.settings = *settings;
+                self.draft = self.state.settings.clone();
+                self.raw = serde_json::to_string_pretty(&self.draft).unwrap_or_default();
+                self.experience.updates = None;
+                self.notice = "Selected local AI updates installed and verified. Previous versions remain available for rollback.".into();
+                self.refresh(ctx);
+            }
+            StudioMessage::Installer(path) => match hardware::command(path).spawn() {
+                Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.notice = format!("Installer downloaded, but could not start: {e}"),
+            },
             StudioMessage::Setup(settings) => {
                 self.state.settings = *settings;
                 self.draft = self.state.settings.clone();

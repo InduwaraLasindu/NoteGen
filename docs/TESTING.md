@@ -194,3 +194,7 @@ These are synthetic worksheet and feature checks, not a broad handwriting benchm
 Actual RTX throughput/VRAM and difficult natural-handwriting accuracy remain unmeasured.
 The installer is unsigned. No optimized Linux release package is claimed; Linux evidence
 covers the source suite and native desktop/Word checks.
+
+## 0.4.0 release gates
+
+`rust/tests/experience.rs` covers publisher release selection (including stable marker releases with no binaries), asset trust/digests, app-version checks, preview filtering, checkpoint compatibility, complete settings help, and rejection of incorrect tuning trials. CI also runs the measured hardware probe against a real installed reader, captures all new settings screens, and performs a real default-Maximum AI setup through the compiled installer. Installer QA upgrades the released 0.3.0 installer, exercises explicit cancellation, and checks retained AI/model/writer data. Live smoke input is capped at 768 pixels for bounded CI; production input defaults are unchanged. Use `scripts/Smoke-AI.ps1 -FullQuality` for native-resolution manual validation.

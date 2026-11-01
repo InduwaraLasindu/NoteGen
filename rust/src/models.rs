@@ -152,7 +152,7 @@ fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(30))
-        .user_agent("NoteGen/0.3 model manager")
+        .user_agent("NoteGen/0.4 model manager")
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             let u = attempt.url();
             let h = u.host_str().unwrap_or("");
@@ -299,6 +299,14 @@ async fn download_async(
     let offset = part.metadata().map_or(0, |m| m.len());
     c.check()?;
     let mut request = client.get(url);
+    if url.starts_with("https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/") {
+        request = request
+            .header(reqwest::header::ACCEPT, "application/octet-stream")
+            .header(reqwest::header::USER_AGENT, "NoteGen/0.4");
+        if let Ok(token) = std::env::var("NOTEGEN_GITHUB_TOKEN") {
+            request = request.bearer_auth(token);
+        }
+    }
     if offset > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
     }
@@ -434,7 +442,8 @@ pub(crate) fn download(
             .build()?;
         let u = reqwest::Url::parse(url)?;
         anyhow::ensure!(
-            u.scheme() == "https" && matches!(u.host_str(), Some("huggingface.co" | "github.com")),
+            u.scheme() == "https" && (matches!(u.host_str(), Some("huggingface.co" | "github.com"))
+                || url.strip_prefix("https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/").is_some_and(|id| !id.is_empty() && id.bytes().all(|b|b.is_ascii_digit()))),
             Fault::new("NG650", "Invalid publisher download URL")
         );
         download_async(&client, url, path, a, c, log).await

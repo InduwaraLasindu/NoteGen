@@ -138,6 +138,7 @@ pub struct Settings {
     pub font: String,
     pub font_size: f32,
     pub ui: Appearance,
+    pub experience: ExperienceOptions,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -202,6 +203,21 @@ impl Default for Settings {
             font: "Calibri".into(),
             font_size: 11.0,
             ui: Appearance::default(),
+            experience: ExperienceOptions::default(),
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExperienceOptions {
+    pub live_preview: bool,
+    pub check_updates: bool,
+}
+impl Default for ExperienceOptions {
+    fn default() -> Self {
+        Self {
+            live_preview: true,
+            check_updates: true,
         }
     }
 }

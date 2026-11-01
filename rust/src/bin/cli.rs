@@ -10,12 +10,33 @@ use std::{fs, path::PathBuf, sync::Arc};
 struct Args {
     #[arg(long, global = true)]
     settings: Option<PathBuf>,
+    /// Emit bounded installer progress lines and respond to a cancellation file.
+    #[arg(long, global = true)]
+    installer_progress: bool,
+    #[arg(long, global = true)]
+    cancel_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Action,
 }
 #[derive(Subcommand)]
 enum Action {
     Doctor,
+    /// Check official model, AI runtime and app dependency updates.
+    CheckUpdates {
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Install a previously reviewed update report, verifying publisher identity and checksums.
+    ApplyUpdates {
+        report: PathBuf,
+        #[arg(short, long, default_value = "ai-settings.json")]
+        output: PathBuf,
+    },
+    /// Benchmark this PC with synthetic data; writes a report without changing settings.
+    Optimize {
+        #[arg(short, long, default_value = "hardware-report.json")]
+        output: PathBuf,
+    },
     /// Download verified models and a compatible Windows AI runtime.
     Setup {
         #[arg(long, conflicts_with = "runtime_only")]
@@ -135,9 +156,46 @@ fn run() -> Result<()> {
     };
     s.validate()?;
     let c = Control::default();
+    if let Some(path) = args.cancel_file {
+        let cancel = c.cancelled.clone();
+        std::thread::spawn(move || {
+            loop {
+                if path.exists() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        });
+    }
+    let progress = std::sync::Mutex::new((
+        notegen::progress::Estimate::new(0.),
+        std::time::Instant::now(),
+    ));
+    let installer = args.installer_progress;
     let log = Activity {
         path: None,
-        callback: Some(Arc::new(|e| {
+        callback: Some(Arc::new(move |e| {
+            if e.preview.is_some() {
+                return;
+            }
+            if installer {
+                let mut state = progress.lock().unwrap();
+                let now = state.1.elapsed().as_secs_f64();
+                if let Some(w) = &e.work {
+                    state.0.update(w, now);
+                }
+                let snapshot = state.0.snapshot(now);
+                let message = e.message.replace(['\n', '\r', '|'], " ");
+                println!(
+                    "NGPROGRESS|{}|{}",
+                    (snapshot.fraction * 1000.) as u32,
+                    message
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                return;
+            }
             println!(
                 "[{}] {}/{} p{} {} {}",
                 e.stage, e.done, e.total, e.page, e.code, e.message
@@ -145,6 +203,21 @@ fn run() -> Result<()> {
         })),
     };
     match args.command {
+        Action::CheckUpdates { output } => {
+            let report = notegen::maintenance::check(&s, &c, &log)?;
+            if let Some(path) = output {
+                atomic_json(&path, &report)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Action::ApplyUpdates { report, output } => {
+            let report = read_json(&report, 4_000_000)?;
+            let next = notegen::maintenance::apply(&s, &report, &c, &log)?;
+            atomic_json(&output, &next)?;
+        }
+        Action::Optimize { output } => {
+            atomic_json(&output, &notegen::tuning::run(&s, &c, &log)?)?;
+        }
         Action::Setup {
             models_only,
             runtime_only,
@@ -172,6 +245,9 @@ fn run() -> Result<()> {
             )?;
             atomic_json(&output, &next)?;
             println!("AI setup complete. Settings saved to {}", output.display());
+            if installer {
+                println!("NGPROGRESS|1000|AI runtime and all selected models verified and ready");
+            }
         }
 
         Action::RegisterReader { spec } => {

@@ -45,6 +45,8 @@ pub struct Event {
     pub warning: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<crate::progress::Work>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<crate::telemetry::Preview>,
 }
 #[derive(Clone, Default)]
 pub struct Activity {
@@ -63,6 +65,7 @@ impl Activity {
             code: String::new(),
             warning: false,
             work: Some(work),
+            preview: None,
         });
     }
     pub fn capture_response(&self, model: &str, page: usize, raw: &str) -> Result<()> {
@@ -117,6 +120,7 @@ impl Activity {
             code: code.into(),
             warning: !code.is_empty(),
             work: None,
+            preview: None,
         };
         self.publish(e);
     }
@@ -131,6 +135,23 @@ impl Activity {
         }
         if let Some(c) = &self.callback {
             c(e);
+        }
+    }
+    /// Draft previews are ephemeral UI data, not activity-log transcripts.
+    pub fn preview(&self, preview: crate::telemetry::Preview) {
+        if let Some(callback) = &self.callback {
+            callback(Event {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                stage: "preview".into(),
+                message: String::new(),
+                page: preview.page,
+                done: 0,
+                total: 0,
+                code: String::new(),
+                warning: false,
+                work: None,
+                preview: Some(preview),
+            });
         }
     }
 }

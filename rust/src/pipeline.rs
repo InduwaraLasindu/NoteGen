@@ -512,6 +512,14 @@ pub fn convert(
                 "",
             );
             let im = image::open(project.image(*n))?;
+            if s.experience.live_preview {
+                log.preview(crate::telemetry::Preview::source(
+                    project.image(*n),
+                    *n,
+                    &model.name,
+                    None,
+                ));
+            }
             let previous = selected
                 .iter()
                 .position(|p| p == n)
@@ -611,6 +619,14 @@ pub fn convert(
                                 .as_ref()
                                 .is_some_and(|b| consensus::overlap(b, &bbox) > 0.5)
                     });
+                    if s.experience.live_preview {
+                        log.preview(crate::telemetry::Preview::source(
+                            project.image(*n),
+                            *n,
+                            &model.name,
+                            Some(bbox.clone()),
+                        ));
+                    }
                     let reading = if table_crop {
                         server.read_table(&crop, "", &context, &active_settings, c, &log, *n)
                     } else {
@@ -841,6 +857,7 @@ pub fn convert(
 pub fn recognition_settings(s: &Settings) -> Settings {
     let mut value = s.clone();
     value.ui = Appearance::default();
+    value.experience = ExperienceOptions::default();
     value.writer_reference = None;
     value.assistance.ask_questions = true;
     value.assistance.max_questions = 8;

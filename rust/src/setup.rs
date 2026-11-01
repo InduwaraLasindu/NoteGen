@@ -16,12 +16,12 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, Debug, Deserialize)]
-struct Download {
-    file: String,
-    bytes: u64,
-    sha256: String,
-    url: String,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Download {
+    pub file: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub url: String,
 }
 impl Download {
     fn asset(&self) -> Asset {
@@ -275,9 +275,7 @@ pub fn install(s: &Settings, options: &Options, c: &Control, log: &Activity) -> 
     Ok(next)
 }
 
-fn runtime_downloads(backend: &str) -> Vec<Download> {
-    let assets: Vec<Download> = serde_json::from_str(include_str!("../runtime-downloads.json"))
-        .expect("compiled runtime downloads");
+fn runtime_downloads(backend: &str, assets: &[Download]) -> Vec<Download> {
     let marker = match backend {
         "cuda13" => "cuda-13.4",
         "cuda12" => "cuda-12.4",
@@ -285,8 +283,9 @@ fn runtime_downloads(backend: &str) -> Vec<Download> {
         _ => "cpu",
     };
     assets
-        .into_iter()
+        .iter()
         .filter(|a| a.file.contains(&format!("win-{marker}-x64")))
+        .cloned()
         .collect()
 }
 fn runtime_choices(backend: Backend, nvidia: bool, require: bool) -> Vec<&'static str> {
@@ -303,6 +302,30 @@ fn runtime_choices(backend: Backend, nvidia: bool, require: bool) -> Vec<&'stati
     choices
 }
 fn install_runtime(s: &Settings, c: &Control, log: &Activity) -> Result<RuntimeRecord> {
+    let assets: Vec<Download> = serde_json::from_str(include_str!("../runtime-downloads.json"))?;
+    install_runtime_release(s, "b12032", &assets, c, log)
+}
+pub fn runtime_root(s: &Settings) -> PathBuf {
+    let parent = s
+        .server
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("runtime"));
+    parent
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "ai-backends"))
+        .and_then(Path::parent)
+        .unwrap_or(parent)
+        .to_path_buf()
+}
+pub fn install_runtime_release(
+    s: &Settings,
+    build: &str,
+    assets: &[Download],
+    c: &Control,
+    log: &Activity,
+) -> Result<RuntimeRecord> {
+    crate::maintenance::validate_runtime_release(build, assets)?;
     if !cfg!(windows) {
         anyhow::ensure!(
             s.server.is_file(),
@@ -317,27 +340,36 @@ fn install_runtime(s: &Settings, c: &Control, log: &Activity) -> Result<RuntimeR
             build: "user-selected".into(),
         });
     }
-    let root = s
-        .server
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("runtime"));
-    // Keep versioned runtime folders alongside the original runtime, never nested per upgrade.
-    let root = if root
-        .ancestors()
-        .any(|p| p.file_name().is_some_and(|n| n == "ai-backends"))
-    {
-        root.ancestors()
-            .find(|p| p.file_name().is_some_and(|n| n == "ai-backends"))
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf()
-    } else {
-        root.to_path_buf()
-    };
+    let root = runtime_root(s);
     fs::create_dir_all(&root)?;
     let root = root.canonicalize()?;
+    if let Some(active) = saved_runtime(&root)
+        && active
+            .build
+            .trim_start_matches('b')
+            .parse::<u64>()
+            .unwrap_or(0)
+            >= build.trim_start_matches('b').parse::<u64>().unwrap_or(0)
+        && (!s.require_acceleration || active.backend != Backend::Cpu)
+        && (s.backend == Backend::Auto || active.backend == s.backend)
+        && crate::scan::run(
+            &active.server,
+            &["--list-devices".into()],
+            Duration::from_secs(30),
+            c,
+        )
+        .is_ok_and(|r| r.0)
+    {
+        log.emit(
+            "runtime",
+            format!("{build} runtime already installed and starts correctly"),
+            0,
+            0,
+            0,
+            "",
+        );
+        return Ok(active);
+    }
     let candidates = runtime_choices(
         s.backend,
         !hardware::detect().gpus.is_empty(),
@@ -352,7 +384,7 @@ fn install_runtime(s: &Settings, c: &Control, log: &Activity) -> Result<RuntimeR
             let backends = root.join("ai-backends");
             fs::create_dir_all(&backends)?;
             let staging = tempfile::Builder::new()
-                .prefix(&format!("{backend}-b11998-"))
+                .prefix(&format!("{backend}-{build}-"))
                 .tempdir_in(&backends)?;
             log.emit(
                 "runtime",
@@ -362,7 +394,7 @@ fn install_runtime(s: &Settings, c: &Control, log: &Activity) -> Result<RuntimeR
                 0,
                 "",
             );
-            let assets = runtime_downloads(backend);
+            let assets = runtime_downloads(backend, assets);
             anyhow::ensure!(
                 !assets.is_empty(),
                 Fault::new("NG650", "Runtime package metadata missing")
@@ -425,8 +457,11 @@ fn install_runtime(s: &Settings, c: &Control, log: &Activity) -> Result<RuntimeR
             let record = RuntimeRecord {
                 server: folder.join("llama-server.exe"),
                 backend: selected,
-                build: "b11998".into(),
+                build: build.into(),
             };
+            if let Some(previous) = saved_runtime(&root) {
+                storage::atomic_json(&root.join("previous-ai-runtime.json"), &previous)?;
+            }
             storage::atomic_json(&root.join("active-ai-runtime.json"), &record)?;
             Ok(record)
         })();
@@ -611,8 +646,24 @@ mod tests {
             vec!["cuda13", "cuda12"]
         );
         assert_eq!(runtime_choices(Backend::Cpu, true, false), vec!["cpu"]);
-        assert_eq!(runtime_downloads("cuda13").len(), 2);
-        assert_eq!(runtime_downloads("cpu").len(), 1);
+        assert_eq!(
+            runtime_downloads(
+                "cuda13",
+                &serde_json::from_str::<Vec<Download>>(include_str!("../runtime-downloads.json"))
+                    .unwrap()
+            )
+            .len(),
+            2
+        );
+        assert_eq!(
+            runtime_downloads(
+                "cpu",
+                &serde_json::from_str::<Vec<Download>>(include_str!("../runtime-downloads.json"))
+                    .unwrap()
+            )
+            .len(),
+            1
+        );
     }
     #[test]
     fn runtime_extraction_keeps_only_runtime_files_and_rejects_traversal() {

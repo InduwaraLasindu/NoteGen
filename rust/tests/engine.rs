@@ -677,6 +677,10 @@ fn live_model() {
         ..Default::default()
     };
     s.cpu_threads = 8;
+    s.image_edge = std::env::var("NOTEGEN_TEST_IMAGE_EDGE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let p = planning::build(
         &notegen::hardware::detect(),
         &s,
