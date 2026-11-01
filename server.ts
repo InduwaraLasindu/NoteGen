@@ -1,12 +1,19 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
+import {
+  buildGitHubReleaseV030,
+  GitHubReleaseManifest,
+} from './src/utils/releaseBuilder';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+let cachedReleaseManifest: GitHubReleaseManifest | null = null;
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -30,9 +37,77 @@ async function startServer() {
   app.get('/api/health', (_req, res) => {
     res.json({
       status: 'ok',
-      version: '0.3.1',
+      version: '0.3.0',
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
     });
+  });
+
+  // GitHub Release v0.3.0 Status, Builder & Asset Download Routes
+  app.get('/api/release/v0.3.0', (_req, res) => {
+    try {
+      if (!cachedReleaseManifest) {
+        cachedReleaseManifest = buildGitHubReleaseV030(__dirname);
+      }
+      return res.json(cachedReleaseManifest);
+    } catch (err) {
+      return res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Failed to load v0.3.0 release manifest',
+      });
+    }
+  });
+
+  app.post('/api/release/v0.3.0/build', (_req, res) => {
+    try {
+      cachedReleaseManifest = buildGitHubReleaseV030(__dirname);
+      return res.json(cachedReleaseManifest);
+    } catch (err) {
+      return res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Failed to build v0.3.0 GitHub release bundle',
+      });
+    }
+  });
+
+  app.get('/api/release/v0.3.0/download/:filename', (req, res) => {
+    try {
+      if (!cachedReleaseManifest) {
+        cachedReleaseManifest = buildGitHubReleaseV030(__dirname);
+      }
+      const rawName = String(req.params.filename || '');
+      const asset = cachedReleaseManifest.assets.find(
+        (a) => a.name === rawName
+      );
+      if (!asset) {
+        return res
+          .status(404)
+          .json({ error: 'Release asset not found in v0.3.0 manifest' });
+      }
+      const filePath = path.join(
+        __dirname,
+        'releases',
+        'v0.3.0',
+        asset.name
+      );
+      if (!fs.existsSync(filePath)) {
+        cachedReleaseManifest = buildGitHubReleaseV030(__dirname);
+      }
+      res.setHeader('Content-Type', asset.contentType);
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${asset.name}"`
+      );
+      return res.sendFile(filePath);
+    } catch (err) {
+      return res.status(500).json({
+        error:
+          err instanceof Error ? err.message : 'Release asset download failed',
+      });
+    }
   });
 
   // 1. Public Knowledge Lookup (Wikipedia API + optional Gemini Google Search Grounding)

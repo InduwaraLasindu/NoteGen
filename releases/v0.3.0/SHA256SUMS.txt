@@ -1,0 +1,7 @@
+c752a9ddd4f3ee1bd836fd9bfdb6bf799bef124caaa6691df0967af79dc86aa5  NoteGen-0.3.0-Release-Bundle.zip
+d30cfcdf46ecdcb172d39809a410b8f677d4435b23e6db4e7acbb0db2dde344b  NoteGen-0.3.0-Release-Bundle.zip.sha256
+39084f9317ec0bacf265f2888eb0a610e496b1c52aa931726d00f679b05b0d62  NoteGen-0.3.0-FontPack-AdaLovelace.zip
+5e5618965ea4ecf629ea6c3d84ee67e504fa887138b0293b689445c20f415069  AdaLovelaceHand-0.3.0.ttf
+98faff4ca321497f72b8336c50080d4939adf46c5ebc482e4bc6795b95584860  NoteGen-0.3.0-Verified-Sample.docx
+a1e07826d2df205cab588c409f72a94377e35f15a8250300be472df71b559798  installer-manifest.json
+5c94253891dfed99ef4a9455f139314af7750aa537a23a4e5ecb0b9618189dd6  release-notes.md

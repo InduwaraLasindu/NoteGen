@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.2.0',[string]$Evidence='build/installer-evidence')
+param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.3.0',[string]$Evidence='build/installer-evidence')
 $ErrorActionPreference='Stop'
 $Installer=(Resolve-Path $Installer).Path
 New-Item -ItemType Directory -Force $Evidence | Out-Null

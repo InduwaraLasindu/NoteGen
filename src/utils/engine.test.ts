@@ -157,3 +157,18 @@ test('Chunk 6: Word OOXML table & document generator preserves cells, merges, an
   assert.ok(docXml.includes('Section 4.2: Siphon &amp; Venturi Flow Balance'));
   assert.ok(docXml.includes('Contextual interpretation:'));
 });
+
+test('Chunk 7: GitHub Release v0.3.0 builder packages verified ZIP bundle, .ttf, .docx, manifest, and SHA256 checksums', async () => {
+  const { buildGitHubReleaseV030 } = await import('./releaseBuilder');
+  const manifest = buildGitHubReleaseV030(process.cwd());
+  assert.equal(manifest.version, '0.3.0');
+  assert.equal(manifest.tag, 'v0.3.0');
+  assert.equal(manifest.allChunksPassed, true);
+  assert.equal(manifest.assets.length, 8);
+  const bundleAsset = manifest.assets.find(
+    (a) => a.name === 'NoteGen-0.3.0-Release-Bundle.zip'
+  );
+  assert.ok(bundleAsset);
+  assert.ok(bundleAsset.bytes > 10000);
+  assert.equal(bundleAsset.sha256.length, 64);
+});

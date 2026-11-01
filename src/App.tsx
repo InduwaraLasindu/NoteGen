@@ -16,7 +16,7 @@ import {
   synthesizeGlyphInkGrid,
   writerCoverage,
 } from './utils/engine';
-import { buildWordDocumentXml } from './utils/docx';
+import { buildDocxBinary } from './utils/docx';
 import {
   DEFAULT_APPEARANCE,
   INITIAL_MODELS,
@@ -415,27 +415,27 @@ export function App() {
   };
 
   const handleExportWord = () => {
-    const xml = buildWordDocumentXml(pages, {
+    const docxBytes = buildDocxBinary(pages, {
       keepPageBreaks: compute.keep_page_breaks,
       preserveFigures: compute.preserve_figures,
       reviewThreshold: 0.9,
     });
-    const blob = new Blob([xml], {
+    const blob = new Blob([new Uint8Array(docxBytes)], {
       type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     const stem = activeFileName.replace(/\.[^.]+$/, '');
-    a.download = `${stem}-NoteGen.docx`;
+    a.download = `${stem}-NoteGen-0.3.0.docx`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
     setNotice(
-      `Exported editable Word document "${stem}-NoteGen.docx" with reconstructed TableGrid cells and diagram interpretations.`
+      `Exported editable Word document "${stem}-NoteGen-0.3.0.docx" (${docxBytes.byteLength} bytes) with reconstructed TableGrid cells and diagram interpretations.`
     );
-    pushEvent('export', `Exported editable Word document ${stem}-NoteGen.docx.`);
+    pushEvent('export', `Exported editable Word document ${stem}-NoteGen-0.3.0.docx.`);
   };
 
   const handleUploadFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -518,7 +518,7 @@ export function App() {
             }}
             className="hover:text-slate-900 dark:hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            Batch Tests
+            GitHub Release v0.3.0
           </button>
           <button
             type="button"
@@ -557,7 +557,7 @@ export function App() {
               Editable text. Rebuilt tables. Diagrams with context. Adaptive handwriting profiles that learn how you write every letter and export as a personal TrueType font.
             </p>
             <div className="pt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-              <span>v0.3.1 Studio</span>
+              <span>v0.3.0 Studio Release</span>
               <span aria-hidden="true">·</span>
               <span>
                 Active writer:{' '}
