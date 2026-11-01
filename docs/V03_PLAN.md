@@ -30,3 +30,13 @@ TTF outlines/checksums/mappings, font/profile packs, clarification data protecti
 loopback third-party payloads with visual examples, update SHA/range checks, and Studio
 rendering. Independent fontTools and FreeType readers parsed/rendered the exported font.
 Windows/Linux CI, actual native model inference and installer acceptance follow this gate.
+
+## CI follow-up
+
+Both first-candidate platform suites passed 81 tests. Windows also loaded/rendered
+the exported TTF through GDI. Linux exhausted runner disk while linking the UI
+capture binary. Development/test debug artifacts are now compact and incremental
+caches disabled; the cache namespace changes to avoid restoring the bloated target.
+Fast OCR avoids unused writer-reference loading, and external vision requests use
+standard JSON-object fields without llama.cpp-only template parameters. Regression
+coverage verifies these compatibility and resource paths.

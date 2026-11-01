@@ -31,12 +31,13 @@ pub fn convert(
     let begun = Instant::now();
     s.validate()?;
     let mut effective = s.clone();
-    let writer_digest = if s.writer.use_examples {
+    let writer_digest = if s.preset != Preset::Fast && s.writer.use_examples {
         crate::writers::digest(&s.writer.root, s.writer.id.as_deref())?
     } else {
         String::new()
     };
-    if s.writer.use_examples
+    if s.preset != Preset::Fast
+        && s.writer.use_examples
         && let Some(id) = s.writer.id.as_deref()
     {
         effective.writer_reference = crate::writers::reference(&s.writer.root, id)?;

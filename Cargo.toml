@@ -62,6 +62,16 @@ clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.37", optional = true, default-features = false, features = ["default_fonts", "glow", "wgpu", "x11", "wayland", "persistence", "system_fonts", "links", "clipboard"] }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
 
+# Keep CI and local development within modest disk budgets. Assertions and
+# overflow checks remain enabled; production optimization is unchanged.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

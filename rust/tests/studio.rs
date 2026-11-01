@@ -471,6 +471,11 @@ fn visual_writer_examples_reach_a_third_party_local_server_as_a_separate_image()
     assert!(read.plain().contains("1250"));
     let body = t.join().unwrap();
     assert_eq!(body["model"], "vision:test");
+    assert!(body.get("chat_template_kwargs").is_none());
+    assert_eq!(
+        body["response_format"],
+        serde_json::json!({"type":"json_object"})
+    );
     let content = body["messages"][0]["content"].as_array().unwrap();
     assert_eq!(
         content.iter().filter(|v| v["type"] == "image_url").count(),

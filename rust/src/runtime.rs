@@ -374,8 +374,17 @@ impl Server {
             items.push(json!({"type":"text","text":reference.description}));
         }
         let mut body = json!({"model":if self.model.alias.is_empty() || self.model.endpoint.is_none() && !s.external_server{&self.model.id}else{&self.model.alias},"messages":messages,"stream":true,"max_tokens":s.max_tokens,"temperature":s.temperature,"top_p":s.top_p,"seed":s.seed,"chat_template_kwargs":{"enable_thinking":false}});
+        if self.model.endpoint.is_some() {
+            body.as_object_mut()
+                .expect("compiled request object")
+                .remove("chat_template_kwargs");
+        }
         if self.model.prompt == "structured" {
-            body["response_format"] = json!({"type":"json_object","schema":page_schema()});
+            body["response_format"] = if self.model.endpoint.is_some() {
+                json!({"type":"json_object"})
+            } else {
+                json!({"type":"json_object","schema":page_schema()})
+            };
         }
         let text = chat(&self.endpoint, body, s, c, log, page)?;
         if let Err(error) = log.capture_response(&self.model.id, page, &text) {

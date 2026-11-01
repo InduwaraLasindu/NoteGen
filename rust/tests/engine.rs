@@ -474,6 +474,8 @@ fn fast_ignores_broken_ai_assets_but_selected_readers_require_integrity() {
         dpi: 150,
         ..Default::default()
     };
+    settings.writer.id = Some("missing-writer".into());
+    settings.writer.root = t.path().join("unavailable-writers");
     let fast = notegen::pipeline::convert(
         &source,
         &t.path().join("fast.docx"),
@@ -491,6 +493,7 @@ fn fast_ignores_broken_ai_assets_but_selected_readers_require_integrity() {
             .contains("1250")
     );
     assert!(fast.plan.models.is_empty());
+    settings.writer.id = None;
     settings.preset = Preset::Accuracy;
     let error = notegen::pipeline::convert(
         &source,
