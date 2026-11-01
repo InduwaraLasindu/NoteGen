@@ -1,5 +1,8 @@
 name: Windows installer and GitHub Release
 on:
+  push:
+    branches: [main]
+    paths: ['installer/**', 'scripts/Build-Installer.ps1', 'scripts/Test-Installer.ps1', 'scripts/Configure-AI.ps1', '.github/workflows/release-installer.yml']
   workflow_run:
     workflows: [Rust verification and Windows executable]
     types: [completed]
@@ -12,22 +15,22 @@ on:
         required: true
       source_run:
         description: Successful Rust verification workflow run
-        default: ''
+        default: '41306134366'
         required: true
       source_sha:
         description: Exact verified Rust source commit
-        default: ''
+        default: '0a873138d7eac358ba3ff7ae9e9e6f2de793f53e'
         required: true
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: notegen-installer
+  group: notegen-installer-bounded-v1
   cancel-in-progress: false
 jobs:
   installer:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
@@ -39,12 +42,12 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_VERSION: ${{ inputs.version || '0.3.0' }}
-      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id }}
-      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha }}
+      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '41306134366' }}
+      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || '0a873138d7eac358ba3ff7ae9e9e6f2de793f53e' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.source_sha || github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
       - name: Verify and download the proven Rust build
         id: payload
         shell: pwsh
@@ -59,7 +62,13 @@ jobs:
           $artifact=$artifacts.artifacts | Where-Object name -EQ 'NoteGen-Rust-Windows-x64' | Select-Object -First 1
           if(-not $artifact -or $artifact.expired -or -not $artifact.digest.StartsWith('sha256:')){throw 'Verified source artifact is unavailable'}
           $head=(& gh api "repos/$env:GITHUB_REPOSITORY/git/ref/heads/main") | ConvertFrom-Json
-          if($LASTEXITCODE -ne 0 -or $head.object.sha -ne $env:SOURCE_SHA){throw 'A newer source commit exists; package its verified build instead'}
+          if($LASTEXITCODE -ne 0 -or $head.object.sha -ne $env:GITHUB_SHA){throw 'A newer installer revision exists'}
+          # Installer-only changes may reuse the immutable, fully tested application.
+          $comparison=(& gh api "repos/$env:GITHUB_REPOSITORY/compare/$env:SOURCE_SHA...$env:GITHUB_SHA") | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0 -or $comparison.status -notin @('identical','ahead')){throw 'Installer is not based on the verified source'}
+          $allowed=@('.github/workflows/release-installer.yml','installer/NoteGen.iss','scripts/Build-Installer.ps1','scripts/Test-Installer.ps1','scripts/Configure-AI.ps1','docs/INSTALLER.md','docs/TESTING.md','README.md')
+          if(@($comparison.files).Count -ge 300){throw 'Source comparison is too large'}
+          foreach($file in $comparison.files){if($file.filename -notin $allowed -or ($file.previous_filename -and $file.previous_filename -notin $allowed)){throw "Application source changed: $($file.filename). Run Rust verification first."}}
           & gh run download $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --name NoteGen-Rust-Windows-x64 --dir build/verified-artifact
           if($LASTEXITCODE -ne 0){throw 'Verified artifact download failed'}
           $zip='build/verified-artifact/NoteGen-Rust-Windows-x64.zip'
@@ -103,7 +112,15 @@ jobs:
           if((Get-FileHash build/previous-installer/NoteGen-Setup-0.2.0.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c6b564a251352ac0c07235d9b9dca57a49f8333bc936003c6b115b7e6a236df8'){throw 'Previous installer checksum mismatch'}
       - name: Install, launch, upgrade and uninstall the actual EXE
         shell: pwsh
-        run: ./scripts/Test-Installer.ps1 -Installer "./dist/installer/NoteGen-Setup-$env:RELEASE_VERSION.exe" -Version $env:RELEASE_VERSION -PreviousInstaller "./build/previous-installer/NoteGen-Setup-0.2.0.exe"
+        run: |
+          $ErrorActionPreference='Stop'
+          $test=(Resolve-Path ./scripts/Test-Installer.ps1).Path
+          $setup=(Resolve-Path "./dist/installer/NoteGen-Setup-$env:RELEASE_VERSION.exe").Path
+          $previous=(Resolve-Path "./build/previous-installer/NoteGen-Setup-0.2.0.exe").Path
+          $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $test),'-Installer',('"{0}"' -f $setup),'-Version',$env:RELEASE_VERSION,'-PreviousInstaller',('"{0}"' -f $previous))
+          $process=Start-Process pwsh -ArgumentList $arguments -PassThru -NoNewWindow
+          if(-not $process.WaitForExit(480000)){try{$process.Kill($true)}catch{};throw 'Installer acceptance exceeded eight minutes; see stage logs'}
+          if($process.ExitCode -ne 0){throw "Installer acceptance failed: $($process.ExitCode)"}
       - name: Seal the tested release manifest
         shell: pwsh
         run: |
@@ -182,11 +199,11 @@ jobs:
           cd dist
           sha256sum --check "NoteGen-Setup-$RELEASE_VERSION.exe.sha256"
           head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          test "$head" = "$SOURCE_SHA"
+          test "$head" = "$GITHUB_SHA"
           tag="v$RELEASE_VERSION"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'This release version already exists; use a new version instead of replacing published binaries.'
             exit 1
           fi
-          gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "NoteGen $RELEASE_VERSION — Windows installer" --notes-file release-notes.md --draft
+          gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" installer-manifest.json --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Windows installer" --notes-file release-notes.md --draft
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest

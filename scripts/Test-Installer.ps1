@@ -8,12 +8,25 @@ $Evidence=(Resolve-Path $Evidence).Path
 $installDir=Join-Path $env:LOCALAPPDATA ('Programs/NoteGen installer QA '+[guid]::NewGuid().ToString('N'))
 $registry='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{6D37E156-3C8D-4BB7-AAC8-8F6C4C8F331A}_is1'
 $results=[System.Collections.Generic.List[string]]::new()
+function Wait-QAProcess([Diagnostics.Process]$process,[string]$stage,[int]$seconds=180) {
+ Write-Host "[QA] Waiting for $stage (PID $($process.Id), limit $seconds seconds)"
+ if(-not $process.WaitForExit($seconds*1000)){
+  try{$process.Kill($true)}catch{}
+  throw "$stage exceeded $seconds seconds. The disposable test process was stopped."
+ }
+ $code=$process.ExitCode
+ Write-Host "[QA] $stage exited with code $code"
+ return $code
+}
 function Install-NoteGen([string]$name) {
+ Write-Host "[QA] Installing: $name"
  $installArgs=@('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/TASKS=desktopicon',('/DIR="{0}"' -f $installDir),('/LOG="{0}"' -f (Join-Path $Evidence "$name.log")))
- $p=Start-Process -FilePath $Installer -ArgumentList $installArgs -PassThru -Wait
- if($p.ExitCode -ne 0){throw "Installer failed ($name): $($p.ExitCode)"}
+ $p=Start-Process -FilePath $Installer -ArgumentList $installArgs -PassThru
+ $exit=Wait-QAProcess $p "Installer $name"
+ if($exit -ne 0){throw "Installer failed ($name): $exit"}
 }
 function Test-Desktop([string]$name) {
+ Write-Host "[QA] Launching desktop: $name"
  $p=Start-Process -FilePath (Join-Path $installDir 'NoteGen.exe') -WorkingDirectory $env:TEMP -PassThru
  try {
   Start-Sleep -Seconds 5
@@ -27,6 +40,7 @@ try {
   $newInstaller=$Installer
   $Installer=(Resolve-Path $PreviousInstaller).Path
   Install-NoteGen 'previous-0.2-install'
+ Write-Host "[QA] Previous installation: CLI version"
   $previousVersion=& (Join-Path $installDir 'notegen-cli.exe') --version
   if($LASTEXITCODE -ne 0 -or $previousVersion -notmatch '0\.2\.0'){throw 'Previous installer did not contain NoteGen 0.2.0.'}
   Test-Desktop 'previous 0.2 installation'
@@ -51,11 +65,13 @@ try {
  }
  $results.Add('Install, dependencies, per-user registration and shortcuts passed')
  # The shipped setup entry point must work in built-in Windows PowerShell, with no downloads.
+ Write-Host "[QA] Built-in PowerShell AI setup dry run"
  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir 'scripts/Configure-AI.ps1') -DryRun -NoPause
  if($LASTEXITCODE -ne 0){throw 'Start menu AI setup helper failed validation.'}
  Test-Desktop 'fresh installation'
  Push-Location $installDir
  try {
+ Write-Host "[QA] Installed CLI and native dependencies"
   $reported=& ./notegen-cli.exe --version
   if($LASTEXITCODE -ne 0 -or $reported -notmatch [regex]::Escape($Version)){throw 'Installed executable version does not match the release.'}
   & ./notegen-cli.exe self-test -o (Join-Path $Evidence 'installed-word.docx')
@@ -73,6 +89,7 @@ try {
   $scan=Join-Path $Evidence 'installer-scan.pdf'
   [IO.File]::WriteAllText($scan,$pdf,[Text.Encoding]::ASCII)
   $scanWord=Join-Path $Evidence 'installed-scan.docx'
+ Write-Host "[QA] PDF rasterization, OCR and editable table export"
   & ./notegen-cli.exe convert $scan --preset fast -o $scanWord
   if($LASTEXITCODE -ne 0){throw 'Installed PDF rendering/OCR failed.'}
   $archive=[IO.Compression.ZipFile]::OpenRead($scanWord)
@@ -81,6 +98,7 @@ try {
    try{$xml=$reader.ReadToEnd()}finally{$reader.Dispose()}
    if($xml -notmatch '1250' -or $xml -notmatch '<w:tbl>'){throw 'Installed OCR/table export assertion failed.'}
   } finally {$archive.Dispose()}
+ Write-Host "[QA] Writer profile and confirmed glyph"
   $writer=(& ./notegen-cli.exe add-writer 'Installer QA writer') | ConvertFrom-Json
   if($LASTEXITCODE -ne 0 -or -not $writer.id){throw 'Installed writer creation failed.'}
   Add-Type -AssemblyName System.Drawing
@@ -93,6 +111,7 @@ try {
   & ./notegen-cli.exe export-writer $writer.id -o (Join-Path $Evidence 'installed-writer.zip')
   if($LASTEXITCODE -ne 0){throw 'Installed profile export failed.'}
   $fontPack=Join-Path $Evidence 'installed-font.zip'
+ Write-Host "[QA] TrueType font export"
   & ./notegen-cli.exe font-pack $writer.id -o $fontPack --family 'Installer QA handwriting'
   if($LASTEXITCODE -ne 0){throw 'Installed font pack export failed.'}
   $fontArchive=[IO.Compression.ZipFile]::OpenRead($fontPack)
@@ -100,6 +119,7 @@ try {
    $fontFile=Join-Path $Evidence 'installed-handwriting.ttf'
    [IO.Compression.ZipFileExtensions]::ExtractToFile($fontArchive.GetEntry('Handwriting.ttf'),$fontFile,$true)
   }finally{$fontArchive.Dispose()}
+ Write-Host "[QA] Windows native font rendering"
   & (Join-Path $PSScriptRoot 'Test-Font.ps1') -Font $fontFile -Preview (Join-Path $Evidence 'installed-font.png')
   if(-not $?){throw 'Windows rejected the installed-app font export.'}
   $writerFile=Join-Path $installDir "user-data/writers/$($writer.id)/profile.json"
@@ -118,6 +138,7 @@ try {
  # A different valid PE stands in for a user-selected CUDA/Vulkan server during upgrade.
  Copy-Item (Join-Path $installDir 'notegen-cli.exe') $engine -Force
  $customEngineHash=(Get-FileHash $engine -Algorithm SHA256).Hash
+ Write-Host "[QA] Reinstall and runtime/data preservation"
  Install-NoteGen 'upgrade'
  if((Get-FileHash $writerFile -Algorithm SHA256).Hash -ne $writerHash){throw 'Upgrade modified a handwriting profile.'}
  if([IO.File]::ReadAllText($model) -ne 'USER MODEL MUST SURVIVE' -or [IO.File]::ReadAllText($document) -ne 'USER DOCUMENT MUST SURVIVE'){throw 'Upgrade modified user data.'}
@@ -126,8 +147,10 @@ try {
  Remove-Item $engineBackup
  Test-Desktop 'upgrade'
  $results.Add('Upgrade/reinstall preserved models, document data and the selected AI runtime')
- $uninstall=Start-Process -FilePath (Join-Path $installDir 'unins000.exe') -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="{0}"' -f (Join-Path $Evidence 'uninstall.log'))) -PassThru -Wait
- if($uninstall.ExitCode -ne 0){throw "Uninstall failed: $($uninstall.ExitCode)"}
+ Write-Host "[QA] Uninstall and data retention"
+ $uninstall=Start-Process -FilePath (Join-Path $installDir 'unins000.exe') -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="{0}"' -f (Join-Path $Evidence 'uninstall.log'))) -PassThru
+ $exit=Wait-QAProcess $uninstall 'Uninstaller'
+ if($exit -ne 0){throw "Uninstall failed: $exit"}
  for($i=0;$i -lt 20 -and (Test-Path (Join-Path $installDir 'NoteGen.exe'));$i++){Start-Sleep -Milliseconds 250}
  if(Test-Path (Join-Path $installDir 'NoteGen.exe')){throw 'Uninstall left the installed EXE behind.'}
  if(Test-Path $registry){throw 'Uninstall left its Apps & Features registration behind.'}
