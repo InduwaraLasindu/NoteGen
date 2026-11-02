@@ -1,7 +1,8 @@
 //! Bounded, non-destructive scan tools. Every operation returns a new image.
 use crate::{storage::Control, types::*};
-use image::{DynamicImage, Rgb, RgbImage};
+use image::{DynamicImage, Rgb, RgbImage, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
 
 pub const MAX_PIXELS: u64 = 40_000_000;
@@ -131,6 +132,355 @@ pub fn perspective(
         }
     }
     Ok(DynamicImage::ImageRgb8(output))
+}
+
+/// One user-supplied sample of the page's upper/lower source curves.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurveKnot {
+    pub x: f64,
+    pub top: f64,
+    pub bottom: f64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurvedPageOptions {
+    pub width: u32,
+    pub height: u32,
+    pub knots: Vec<CurveKnot>,
+}
+impl CurvedPageOptions {
+    /// Positive separation and linear interpolation prevent crossing/folding.
+    pub fn validate(&self, source_width: u32, source_height: u32) -> Result<()> {
+        dimensions(source_width, source_height)?;
+        dimensions(self.width, self.height)?;
+        anyhow::ensure!(
+            source_width >= 2 && source_height >= 2 && self.width >= 2 && self.height >= 2,
+            Fault::new(
+                "NG100",
+                "Curved-page source and output must be at least 2×2 pixels"
+            )
+        );
+        anyhow::ensure!(
+            (2..=128).contains(&self.knots.len()),
+            Fault::new("NG100", "Supply 2–128 explicit curve samples")
+        );
+        anyhow::ensure!(
+            self.knots[0].x == 0.0 && self.knots[self.knots.len() - 1].x == 1.0,
+            Fault::new(
+                "NG100",
+                "Curved-page samples must cover the full width from x=0 to x=1"
+            )
+        );
+        let minimum_gap = 0.05f64.max(1.0 / f64::from(source_height - 1));
+        for knot in &self.knots {
+            anyhow::ensure!(
+                [knot.x, knot.top, knot.bottom]
+                    .iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                    && knot.bottom - knot.top + 1e-12 >= minimum_gap,
+                Fault::new(
+                    "NG100",
+                    "Curve coordinates must be finite in 0..1; top/bottom need at least 5% separation and one source-pixel interval"
+                )
+            );
+        }
+        for pair in self.knots.windows(2) {
+            let dx = pair[1].x - pair[0].x;
+            anyhow::ensure!(
+                dx >= 0.000_001
+                    && ((pair[1].top - pair[0].top) / dx).abs() <= 4.0 + 1e-10
+                    && ((pair[1].bottom - pair[0].bottom) / dx).abs() <= 4.0 + 1e-10,
+                Fault::new(
+                    "NG100",
+                    "Curve x samples must increase strictly; normalized top/bottom slopes must stay within ±4"
+                )
+            );
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurvedPageMetrics {
+    pub sampled_pixels: u64,
+    pub changed_pixels: u64,
+    pub vertically_mapped_pixels: u64,
+    pub maximum_vertical_shift_source_pixels: f64,
+    pub mean_vertical_shift_source_pixels: f64,
+    pub dark_pixels_reference: u64,
+    pub dark_pixels_corrected: u64,
+    pub mean_luminance_reference: f64,
+    pub mean_luminance_corrected: f64,
+    pub comparison_basis: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurvedRelationship {
+    pub schema: u32,
+    pub original_width: u32,
+    pub original_height: u32,
+    pub geometry: CurvedPageOptions,
+    pub minimum_vertical_scale: f64,
+    pub maximum_vertical_scale: f64,
+    pub source_rgba8_sha256: String,
+    pub corrected_rgba8_sha256: String,
+    pub metrics: CurvedPageMetrics,
+    pub mapping: String,
+    pub warnings: Vec<String>,
+}
+fn curve_band(knots: &[CurveKnot], x: f64) -> (f64, f64) {
+    let right = knots
+        .partition_point(|knot| knot.x < x)
+        .clamp(1, knots.len() - 1);
+    let left = knots[right - 1];
+    let right = knots[right];
+    let fraction = ((x - left.x) / (right.x - left.x)).clamp(0.0, 1.0);
+    (
+        left.top * (1.0 - fraction) + right.top * fraction,
+        left.bottom * (1.0 - fraction) + right.bottom * fraction,
+    )
+}
+fn normalized_point(point: Point) -> Result<()> {
+    anyhow::ensure!(
+        [point.x, point.y]
+            .iter()
+            .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+        Fault::new(
+            "NG100",
+            "Mapping points must be finite normalized coordinates"
+        )
+    );
+    Ok(())
+}
+impl CurvedRelationship {
+    /// Exact continuous geometry; raster interpolation itself is not reversible.
+    pub fn source_point(&self, output: Point) -> Result<Point> {
+        anyhow::ensure!(
+            self.schema == 1,
+            Fault::new("NG100", "Unsupported curved-page relationship")
+        );
+        self.geometry
+            .validate(self.original_width, self.original_height)?;
+        normalized_point(output)?;
+        let (top, bottom) = curve_band(&self.geometry.knots, output.x);
+        Ok(Point {
+            x: output.x,
+            y: top + (bottom - top) * output.y,
+        })
+    }
+    /// Returns None for source margins outside the selected top/bottom curves.
+    pub fn output_point(&self, source: Point) -> Result<Option<Point>> {
+        anyhow::ensure!(
+            self.schema == 1,
+            Fault::new("NG100", "Unsupported curved-page relationship")
+        );
+        self.geometry
+            .validate(self.original_width, self.original_height)?;
+        normalized_point(source)?;
+        let (top, bottom) = curve_band(&self.geometry.knots, source.x);
+        if source.y < top - 1e-12 || source.y > bottom + 1e-12 {
+            return Ok(None);
+        }
+        Ok(Some(Point {
+            x: source.x,
+            y: ((source.y - top) / (bottom - top)).clamp(0.0, 1.0),
+        }))
+    }
+}
+pub struct CurvedPage {
+    pub original: DynamicImage,
+    pub corrected: DynamicImage,
+    pub relationship: CurvedRelationship,
+    relationship_fingerprint: String,
+}
+fn rgba_hash(image: &RgbaImage, c: &Control) -> Result<String> {
+    let mut hash = Sha256::new();
+    hash.update(b"NoteGen normalized RGBA8 pixels v1\0");
+    hash.update(image.width().to_le_bytes());
+    hash.update(image.height().to_le_bytes());
+    for chunk in image.as_raw().chunks(1024 * 1024) {
+        c.check()?;
+        hash.update(chunk);
+    }
+    Ok(hex::encode(hash.finalize()))
+}
+fn image_rgba_hash(image: &DynamicImage, c: &Control) -> Result<String> {
+    if let Some(rgba) = image.as_rgba8() {
+        rgba_hash(rgba, c)
+    } else {
+        rgba_hash(&image.to_rgba8(), c)
+    }
+}
+fn rgba_sample(source: &RgbaImage, x: f64, y: f64) -> Rgba<u8> {
+    let x = x.clamp(0.0, f64::from(source.width() - 1));
+    let y = y.clamp(0.0, f64::from(source.height() - 1));
+    let x0 = x.floor() as u32;
+    let x1 = (x0 + 1).min(source.width() - 1);
+    let y0 = y.floor() as u32;
+    let y1 = (y0 + 1).min(source.height() - 1);
+    let fx = x - f64::from(x0);
+    let fy = y - f64::from(y0);
+    let samples = [
+        (source[(x0, y0)], (1.0 - fx) * (1.0 - fy)),
+        (source[(x1, y0)], fx * (1.0 - fy)),
+        (source[(x0, y1)], (1.0 - fx) * fy),
+        (source[(x1, y1)], fx * fy),
+    ];
+    let alpha: f64 = samples
+        .iter()
+        .map(|(pixel, weight)| f64::from(pixel[3]) * weight)
+        .sum();
+    let mut output = [0u8; 4];
+    for (channel, output_channel) in output.iter_mut().take(3).enumerate() {
+        let value: f64 = if alpha > 1e-12 {
+            samples
+                .iter()
+                .map(|(pixel, weight)| f64::from(pixel[channel]) * f64::from(pixel[3]) * weight)
+                .sum::<f64>()
+                / alpha
+        } else {
+            samples
+                .iter()
+                .map(|(pixel, weight)| f64::from(pixel[channel]) * weight)
+                .sum()
+        };
+        *output_channel = value.round().clamp(0.0, 255.0) as u8;
+    }
+    output[3] = alpha.round().clamp(0.0, 255.0) as u8;
+    Rgba(output)
+}
+fn visible_luminance(pixel: Rgba<u8>) -> f64 {
+    let alpha = f64::from(pixel[3]) / 255.0;
+    f64::from(light(&Rgb([pixel[0], pixel[1], pixel[2]]))) * alpha + 255.0 * (1.0 - alpha)
+}
+/// Explicit vertical rectification between user-supplied curves. No curve,
+/// hidden ink, horizontal stretch or three-dimensional surface is inferred.
+pub fn unwarp_curved_page(
+    image: &DynamicImage,
+    options: &CurvedPageOptions,
+    c: &Control,
+) -> Result<CurvedPage> {
+    checked(image, c)?;
+    options.validate(image.width(), image.height())?;
+    anyhow::ensure!(
+        matches!(
+            image.color(),
+            image::ColorType::L8
+                | image::ColorType::La8
+                | image::ColorType::Rgb8
+                | image::ColorType::Rgba8
+        ),
+        Fault::new(
+            "NG100",
+            "Manual curved-page correction accepts 8-bit scans; convert a separate copy of higher-depth input first"
+        )
+    );
+    let source = image.to_rgba8();
+    let mut output = RgbaImage::new(options.width, options.height);
+    let bands = (0..options.width)
+        .map(|x| curve_band(&options.knots, f64::from(x) / f64::from(options.width - 1)))
+        .collect::<Vec<_>>();
+    let mut metrics = CurvedPageMetrics { sampled_pixels:u64::from(options.width)*u64::from(options.height),changed_pixels:0,vertically_mapped_pixels:0,
+        maximum_vertical_shift_source_pixels:0.0,mean_vertical_shift_source_pixels:0.0,dark_pixels_reference:0,dark_pixels_corrected:0,
+        mean_luminance_reference:0.0,mean_luminance_corrected:0.0,comparison_basis:"Compared with identity bilinear resampling of the original onto the same output dimensions; luminance is composited over white. These raster diagnostics do not measure OCR accuracy or prove ink preservation.".into() };
+    for y in 0..options.height {
+        c.check()?;
+        let v = f64::from(y) / f64::from(options.height - 1);
+        for x in 0..options.width {
+            let u = f64::from(x) / f64::from(options.width - 1);
+            let (top, bottom) = bands[x as usize];
+            let mapped_v = top + (bottom - top) * v;
+            let shift = (mapped_v - v).abs() * f64::from(source.height() - 1);
+            if shift > 1e-9 {
+                metrics.vertically_mapped_pixels += 1;
+            }
+            metrics.maximum_vertical_shift_source_pixels =
+                metrics.maximum_vertical_shift_source_pixels.max(shift);
+            metrics.mean_vertical_shift_source_pixels += shift;
+            let corrected = rgba_sample(
+                &source,
+                u * f64::from(source.width() - 1),
+                mapped_v * f64::from(source.height() - 1),
+            );
+            let reference = rgba_sample(
+                &source,
+                u * f64::from(source.width() - 1),
+                v * f64::from(source.height() - 1),
+            );
+            if corrected != reference {
+                metrics.changed_pixels += 1;
+            }
+            let before = visible_luminance(reference);
+            let after = visible_luminance(corrected);
+            metrics.dark_pixels_reference += u64::from(before < 96.0);
+            metrics.dark_pixels_corrected += u64::from(after < 96.0);
+            metrics.mean_luminance_reference += before;
+            metrics.mean_luminance_corrected += after;
+            output[(x, y)] = corrected;
+        }
+    }
+    let count = metrics.sampled_pixels as f64;
+    metrics.mean_vertical_shift_source_pixels /= count;
+    metrics.mean_luminance_reference /= count;
+    metrics.mean_luminance_corrected /= count;
+    let source_hash = rgba_hash(&source, c)?;
+    drop(source);
+    let relationship = CurvedRelationship { schema:1,original_width:image.width(),original_height:image.height(),geometry:options.clone(),
+        minimum_vertical_scale:options.knots.iter().map(|k|k.bottom-k.top).fold(1.0,f64::min),
+        maximum_vertical_scale:options.knots.iter().map(|k|k.bottom-k.top).fold(0.0,f64::max),
+        source_rgba8_sha256:source_hash,corrected_rgba8_sha256:rgba_hash(&output,c)?,metrics,
+        mapping:"Normalized output x maps to the same source x. Source y=top(x)+(bottom(x)-top(x))*output_y. Top/bottom use piecewise-linear interpolation between supplied x knots; pixels use premultiplied-alpha bilinear sampling. The continuous vertical geometry is invertible inside the selected band; raster resampling is lossy.".into(),
+        warnings:vec!["Manual user-guided vertical correction only; no automatic page-shape detection, horizontal dewarping or 3D reconstruction is performed.".into(),
+            "Margins outside the supplied curves are excluded from the corrected copy and retained in original.png. Review every region against that original.".into(),
+            "Interpolation can blur thin strokes or amplify inaccurate geometry. No hidden or glare-obscured writing is reconstructed.".into()] };
+    let relationship_fingerprint = crate::storage::fingerprint(&relationship)?;
+    c.check()?;
+    Ok(CurvedPage {
+        original: image.clone(),
+        corrected: DynamicImage::ImageRgba8(output),
+        relationship,
+        relationship_fingerprint,
+    })
+}
+/// Save both original and corrected copies with the exact inspected mapping.
+pub fn export_curved_page(
+    page: &CurvedPage,
+    output: &Path,
+    c: &Control,
+) -> Result<CurvedRelationship> {
+    c.check()?;
+    anyhow::ensure!(
+        !output.exists(),
+        Fault::new("NG401", "Curved-page output folder already exists")
+    );
+    let relationship = &page.relationship;
+    relationship
+        .geometry
+        .validate(page.original.width(), page.original.height())?;
+    anyhow::ensure!(
+        crate::storage::fingerprint(relationship)? == page.relationship_fingerprint
+            && relationship.original_width == page.original.width()
+            && relationship.original_height == page.original.height()
+            && relationship.geometry.width == page.corrected.width()
+            && relationship.geometry.height == page.corrected.height()
+            && image_rgba_hash(&page.original, c)? == relationship.source_rgba8_sha256
+            && image_rgba_hash(&page.corrected, c)? == relationship.corrected_rgba8_sha256,
+        Fault::new(
+            "NG500",
+            "Curved-page pixels or relationship changed after preview; run the transform again"
+        )
+    );
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let stage = tempfile::tempdir_in(parent)?;
+    write_image(&page.original, &stage.path().join("original.png"), c)?;
+    write_image(&page.corrected, &stage.path().join("corrected.png"), c)?;
+    crate::storage::atomic_json(&stage.path().join("relationship.json"), relationship)?;
+    c.check()?;
+    publish_folder(stage.path(), output)?;
+    Ok(relationship.clone())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

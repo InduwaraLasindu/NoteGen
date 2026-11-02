@@ -7,7 +7,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 1 | Representative handwriting benchmark | Excluded | Corpus collection excluded by user. No real-handwriting accuracy claim. |
 | 2 | Accuracy scorecards | Implemented | Separate character, word, exact-number and coordinate-addressed table-cell scorecards. |
 | 3 | Calibrated uncertainty | Partial | Held-out calibration bins and intervals; no supplied real corpus or calibrated deployment thresholds. |
-| 4 | Numeric integrity checks | Partial | Numeric disagreement/token and table-total suggestions; broader dates/units/identifier validation remains. |
+| 4 | Numeric integrity checks | Implemented | Numeric disagreement, table totals, calendar/date-order, repeated-sign, separator, cross-page unit and labelled-identifier observations; ASCII/locale limits explicit, no automatic rewriting. |
 | 5 | Reader selection by region | Partial | Explicit task/reader selection for region rereads. Measured automatic routing requires regional benchmark data. |
 | 6 | Scan quality preflight | Partial | Blur, contrast, dimensions and possible blank/overexposed-page observations. General clipping/glare detection remains. |
 | 7 | One-page trial run | Implemented | Desktop one-page trial using first selected page; separate output, timing and review result. |
@@ -25,7 +25,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 19 | Header and footer handling | Partial | Conservative repeated-edge proposals and selected undoable removal; Word-section mapping remains. |
 | 20 | Footnotes and references | Partial | Citation/footnote candidates with ambiguity retained; complete semantic linking remains. |
 | 21 | Shadow and glare recovery | Partial | Non-destructive shadow/uneven-light variants and ink-change warnings; destroyed glare detail cannot be recovered. |
-| 22 | Curved-page correction | Planned | Implementation remains. |
+| 22 | Curved-page correction | Implemented | User-supplied bounded top/bottom curves flatten vertical page geometry via CLI; original, hashed mapping, change metrics and distortion warnings retained. Automatic/3D surface reconstruction is not provided. |
 | 23 | Perspective correction | Partial | Validated four-corner perspective transform via CLI; draggable desktop corner editor remains. |
 | 24 | Handwritten line segmentation | Partial | Editable source bounds and page JSON; dedicated handwritten line-boundary editor remains. |
 | 25 | Paper-background controls | Implemented | Optional pale ruling/grid suppression with original and comparison metrics. |
@@ -95,7 +95,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 89 | Failure-injection testing | Partial | Automated journal power-loss, collisions, cancellation, tampered input and simulated disk-full tests; real GPU/storage disconnect coverage remains. |
 | 90 | Stronger build provenance | Partial | Locked CycloneDX inventory, binary/source/input hashes and provenance script; independent reproducibility/attestations remain. |
 | 91 | Command palette and shortcuts | Partial | Searchable command palette and visible keyboard focus; fully configurable shortcuts remain. |
-| 92 | Screen-reader support | Planned | Native accessibility integration and Narrator audit remain. |
+| 92 | Screen-reader support | Partial | Native AccessKit integration, named settings/source controls, polite status updates and accessibility-tree tests; full desktop labels and Narrator reading/focus audit remain. |
 | 93 | Readable-layout presets | Partial | Large/spacious/compact/high-contrast presets; full clipping audit at each viewport remains. |
 | 94 | Precision source magnifier | Partial | Keyboard-accessible source zoom, source bounds and disagreement markers; full-resolution synchronized magnifier remains. |
 | 95 | Interface localization | Partial | English/Sinhala/Tamil core action labels independent from OCR; detailed help and native-speaker rendering audit remain. |

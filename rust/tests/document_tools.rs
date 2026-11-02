@@ -4,6 +4,71 @@ use notegen::{
     types::*,
 };
 use std::{fs, sync::atomic::Ordering};
+
+#[test]
+fn numeric_review_checks_calendar_signs_and_punctuation_without_changing_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = fixture(temp.path());
+    let mut page = project.load(1).unwrap();
+    page.content.blocks = vec![block(
+        "2024-02-29 2023-02-29 31/02/2024 05/06/2024 31/12/2024 --42 12,,50 1.2.3 1,234,567 1.234.567 1,234.56 1.234,56",
+        0.1,
+        0.9,
+    )];
+    project.save(&page).unwrap();
+    let before = fs::read(project.page_path(1)).unwrap();
+    let report = notegen::numeric_integrity::check(&project, &Control::default()).unwrap();
+    let tokens = report
+        .issues
+        .iter()
+        .map(|i| i.token.as_str())
+        .collect::<Vec<_>>();
+    for wanted in [
+        "2023-02-29",
+        "31/02/2024",
+        "05/06/2024",
+        "--42",
+        "12,,50",
+        "1.2.3",
+    ] {
+        assert!(
+            tokens.contains(&wanted),
+            "Missing review observation: {wanted}"
+        );
+    }
+    for valid in [
+        "2024-02-29",
+        "31/12/2024",
+        "1,234,567",
+        "1.234.567",
+        "1,234.56",
+        "1.234,56",
+    ] {
+        assert!(!tokens.contains(&valid), "Unexpected observation: {valid}");
+    }
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|i| i.source.page == 1 && i.source.region.is_some())
+    );
+    assert_eq!(fs::read(project.page_path(1)).unwrap(), before);
+}
+
+#[test]
+fn numeric_review_reports_omissions_and_honors_cancellation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = fixture(temp.path());
+    let mut page = project.load(1).unwrap();
+    page.content.blocks = vec![block(&"2023-02-29 ".repeat(1100), 0.1, 0.9)];
+    project.save(&page).unwrap();
+    let report = notegen::numeric_integrity::check(&project, &Control::default()).unwrap();
+    assert_eq!(report.issues.len(), 1000);
+    assert_eq!(report.omitted_issues, 100);
+    let c = Control::default();
+    c.cancelled.store(true, Ordering::Relaxed);
+    assert!(notegen::numeric_integrity::check(&project, &c).is_err());
+}
 fn block(text: &str, top: f32, bottom: f32) -> Block {
     Block {
         text: text.into(),

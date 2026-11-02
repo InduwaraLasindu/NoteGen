@@ -19,6 +19,7 @@ pub mod localization;
 pub mod maintenance;
 pub mod models;
 pub mod motion;
+pub mod numeric_integrity;
 pub mod parsing;
 pub mod pipeline;
 pub mod planning;

@@ -13,6 +13,7 @@ pub(super) struct Experience {
     previous_threads: Option<usize>,
     pub error: String,
     search: String,
+    focus_settings: bool,
     live: telemetry::Preview,
     texture: Option<egui::TextureHandle>,
 }
@@ -65,6 +66,32 @@ impl Desktop {
     pub fn settings_open(&mut self, tab: usize) {
         self.experience.open = true;
         self.experience.tab = tab.min(3);
+        self.experience.focus_settings = true;
+    }
+    /// A stable live region for discrete task results, never streamed reader text.
+    /// This updates the accessibility tree without interrupting keyboard focus.
+    pub(super) fn accessible_status(
+        ui: &mut egui::Ui,
+        id: &'static str,
+        text: &str,
+        is_error: bool,
+    ) -> egui::Response {
+        let scope = ui.make_persistent_id(id);
+        ui.scope_builder(egui::UiBuilder::new().scope_id(scope), |ui| {
+            let response = if is_error {
+                ui.colored_label(Color32::LIGHT_RED, text)
+            } else {
+                ui.label(text)
+            };
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                node.set_role(egui::accesskit::Role::Status);
+                node.set_label(text);
+                node.set_live(egui::accesskit::Live::Polite);
+                node.set_live_atomic();
+            });
+            response
+        })
+        .inner
     }
     fn request_update_check(&mut self, ctx: &egui::Context) {
         if self.experience.checking {
@@ -152,8 +179,18 @@ impl Desktop {
                         let fit = (columns[0].available_width() / texture.size_vec2().x)
                             .min(240. / texture.size_vec2().y)
                             .min(1.);
-                        let response = columns[0].image((texture.id(), texture.size_vec2() * fit));
+                        let response = columns[0].add(
+                            egui::Image::new((texture.id(), texture.size_vec2() * fit)).alt_text(
+                                format!("Source page {} for {}", self.experience.live.page, self.experience.live.reader),
+                            ),
+                        );
                         if let Some(b) = &self.experience.live.region {
+                            columns[0].ctx().accesskit_node_builder(response.id, |node| {
+                                node.set_description(format!(
+                                    "Highlighted region: left {:.0}%, top {:.0}%, right {:.0}%, bottom {:.0}% of source page.",
+                                    b.left * 100., b.top * 100., b.right * 100., b.bottom * 100.,
+                                ));
+                            });
                             let r = response.rect;
                             let region = egui::Rect::from_min_max(
                                 egui::pos2(
@@ -185,7 +222,11 @@ impl Desktop {
                                 .as_deref()
                                 .filter(|t| !t.is_empty())
                                 .unwrap_or("Waiting for the reader's first answer text…");
-                            ui.label(RichText::new(draft).monospace().size(12.));
+                            let response = ui.label(RichText::new(draft).monospace().size(12.));
+                            ui.ctx().accesskit_node_builder(response.id, |node| {
+                                node.set_description("Generated draft, may change before review.");
+                                node.set_live(egui::accesskit::Live::Off);
+                            });
                         });
                 });
                 if ui.small_button("Clear live view").clicked() {
@@ -198,9 +239,13 @@ impl Desktop {
             return;
         }
         let mut open = true;
+        let focus_settings = std::mem::take(&mut self.experience.focus_settings);
         egui::Window::new("Settings").open(&mut open).default_size([760.,620.]).resizable(true).show(ctx,|ui| {
             ui.horizontal_wrapped(|ui| {
-                for (index,title) in ["Everyday settings","Updates & installation","Hardware test","Setting descriptions"].iter().enumerate() { ui.selectable_value(&mut self.experience.tab,index,*title); }
+                for (index,title) in ["Everyday settings","Updates & installation","Hardware test","Setting descriptions"].iter().enumerate() {
+                    let response = ui.selectable_value(&mut self.experience.tab,index,*title);
+                    if focus_settings && index == self.experience.tab { response.request_focus(); }
+                }
             }); ui.separator();
             egui::ScrollArea::vertical().max_height(620.).show(ui,|ui| {
                 match self.experience.tab {
@@ -210,7 +255,7 @@ impl Desktop {
                             egui::ComboBox::from_label(crate::localization::text(self.state.settings.ui.locale,"interface_language")).selected_text(self.state.settings.ui.locale.label()).show_ui(ui,|ui|{for locale in crate::localization::locales(){ui.selectable_value(&mut self.state.settings.ui.locale,locale,locale.label());}});
                             ui.small(crate::localization::coverage_note());
                             egui::ComboBox::from_label("Quality").selected_text(format!("{:?}",self.state.settings.preset)).show_ui(ui,|ui| { for p in [Preset::Fast,Preset::Balanced,Preset::Accuracy,Preset::Maximum] { ui.selectable_value(&mut self.state.settings.preset,p,format!("{p:?}")); } }); help(ui,"preset");
-                            ui.add_space(8.); ui.label("OCR languages"); ui.text_edit_singleline(&mut self.state.settings.languages); help(ui,"languages");
+                            ui.add_space(8.); let label = ui.label("OCR languages"); ui.text_edit_singleline(&mut self.state.settings.languages).labelled_by(label.id); help(ui,"languages");
                             ui.checkbox(&mut self.state.settings.deskew,"Straighten tilted scans"); help(ui,"deskew");
                             ui.checkbox(&mut self.state.settings.auto_rotate,"Detect page orientation"); help(ui,"auto_rotate");
                             ui.checkbox(&mut self.state.settings.assistance.ask_questions,"Ask me about unclear writing"); help(ui,"assistance.ask_questions");
@@ -229,12 +274,12 @@ impl Desktop {
                     2 => self.tuning_ui(ui,ctx),
                     _ => {
                         ui.heading("Configuration reference"); ui.label("Search by setting name or description. All options are editable in Advanced, including raw JSON.");
-                        ui.add(egui::TextEdit::singleline(&mut self.experience.search).hint_text("Search settings…"));
+                        ui.add(egui::TextEdit::singleline(&mut self.experience.search).hint_text("Search settings…")).accessible_name("Search setting names and descriptions");
                         let query=self.experience.search.to_lowercase();
                         for (key,description) in settings_help::GUIDE { if query.is_empty() || key.contains(&query) || description.to_lowercase().contains(&query) { ui.add_space(7.); ui.strong(*key); ui.label(*description); } }
                     }
                 }
-                if !self.experience.error.is_empty() { ui.colored_label(Color32::LIGHT_RED,&self.experience.error); }
+                if !self.experience.error.is_empty() { Self::accessible_status(ui,"settings-error",&self.experience.error,true); }
             });
         });
         self.experience.open = open;
@@ -277,6 +322,25 @@ impl Desktop {
             .clicked()
         {
             self.request_update_check(ctx);
+        }
+        if self.experience.checking {
+            Self::accessible_status(
+                ui,
+                "publisher-check-status",
+                "Checking publishers for updates.",
+                false,
+            );
+        } else if let Some(report) = &self.experience.updates {
+            Self::accessible_status(
+                ui,
+                "publisher-check-status",
+                &format!(
+                    "Update check finished: {} updates available; {} components could not be checked.",
+                    report.count(),
+                    report.errors.len()
+                ),
+                false,
+            );
         }
         if let Some(report) = self.experience.updates.clone() {
             ui.small(format!("Last checked: {}", report.checked_at));
@@ -490,5 +554,184 @@ mod preview_tests {
         app.experience
             .preview(telemetry::Preview::draft(1, "late text"), &ctx);
         assert!(app.experience.live.draft.is_none());
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::*;
+    use egui::accesskit::{Live, Role, TreeUpdate};
+
+    fn tree(ctx: &egui::Context, mut render: impl FnMut(&mut egui::Ui)) -> TreeUpdate {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200., 1100.),
+                )),
+                ..Default::default()
+            },
+            |ui| render(ui),
+        );
+        output.textures_delta.clear();
+        output.platform_output.accesskit_update.take().unwrap()
+    }
+
+    fn named_node<'a>(tree: &'a TreeUpdate, name: &str, role: Role) -> &'a egui::accesskit::Node {
+        &tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == role
+                    && (node.label() == Some(name)
+                        || node.labelled_by().iter().any(|label| {
+                            tree.nodes
+                                .iter()
+                                .any(|(id, target)| id == label && target.label() == Some(name))
+                        }))
+            })
+            .unwrap_or_else(|| panic!("Missing accessible name: {name}, role: {role:?}"))
+            .1
+    }
+
+    #[test]
+    fn settings_inputs_have_persistent_meaningful_accessible_names() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = Desktop::new(Workspace::default());
+        app.settings_open(0);
+        tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        let everyday = tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        assert_eq!(
+            named_node(&everyday, "OCR languages", Role::TextInput).role(),
+            Role::TextInput
+        );
+        app.settings_open(3);
+        tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        let reference = tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        assert_eq!(
+            named_node(
+                &reference,
+                "Search setting names and descriptions",
+                Role::TextInput
+            )
+            .role(),
+            Role::TextInput
+        );
+    }
+
+    #[test]
+    fn opening_settings_focuses_selected_tab_once_without_stealing_subsequent_focus() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = Desktop::new(Workspace::default());
+        app.settings_open(2);
+        tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        let selected = tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        let focused = selected.nodes.iter().find(|(id, _)| *id == selected.focus);
+        assert_eq!(focused.unwrap().1.label(), Some("Hardware test"));
+
+        let mut outside = None;
+        let next = tree(&ctx, |ui| {
+            let response = ui.button("Outside settings");
+            outside = Some(response.id);
+            response.request_focus();
+            app.settings_ui(ui.ctx());
+        });
+        assert_eq!(next.focus, outside.unwrap().accesskit_id());
+        assert!(!app.experience.focus_settings);
+    }
+
+    #[test]
+    fn task_status_is_polite_atomic_stable_and_does_not_take_focus() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut focus = None;
+        let mut render = |ui: &mut egui::Ui, changed: bool| {
+            let button = ui.button("Continue reviewing");
+            focus = Some(button.id);
+            button.request_focus();
+            if changed {
+                ui.label("Additional task details");
+            }
+            Desktop::accessible_status(
+                ui,
+                "test-status",
+                if changed {
+                    "Export failed"
+                } else {
+                    "Export started"
+                },
+                changed,
+            );
+        };
+        let first = tree(&ctx, |ui| render(ui, false));
+        let second = tree(&ctx, |ui| render(ui, true));
+        let first_id = first
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::Status)
+            .unwrap()
+            .0;
+        let (second_id, node) = second
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::Status)
+            .unwrap();
+        assert_eq!(first_id, *second_id);
+        assert_eq!(node.label(), Some("Export failed"));
+        assert_eq!(node.live(), Some(Live::Polite));
+        assert!(node.is_live_atomic());
+        assert_eq!(second.focus, focus.unwrap().accesskit_id());
+    }
+
+    #[test]
+    fn publisher_result_and_settings_error_are_announced_without_document_text() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = Desktop::new(Workspace::default());
+        app.experience.updates = Some(maintenance::Report::default());
+        app.experience.error = "Cannot save the selected hardware report".into();
+        app.settings_open(1);
+        tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        let result = tree(&ctx, |ui| app.settings_ui(ui.ctx()));
+        for label in [
+            "Update check finished: 0 updates available; 0 components could not be checked.",
+            "Cannot save the selected hardware report",
+        ] {
+            let node = named_node(&result, label, Role::Status);
+            assert_eq!(node.role(), Role::Status);
+            assert_eq!(node.live(), Some(Live::Polite));
+        }
+    }
+
+    #[test]
+    fn source_image_is_named_and_generated_draft_is_not_a_live_announcement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.png");
+        image::DynamicImage::new_rgb8(32, 48).save(&path).unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = Desktop::new(Workspace::default());
+        app.experience.preview(
+            telemetry::Preview::source(path, 7, "Local reader", Some(BoxRect::full())),
+            &ctx,
+        );
+        app.experience
+            .preview(telemetry::Preview::draft(7, "PRIVATE DRAFT"), &ctx);
+        tree(&ctx, |ui| app.live_preview_ui(ui));
+        let result = tree(&ctx, |ui| app.live_preview_ui(ui));
+        let source = named_node(&result, "Source page 7 for Local reader", Role::Image);
+        assert_eq!(source.role(), Role::Image);
+        assert!(source.description().unwrap().contains("Highlighted region"));
+        let draft = named_node(&result, "PRIVATE DRAFT", Role::Label);
+        assert_eq!(draft.live(), Some(Live::Off));
+        assert_ne!(draft.role(), Role::Status);
+        assert!(!result.nodes.iter().any(|(_, node)| {
+            matches!(node.live(), Some(Live::Polite | Live::Assertive))
+                && node
+                    .label()
+                    .is_some_and(|text| text.contains("PRIVATE DRAFT"))
+        }));
     }
 }

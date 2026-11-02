@@ -232,14 +232,8 @@ pub fn convert(
                 "Preparing source pages",
             );
             if image.exists()
-                && fs::File::open(&checkpoint)
-                    .ok()
-                    .and_then(|f| serde_json::from_reader::<_, Page>(f).ok())
-                    .is_some_and(|p| {
-                        p.page == n
-                            && p.image == format!("page-{n:05}.png")
-                            && p.content.validate().is_ok()
-                    })
+                && read_json::<Page>(&checkpoint, 32_000_000)
+                    .is_ok_and(|p| p.page == n && p.validate().is_ok())
             {
                 log.emit(
                     "cached",

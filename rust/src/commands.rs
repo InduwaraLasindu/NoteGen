@@ -94,7 +94,7 @@ pub enum Action {
     },
     ProjectChecks {
         project: PathBuf,
-        #[arg(value_parser=["scripts","recurring","references","consistency","technical"])]
+        #[arg(value_parser=["scripts","recurring","references","consistency","technical","numeric"])]
         kind: String,
     },
     ApplyRecurring {
@@ -233,6 +233,13 @@ pub enum Action {
         corners: PathBuf,
         width: u32,
         height: u32,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Flatten a photographed page using explicit top/bottom curves; retain the original.
+    UnwarpScan {
+        input: PathBuf,
+        options: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -568,6 +575,7 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
                 "recurring" => print(notegen::document_tools::recurring_elements(&p, c)?),
                 "references" => print(notegen::document_tools::reference_links(&p, c)?),
                 "consistency" => print(notegen::document_tools::consistency_suggestions(&p, c)?),
+                "numeric" => print(notegen::numeric_integrity::check(&p, c)?),
                 _ => print(notegen::document_tools::technical_checks(&p, c)?),
             }
         }
@@ -804,6 +812,16 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
                 c,
             )?;
             notegen::scan_tools::write_image(&result, &output, c)
+        }
+        Action::UnwarpScan {
+            input,
+            options,
+            output,
+        } => {
+            let im = notegen::writers::open_image(&input, 40_000_000)?;
+            let page =
+                notegen::scan_tools::unwarp_curved_page(&im, &read_json(&options, 100_000)?, c)?;
+            print(notegen::scan_tools::export_curved_page(&page, &output, c)?)
         }
         Action::SplitScan {
             input,

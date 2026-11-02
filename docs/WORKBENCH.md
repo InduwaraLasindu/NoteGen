@@ -31,6 +31,8 @@ notegen-cli convert scan-folder -o notes.docx --preset fast
 notegen-cli tools search "total" path/to/project
 notegen-cli tools recovery path/to/project
 notegen-cli tools timeline path/to/project
+notegen-cli tools project-checks path/to/project numeric
+notegen-cli tools project-checks path/to/project consistency
 notegen-cli tools undo path/to/project
 notegen-cli tools export path/to/project --format xlsx -o tables.xlsx
 notegen-cli tools profile-coverage WRITER_ID
@@ -40,6 +42,8 @@ notegen-cli tools font-proof WRITER_ID -o proof.html
 ```
 
 Use `--settings` before the command for a saved configuration. `tools score` reports character, word, exact-number and table-cell errors separately. `tools calibrate` reads only the calibration split and reports empirical bins with sample counts and intervals. No natural-handwriting corpus or universal accuracy score is bundled.
+
+The numeric check flags impossible ISO/slash dates, ambiguous date order, repeated signs and unusual separator patterns. It assumes no decimal locale and does not rewrite values. The consistency check links unit and labelled-identifier variants across pages. Intentional code, version numbers and distinct identifiers can explain a suggestion; compare the source.
 
 Profile sharing requires an inspected selection preview token. Quarantined examples retain a reason and can be restored; they are excluded from active recognition and generated glyphs. Font proof sheets include missing-glyph warnings. They do not imply complete cursive shaping or additional-script support.
 
@@ -65,6 +69,14 @@ The optional printed-OCR packs come from an immutable official Tesseract revisio
 ```
 
 `cleanup-scan` writes the original and cleanup variants to a new folder. `perspective-scan` reads four normalized points in top-left, top-right, bottom-right, bottom-left order. `split-scan` retains the original and gutter relationships. `redact-scan` writes an opaque PNG copy for explicit rectangles; it does not redact text exports or project metadata automatically. Each tool has `--help` and protects existing outputs.
+
+`unwarp-scan photo.png curves.json -o flattened-copy` applies manual vertical curved-page correction. Supply output dimensions and 2–128 normalized samples for the top and bottom source curves, spanning `x=0` to `x=1`:
+
+```json
+{"width":1200,"height":1600,"knots":[{"x":0,"top":0.05,"bottom":0.95},{"x":0.5,"top":0.1,"bottom":0.9},{"x":1,"top":0.05,"bottom":0.95}]}
+```
+
+The new folder retains `original.png`, `corrected.png` and a hashed `relationship.json` with continuous coordinate mappings and pixel-change diagnostics. This flattens the supplied vertical geometry; it does not detect page shape or reconstruct a 3D surface. Cropped margins remain in the original. Inspect thin strokes and distorted regions before converting the corrected copy.
 
 ## Word corrections and mathematics
 
