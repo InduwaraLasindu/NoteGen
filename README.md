@@ -1,6 +1,6 @@
 <!-- Latest release features -->
 
-**0.4.0:** AI setup directly in the Windows installer, verified model/runtime updates, measured hardware tuning, live source-and-draft preview, and clearer settings with a searchable configuration reference. [Release details](docs/RELEASE_0.4.0.md).
+**0.4.1:** Correct live source previews during context re-reads, protection against stale draft updates, and hardware-preview cleanup. Includes the 0.4 AI installer, updates, hardware tuning and settings improvements. [Patch details](docs/RELEASE_0.4.1.md).
 
 # NoteGen
 

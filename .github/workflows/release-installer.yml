@@ -1,8 +1,5 @@
 name: Windows installer and GitHub Release
 on:
-  push:
-    branches: [main]
-    paths: ['installer/**', 'scripts/Build-Installer.ps1', 'scripts/Test-Installer.ps1', 'scripts/Configure-AI.ps1', '.github/workflows/release-installer.yml']
   workflow_run:
     workflows: [Rust verification and Windows executable]
     types: [completed]
@@ -11,7 +8,7 @@ on:
     inputs:
       version:
         description: Installer release version
-        default: '0.4.0'
+        default: '0.4.1'
         required: true
       source_run:
         description: Successful Rust verification workflow run
@@ -28,7 +25,7 @@ concurrency:
 jobs:
   installer:
     if: >-
-      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
@@ -39,9 +36,9 @@ jobs:
       source_sha: ${{ steps.payload.outputs.source_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_VERSION: ${{ inputs.version || '0.4.0' }}
-      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '41346953925' }}
-      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || 'fc6738922742685d8a12882c9b591b43003b01dc' }}
+      RELEASE_VERSION: ${{ inputs.version || '0.4.1' }}
+      SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '' }}
+      SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -105,16 +102,16 @@ jobs:
       - name: Download the previous published installer for cross-version upgrade testing
         shell: pwsh
         run: |
-          & gh release download v0.3.0 --repo $env:GITHUB_REPOSITORY --pattern NoteGen-Setup-0.3.0.exe --dir build/previous-installer
+          & gh release download v0.4.0 --repo $env:GITHUB_REPOSITORY --pattern NoteGen-Setup-0.4.0.exe --dir build/previous-installer
           if($LASTEXITCODE -ne 0){throw 'Previous installer download failed'}
-          if((Get-FileHash build/previous-installer/NoteGen-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9c64831e0b10e8d32bb57b3faf89df7a242dbb089533cb6cd3f00545de02501e'){throw 'Previous installer checksum mismatch'}
+          if((Get-FileHash build/previous-installer/NoteGen-Setup-0.4.0.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9e47738f2663017886a05f42a5bddfd35a6cd1a9ec6aa421c550f79c0e2de179'){throw 'Previous installer checksum mismatch'}
       - name: Install, launch, upgrade and uninstall the actual EXE
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $test=(Resolve-Path ./scripts/Test-Installer.ps1).Path
           $setup=(Resolve-Path "./dist/installer/NoteGen-Setup-$env:RELEASE_VERSION.exe").Path
-          $previous=(Resolve-Path "./build/previous-installer/NoteGen-Setup-0.3.0.exe").Path
+          $previous=(Resolve-Path "./build/previous-installer/NoteGen-Setup-0.4.0.exe").Path
           $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $test),'-Installer',('"{0}"' -f $setup),'-Version',$env:RELEASE_VERSION,'-PreviousInstaller',('"{0}"' -f $previous))
           $process=Start-Process pwsh -ArgumentList $arguments -PassThru -NoNewWindow
           $watch=[Diagnostics.Stopwatch]::StartNew();$nextLog=0
@@ -147,22 +144,22 @@ jobs:
           shortcuts and an optional desktop shortcut are included. Uninstall from Windows
           Settings; user models and document data are preserved.
 
-          Version 0.4.0 adds AI installation directly in this installer, with live download
-          progress, cancellation and resumable verified downloads. The default AI selection
-          installs all fitting reader families needed for Maximum Accuracy on this PC.
-          Printed OCR, PDF rendering, English data and native dependencies are included.
+          Version 0.4.1 fixes live previews during context-assisted re-reading. The
+          current source page and reader are announced before inference, and stale
+          draft text cannot appear beside another page or revive a cleared view.
+          Clearing or disabling previews releases their textures. Temporary hardware
+          test previews are cleaned up after success, cancellation and errors, and
+          image previews respect the graphics adapter's texture limit.
 
-          Settings now includes an update center for models, the native AI runtime and
-          bundled app dependencies, a measured synthetic hardware optimization test,
-          understandable everyday controls and a searchable description of every setting.
-          A live AI view shows the current source/crop and streamed draft recognition.
-          The master bar estimates remaining work across readers, crops, export and queue.
-          All conversion stays local. No Python or Rust installation is needed.
+          Includes the 0.4 installer AI setup, model/runtime updates, hardware testing,
+          master progress estimates, writer tools, clearer settings and local Word export.
+          Keep local AI selected in the wizard to download the fitting reader set.
 
-          Validation includes the full test suite on Windows and Linux, real CPU inference
-          with three independent AI families, exact-number/table/figure checks, writer
-          references, a real installer AI-setup run, upgrade from 0.3.0, native dependencies,
-          GUI launch, Word/font export, reinstall, cancellation and retained user data.
+          Validation includes 109 ordinary tests per OS, strict formatting/Clippy,
+          native raster-PDF OCR, a context re-read regression that fails before the fix,
+          real CPU inference with three AI families, Maximum conversion and hardware
+          probes, plus actual installer AI setup, upgrade from 0.4.0, GUI/Word/font
+          export, cancellation, reinstall and uninstall/data retention.
           The executable payload is from successful run $env:SOURCE_RUN at $env:SOURCE_SHA.
           GPU performance and broad natural-handwriting accuracy remain unmeasured.
 

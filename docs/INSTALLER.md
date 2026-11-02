@@ -51,3 +51,5 @@ the official SHA256-pinned Inno Setup 7.1.1 compiler. It tests installation in a
 containing spaces and checks preservation of user-created files before publishing.
 The AI setup dry run performs no downloads. This pipeline does not repeat unaffected
 Rust/model tests; those are attached to the verified source build.
+
+Version 0.4.1 corrects live preview source selection and cleanup. See [patch details](RELEASE_0.4.1.md).

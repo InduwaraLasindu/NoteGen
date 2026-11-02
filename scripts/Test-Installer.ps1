@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.4.0',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='')
+param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.4.1',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='')
 $ErrorActionPreference='Stop'
 $Installer=(Resolve-Path $Installer).Path
 New-Item -ItemType Directory -Force $Evidence | Out-Null
@@ -53,19 +53,19 @@ try {
  if($PreviousInstaller){
   $newInstaller=$Installer
   $Installer=(Resolve-Path $PreviousInstaller).Path
-  Install-NoteGen 'previous-0.3-install'
+  Install-NoteGen 'previous-0.4-install'
  Write-Host "[QA] Previous installation: CLI version"
   $previousVersion=& (Join-Path $installDir 'notegen-cli.exe') --version
-  if($LASTEXITCODE -ne 0 -or $previousVersion -notmatch '0\.3\.0'){throw 'Previous installer did not contain NoteGen 0.3.0.'}
-  Test-Desktop 'previous 0.3 installation'
+  if($LASTEXITCODE -ne 0 -or $previousVersion -notmatch '0\.4\.0'){throw 'Previous installer did not contain NoteGen 0.4.0.'}
+  Test-Desktop 'previous 0.4 installation'
   New-Item -ItemType Directory -Force (Join-Path $installDir 'user-data') | Out-Null
-  $legacyMarker=Join-Path $installDir 'user-data/legacy-0.3-document.txt'
-  [IO.File]::WriteAllText($legacyMarker,'EXISTING 0.3 DATA MUST SURVIVE')
+  $legacyMarker=Join-Path $installDir 'user-data/legacy-0.4-document.txt'
+  [IO.File]::WriteAllText($legacyMarker,'EXISTING 0.4 DATA MUST SURVIVE')
   $Installer=$newInstaller
  }
  Install-NoteGen 'install'
- if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING 0.3 DATA MUST SURVIVE'){throw 'Version 0.3 to 0.4 upgrade changed user data.'}
- if($PreviousInstaller){$results.Add('Real 0.3.0 to 0.4.0 upgrade preserved existing user data and updated the executable')}
+ if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING 0.4 DATA MUST SURVIVE'){throw 'Version 0.4.0 to 0.4.1 upgrade changed user data.'}
+ if($PreviousInstaller){$results.Add('Real 0.4.0 to 0.4.1 upgrade preserved existing user data and updated the executable')}
 
  foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/tesseract/tesseract.exe','runtime/llama-server.exe','vcruntime140.dll','runtime/vcruntime140.dll','scripts/Configure-AI.ps1','unins000.exe')) {
   if(-not(Test-Path (Join-Path $installDir $f))){throw "Installed dependency missing: $f"}
