@@ -67,6 +67,85 @@ fn preview_hides_reasoning_tags_including_incomplete_stream_fragments() {
     );
 }
 #[test]
+fn live_drafts_cannot_replace_a_different_page_or_resurrect_a_cleared_view() {
+    use telemetry::{Change, Preview};
+    let mut live = Preview::default();
+    assert_eq!(
+        live.apply(Preview::source(
+            "page-2.png".into(),
+            2,
+            "first reader",
+            None
+        )),
+        Change::SourceChanged
+    );
+    assert_eq!(
+        live.apply(Preview::draft(2, "draft for page 2")),
+        Change::Draft
+    );
+    assert_eq!(
+        live.apply(Preview::source("page-7.png".into(), 7, "re-read", None)),
+        Change::SourceChanged
+    );
+    assert_eq!(live.draft.as_deref(), Some(""));
+    assert_eq!(
+        live.apply(Preview::draft(2, "stale draft")),
+        Change::Ignored
+    );
+    assert_eq!(live.draft.as_deref(), Some(""));
+    assert_eq!(
+        live.apply(Preview::draft(7, "current draft")),
+        Change::Draft
+    );
+    assert_eq!(live.reader, "re-read");
+    assert_eq!(live.apply(Preview::clear()), Change::Cleared);
+    assert!(live.clear);
+    assert!(live.image.is_none() && live.draft.is_none());
+    assert_eq!(live.apply(Preview::draft(7, "late draft")), Change::Ignored);
+    assert!(live.draft.is_none());
+}
+#[test]
+fn another_reader_and_crop_on_the_same_image_reset_the_visible_draft() {
+    use telemetry::{Change, Preview};
+    let mut live = Preview::source("page.png".into(), 3, "full page", None);
+    live.apply(Preview::draft(3, "full-page answer"));
+    let region = BoxRect {
+        left: 0.1,
+        top: 0.2,
+        right: 0.6,
+        bottom: 0.8,
+    };
+    assert_eq!(
+        live.apply(Preview::source(
+            "page.png".into(),
+            3,
+            "crop reader",
+            Some(region)
+        )),
+        Change::SourceRetained
+    );
+    assert_eq!(live.reader, "crop reader");
+    assert_eq!(live.draft.as_deref(), Some(""));
+    assert_eq!(live.region.unwrap().left, 0.1);
+}
+#[test]
+fn legacy_preview_events_still_decode_and_empty_path_resets_clear_state() {
+    use telemetry::{Change, Preview};
+    let mut value =
+        serde_json::to_value(Preview::source("page.png".into(), 1, "reader", None)).unwrap();
+    value.as_object_mut().unwrap().remove("clear");
+    let mut live: Preview = serde_json::from_value(value).unwrap();
+    assert!(!live.clear);
+    assert_eq!(
+        live.apply(Preview {
+            image: Some(Default::default()),
+            ..Default::default()
+        }),
+        Change::Cleared
+    );
+    assert!(live.image.is_none());
+}
+#[test]
 fn live_and_update_preferences_do_not_invalidate_recognition_checkpoints() {
     let a = Settings::default();
     let mut b = a.clone();

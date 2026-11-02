@@ -995,6 +995,14 @@ pub fn reconsider(
             pages.len(),
             "",
         );
+        if s.experience.live_preview {
+            log.preview(crate::telemetry::Preview::source(
+                project.image(n),
+                n,
+                &model.name,
+                None,
+            ));
+        }
         let content = server.read(&image, "", &subject, &s, c, log, n)?;
         attach_context_reading(&mut page, &content, &model);
         project.save(&page)?;

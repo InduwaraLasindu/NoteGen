@@ -487,6 +487,152 @@ fn visual_writer_examples_reach_a_third_party_local_server_as_a_separate_image()
 }
 
 #[test]
+fn contextual_reread_previews_its_own_page_and_respects_the_disabled_setting() {
+    use notegen::{models, pipeline, planning, storage::*};
+    use std::{
+        io::Write,
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+    for enabled in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let start = Instant::now();
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && start.elapsed() < Duration::from_secs(10) =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(e) => {
+                            panic!("Local test server did not receive the expected request: {e}")
+                        }
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut headers = vec![];
+                let mut byte = [0];
+                while socket.read_exact(&mut byte).is_ok() {
+                    headers.push(byte[0]);
+                    assert!(headers.len() < 16000);
+                    if headers.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let headers = String::from_utf8(headers).unwrap();
+                let size = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|n| n.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                assert!(size < 1_000_000);
+                let mut body = vec![0; size];
+                socket.read_exact(&mut body).unwrap();
+                let response = if headers.starts_with("GET ") {
+                    serde_json::json!({"data":[{"id":"preview-reader"}]}).to_string()
+                } else {
+                    let content=serde_json::json!({"blocks":[{"kind":"text","text":"Alternative 1250"}],"warnings":[],"summary":"Alternative"}).to_string();
+                    serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}).to_string()
+                };
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+            }
+        });
+        let mut settings = Settings {
+            backend: Backend::Cpu,
+            models_dir: temp.path().join("models"),
+            ..Default::default()
+        };
+        settings.experience.live_preview = enabled;
+        let mut model = planning::catalog()
+            .into_iter()
+            .find(|m| m.role == "vision" && m.prompt == "structured")
+            .unwrap();
+        model.id = "preview-reader".into();
+        model.name = "Preview test reader".into();
+        model.family = "preview-test".into();
+        model.endpoint = Some(endpoint);
+        model.alias = "preview-reader".into();
+        models::save_custom(&settings.models_dir, model, &Control::default()).unwrap();
+        let project = Project::open(
+            temp.path().join("project"),
+            Manifest {
+                schema: 2,
+                input_sha256: "input".into(),
+                fingerprint: "fixture".into(),
+                pages: vec![1, 2],
+                models: vec![],
+                settings: settings.clone(),
+            },
+        )
+        .unwrap();
+        ink().save(project.image(2)).unwrap();
+        project
+            .save(&Page {
+                page: 2,
+                image: "page-00002.png".into(),
+                edited: true,
+                content: PageContent {
+                    blocks: vec![Block::text("Confirmed 1250")],
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let log = Activity {
+            path: None,
+            callback: Some(Arc::new(move |e| {
+                if let Some(p) = e.preview {
+                    captured.lock().unwrap().push(p);
+                }
+            })),
+        };
+        let result = pipeline::reconsider(&project, &[2], &settings, &Control::default(), &log);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 1);
+        let events = events.lock().unwrap();
+        if enabled {
+            assert_eq!(
+                events.first().unwrap().image.as_ref(),
+                Some(&project.image(2))
+            );
+            assert_eq!(events.first().unwrap().page, 2);
+            assert_eq!(events.first().unwrap().reader, "Preview test reader");
+            assert!(events.iter().skip(1).any(|p| {
+                p.page == 2
+                    && p.draft
+                        .as_ref()
+                        .is_some_and(|d| d.contains("Alternative 1250"))
+            }));
+        } else {
+            assert!(events.is_empty());
+        }
+        let page = project.load(2).unwrap();
+        assert_eq!(page.content.plain(), "Confirmed 1250");
+        assert!(
+            page.candidates
+                .iter()
+                .any(|c| c.content.plain().contains("Alternative 1250"))
+        );
+    }
+}
+
+#[test]
 fn managed_custom_reader_uses_its_registered_alias_and_extreme_glyphs_stay_in_bounds() {
     use notegen::{models, planning};
     let t = tempfile::tempdir().unwrap();
