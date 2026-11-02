@@ -285,7 +285,7 @@ impl Project {
             p.page == n && p.image == format!("page-{n:05}.png"),
             Fault::new("NG500", "Checkpoint page or source path mismatch")
         );
-        p.content.validate()?;
+        p.validate()?;
         Ok(p)
     }
     pub fn save(&self, p: &Page) -> Result<()> {
@@ -293,7 +293,7 @@ impl Project {
             self.manifest.pages.contains(&p.page) && p.image == format!("page-{:05}.png", p.page),
             Fault::new("NG500", "Checkpoint page or source path mismatch")
         );
-        p.content.validate()?;
+        p.validate()?;
         let path = if p.edited || p.reviewed {
             self.root.join(format!("page-{:05}.edits.json", p.page))
         } else {

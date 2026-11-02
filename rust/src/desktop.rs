@@ -167,6 +167,8 @@ struct Review {
     zoom: f32,
     heatmap: bool,
     issues: Vec<crate::review::Issue>,
+    issue_page: usize,
+    issue_notice: String,
     revision_name: String,
     texture: Option<egui::TextureHandle>,
     selected: usize,
@@ -188,7 +190,7 @@ impl Review {
         let texture = crate::writers::open_image(&project.image(n), 40_000_000)
             .ok()
             .map(|im| {
-                let limit = ctx.input(|i| i.max_texture_side).min(2048) as u32;
+                let limit = ctx.input(|i| i.max_texture_side).clamp(1, 2048) as u32;
                 let rgba = im
                     .thumbnail(im.width().min(limit), im.height().min(limit))
                     .to_rgba8();
@@ -202,7 +204,15 @@ impl Review {
                 )
             });
         let raw = serde_json::to_string_pretty(&page.content)?;
-        let issues = crate::review::issues(&project).unwrap_or_default();
+        let (issues, issue_notice) = match crate::review::issues(&project) {
+            Ok(issues) => (issues, String::new()),
+            Err(e) => (
+                vec![],
+                format!(
+                    "Review queue could not be refreshed: {e}. Open Recovery to inspect other checkpoints."
+                ),
+            ),
+        };
         Ok(Self {
             project,
             index,
@@ -211,6 +221,8 @@ impl Review {
             zoom: 1.,
             heatmap: true,
             issues,
+            issue_page: 0,
+            issue_notice,
             revision_name: String::new(),
             texture,
             selected: 0,

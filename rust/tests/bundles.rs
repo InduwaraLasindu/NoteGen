@@ -81,7 +81,7 @@ fn offline_preview_lists_exact_bytes_hashes_and_excludes_private_settings_paths_
     assert_eq!(preview.files.len(), 2);
     assert_eq!(
         preview.total_bytes,
-        preview.files.iter().map(|f| f.bytes).sum()
+        preview.files.iter().map(|f| f.bytes).sum::<u64>()
     );
     assert!(preview.readers[0].model.weights.as_os_str().is_empty());
     assert!(preview.readers[0].model.projector.as_os_str().is_empty());

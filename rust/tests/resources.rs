@@ -153,3 +153,85 @@ fn time_budgets_reject_nonfinite_negative_and_duplicate_inputs() {
     assert!(time_budget(&[j.clone(), j], 10.).is_err());
     assert!(time_budget(&[], 0.).unwrap().jobs.is_empty());
 }
+#[test]
+fn persisted_resource_preview_roundtrips_and_preserves_unrelated_settings() {
+    let mut s = Settings::default();
+    let before = serde_json::to_value(&s).unwrap();
+    let original = preview(
+        &s,
+        &hardware(),
+        PowerProfile::Battery,
+        &Reservations::default(),
+    )
+    .unwrap();
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let restored: ResourcePreview = serde_json::from_slice(&bytes).unwrap();
+    restored.apply(&mut s).unwrap();
+    s.subject = "Keep this unrelated edit".into();
+    restored.undo(&mut s).unwrap();
+    assert_eq!(s.subject, "Keep this unrelated edit");
+    s.subject.clear();
+    assert_eq!(serde_json::to_value(s).unwrap(), before);
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(!text.contains("models_dir"));
+    assert!(!text.contains("endpoint"));
+    assert!(!text.contains("subject"));
+}
+#[test]
+fn persisted_previews_reject_invalid_apply_and_undo_values_without_mutation() {
+    let original_settings = Settings::default();
+    let valid = preview(
+        &original_settings,
+        &hardware(),
+        PowerProfile::Quiet,
+        &Reservations::default(),
+    )
+    .unwrap();
+    for (field, value) in [
+        ("cpu_threads", serde_json::json!(513)),
+        ("ram_fraction", serde_json::json!(2.0)),
+        ("vram_fraction", serde_json::json!(-0.1)),
+        ("fps", serde_json::json!(0)),
+        ("idle_fps", serde_json::json!(61)),
+    ] {
+        let mut tampered = serde_json::to_value(&valid).unwrap();
+        tampered["after"][field] = value;
+        let decoded: ResourcePreview = serde_json::from_value(tampered).unwrap();
+        let mut current = original_settings.clone();
+        let before = serde_json::to_value(&current).unwrap();
+        assert!(decoded.apply(&mut current).is_err());
+        assert_eq!(serde_json::to_value(current).unwrap(), before);
+    }
+    let mut applied = original_settings.clone();
+    valid.apply(&mut applied).unwrap();
+    let before_undo = serde_json::to_value(&applied).unwrap();
+    let mut tampered = serde_json::to_value(&valid).unwrap();
+    tampered["before"]["fps"] = serde_json::json!(0);
+    let decoded: ResourcePreview = serde_json::from_value(tampered).unwrap();
+    assert!(decoded.undo(&mut applied).is_err());
+    assert_eq!(serde_json::to_value(&applied).unwrap(), before_undo);
+    let mut nonfinite = valid;
+    nonfinite.after.ram_fraction = f32::NAN;
+    let mut current = original_settings.clone();
+    assert!(nonfinite.apply(&mut current).is_err());
+    assert_eq!(
+        serde_json::to_value(current).unwrap(),
+        serde_json::to_value(original_settings).unwrap()
+    );
+}
+#[test]
+fn persisted_previews_deny_unrecognized_top_level_and_nested_fields() {
+    let p = preview(
+        &Settings::default(),
+        &hardware(),
+        PowerProfile::Balanced,
+        &Reservations::default(),
+    )
+    .unwrap();
+    let mut value = serde_json::to_value(&p).unwrap();
+    value["private_path"] = serde_json::json!("not allowed");
+    assert!(serde_json::from_value::<ResourcePreview>(value).is_err());
+    let mut value = serde_json::to_value(p).unwrap();
+    value["after"]["endpoint"] = serde_json::json!("not allowed");
+    assert!(serde_json::from_value::<ResourcePreview>(value).is_err());
+}

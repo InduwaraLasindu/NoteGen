@@ -627,3 +627,168 @@ fn manual_recovery_word_export_conspicuously_labels_unverified_source_without_bl
     assert!(preview.fields.iter().all(|f| f.status == "unchanged"));
     assert_eq!(fs::read(f.project.page_path(1)).unwrap(), original);
 }
+fn large_project(text: &str, blocks: usize) -> (tempfile::TempDir, Project, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let project = Project::open(
+        temp.path().join("project"),
+        Manifest {
+            schema: 2,
+            input_sha256: "large-source".into(),
+            fingerprint: "large-settings".into(),
+            pages: vec![1],
+            models: vec![],
+            settings: Settings::default(),
+        },
+    )
+    .unwrap();
+    let mut content = (0..blocks).map(|_| Block::text(text)).collect::<Vec<_>>();
+    content.push(Block::text("LAST BLOCK PRESERVED"));
+    project
+        .save(&Page {
+            page: 1,
+            image: "page-00001.png".into(),
+            content: PageContent {
+                blocks: content,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    let output = temp.path().join("large.docx");
+    (temp, project, output)
+}
+fn inspect_large_fallback(output: &Path, byte: u8, expected: usize, large_xml: bool) {
+    let mut zip = ZipArchive::new(fs::File::open(output).unwrap()).unwrap();
+    assert!(zip.by_name("customXml/item1.xml").is_err());
+    assert!(zip.by_name("customXml/itemProps1.xml").is_err());
+    assert!(zip.by_name("customXml/_rels/item1.xml.rels").is_err());
+    assert!(!text_part(output, "word/_rels/document.xml.rels").contains("customXml"));
+    assert!(!text_part(output, "[Content_Types].xml").contains("customXml"));
+    let mut document = zip.by_name("word/document.xml").unwrap();
+    assert_eq!(document.size() > 32_000_000, large_xml);
+    let mut count = 0;
+    let mut prefix = vec![];
+    let mut tail = vec![];
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = document.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        count += buffer[..read]
+            .iter()
+            .filter(|&&value| value == byte)
+            .count();
+        if prefix.len() < 4096 {
+            let take = (4096 - prefix.len()).min(read);
+            prefix.extend_from_slice(&buffer[..take]);
+        }
+        tail.extend_from_slice(&buffer[..read]);
+        if tail.len() > 4096 {
+            tail.drain(..tail.len() - 4096);
+        }
+    }
+    assert_eq!(count, expected);
+    assert!(String::from_utf8_lossy(&prefix).contains(word::ROUNDTRIP_UNAVAILABLE_NOTICE));
+    let tail = String::from_utf8_lossy(&tail);
+    assert!(tail.contains("LAST BLOCK PRESERVED"));
+    assert!(tail.ends_with("</w:body></w:document>"));
+}
+#[test]
+fn xml_expansion_over_32_mb_exports_every_source_character_with_explicit_bounded_fallback() {
+    let text = "&".repeat(119000);
+    let (_temp, p, output) = large_project(&text, 57);
+    let before = notegen::storage::hash_file(&p.page_path(1), &Control::default()).unwrap();
+    word::export(&p, &output, &Control::default()).unwrap();
+    inspect_large_fallback(&output, b'&', 57 * 119000, true);
+    assert_eq!(
+        notegen::storage::hash_file(&p.page_path(1), &Control::default()).unwrap(),
+        before
+    );
+    let error = roundtrip::preview(&p, &output, &Control::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unavailable") && error.contains("smaller"));
+}
+#[test]
+fn eager_source_text_budget_falls_back_before_the_xml_limit_without_truncation() {
+    let text = "Ž".repeat(50000);
+    let (_temp, p, output) = large_project(&text, 81);
+    let before = notegen::storage::hash_file(&p.page_path(1), &Control::default()).unwrap();
+    word::export(&p, &output, &Control::default()).unwrap();
+    inspect_large_fallback(&output, 0xc5, 81 * 50000, false);
+    assert_eq!(
+        notegen::storage::hash_file(&p.page_path(1), &Control::default()).unwrap(),
+        before
+    );
+}
+#[test]
+fn preview_skips_reader_evidence_and_apply_rejects_aggregate_snapshot_growth_before_any_edit() {
+    let f = fixture();
+    let evidence = PageContent {
+        blocks: (0..11).map(|_| Block::text("e".repeat(100000))).collect(),
+        ..Default::default()
+    };
+    for n in [1, 2] {
+        let mut page = f.project.load(n).unwrap();
+        page.candidates.push(Candidate {
+            region: None,
+            model_id: "evidence-reader".into(),
+            family: "fixture".into(),
+            view: "full".into(),
+            content: evidence.clone(),
+            reliability: 0.9,
+        });
+        f.project.save(&page).unwrap();
+    }
+    let input = edited(
+        &f,
+        "large-evidence.docx",
+        &[
+            ("ng:p1:b0:text", "Chosen correction"),
+            ("ng:p2:b0:text", "Another correction"),
+        ],
+    );
+    let preview = roundtrip::preview(&f.project, &input, &Control::default()).unwrap();
+    assert_eq!(preview.fields.len(), 10);
+    let original1 =
+        notegen::storage::hash_file(&f.project.page_path(1), &Control::default()).unwrap();
+    let original2 =
+        notegen::storage::hash_file(&f.project.page_path(2), &Control::default()).unwrap();
+    let error = roundtrip::apply(
+        &f.project,
+        &input,
+        &preview,
+        &["ng:p1:b0:text".into(), "ng:p2:b0:text".into()],
+        "Too many snapshots",
+        &Control::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("budget") && error.contains("smaller"));
+    assert!(!f.project.root.join("review-history.json").exists());
+    assert_eq!(
+        notegen::storage::hash_file(&f.project.page_path(1), &Control::default()).unwrap(),
+        original1
+    );
+    assert_eq!(
+        notegen::storage::hash_file(&f.project.page_path(2), &Control::default()).unwrap(),
+        original2
+    );
+    roundtrip::apply(
+        &f.project,
+        &input,
+        &preview,
+        &["ng:p1:b0:text".into()],
+        "One admitted page",
+        &Control::default(),
+    )
+    .unwrap();
+    let corrected = f.project.load(1).unwrap();
+    assert_eq!(corrected.content.blocks[0].text, "Chosen correction");
+    assert_eq!(corrected.candidates[0].content.plain(), evidence.plain());
+    assert_eq!(
+        f.project.load(2).unwrap().content.blocks[0].text,
+        "Original paragraph 2"
+    );
+}

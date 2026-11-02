@@ -137,13 +137,24 @@ fn recurring_elements_require_real_margin_boxes_on_multiple_pages_and_only_selec
     );
     assert!(proposals.iter().any(|p| p.kind == "footer_page_number"));
     assert_eq!(
-        tools::apply_recurring(&p, &[header.id.clone()], RecurringAction::Keep, &c).unwrap(),
+        tools::apply_recurring(
+            &p,
+            std::slice::from_ref(&header.id),
+            RecurringAction::Keep,
+            &c
+        )
+        .unwrap(),
         None
     );
     assert!(!p.root.join("review-history.json").exists());
     let source_checkpoint = fs::read(p.page_path(1)).unwrap();
-    let revision =
-        tools::apply_recurring(&p, &[header.id.clone()], RecurringAction::Remove, &c).unwrap();
+    let revision = tools::apply_recurring(
+        &p,
+        std::slice::from_ref(&header.id),
+        RecurringAction::Remove,
+        &c,
+    )
+    .unwrap();
     assert!(revision.is_some());
     for n in 1..=3 {
         let page = p.load(n).unwrap();

@@ -782,7 +782,11 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
             };
             let im = notegen::writers::open_image(&input, 40_000_000)?;
             let comparison = notegen::scan_tools::compare(&im, &options, c)?;
-            notegen::scan_tools::export_comparison(&comparison, &output, c)
+            print(notegen::scan_tools::export_comparison(
+                &comparison,
+                &output,
+                c,
+            )?)
         }
         Action::PerspectiveScan {
             input,
@@ -817,13 +821,12 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
             output,
         } => {
             let im = notegen::writers::open_image(&input, 40_000_000)?;
-            notegen::scan_tools::export_redacted(
+            print(notegen::scan_tools::export_redacted(
                 &im,
                 &read_json::<Vec<BoxRect>>(&regions, 100_000)?,
                 &output,
                 c,
-            )
-            .map(|_| ())
+            )?)
         }
         Action::Export {
             project,

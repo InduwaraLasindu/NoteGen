@@ -602,6 +602,45 @@ pub struct Page {
     pub seconds: f64,
 }
 impl Page {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (1..=3000).contains(&self.page) && self.image == format!("page-{:05}.png", self.page),
+            Fault::new("NG500", "Checkpoint source identity is invalid")
+        );
+        anyhow::ensure!(
+            self.agreement.is_finite()
+                && (0.0..=1.0).contains(&self.agreement)
+                && self.seconds.is_finite()
+                && self.seconds >= 0.0
+                && self.candidates.len() <= 1024
+                && self.source_warnings.len() <= 1000
+                && self.source_warnings.iter().all(|v| v.len() <= 8000),
+            Fault::new(
+                "NG500",
+                "Checkpoint evidence or timing exceeds supported bounds"
+            )
+        );
+        self.content.validate()?;
+        let mut blocks = 0usize;
+        for candidate in &self.candidates {
+            blocks += candidate.content.blocks.len();
+            anyhow::ensure!(
+                blocks <= 20000
+                    && candidate.model_id.len() <= 1000
+                    && candidate.family.len() <= 1000
+                    && candidate.view.len() <= 1000
+                    && candidate.reliability.is_finite()
+                    && (0.0..=4.0).contains(&candidate.reliability)
+                    && candidate.region.as_ref().is_none_or(BoxRect::valid),
+                Fault::new(
+                    "NG500",
+                    "Checkpoint reader evidence is invalid or excessive"
+                )
+            );
+            candidate.content.validate()?;
+        }
+        Ok(())
+    }
     pub fn needs_review(&self, threshold: f32) -> bool {
         !self.reviewed
             && (self.agreement < 0.92

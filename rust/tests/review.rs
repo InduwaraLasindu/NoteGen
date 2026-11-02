@@ -452,6 +452,190 @@ fn numeric_reader_labels_do_not_create_false_conflicts() {
     p.save(&page).unwrap();
     assert!(review::issues(p).unwrap().is_empty());
 }
+
+#[test]
+fn issue_previews_bound_unicode_and_alternatives_but_numeric_checks_use_full_evidence() {
+    let f = fixture(1);
+    let p = &f.project;
+    let mut page = p.load(1).unwrap();
+    let prefix = "සිංහල தமிழ் ".repeat(1000);
+    page.content.blocks[0].text = format!("{prefix} total 100");
+    page.content.blocks[0].confidence = Some(1.0);
+    page.content.blocks[0].alternatives = (0..64)
+        .map(|index| format!("reader-{index}: {prefix} total 200"))
+        .collect();
+    p.save(&page).unwrap();
+    let before = std::fs::read(p.page_path(1)).unwrap();
+    let issues = review::issues(p).unwrap();
+    assert_eq!(issues.len(), 1);
+    let issue = &issues[0];
+    assert_eq!(issue.kind, "numeric-conflict");
+    assert_eq!(issue.priority, 100);
+    assert!(issue.preview_truncated);
+    assert!(issue.reading.ends_with('…'));
+    assert!(issue.reading.chars().count() <= review::ISSUE_PREVIEW_CHARS + 1);
+    assert_eq!(issue.alternatives.len(), review::ISSUE_PREVIEW_ALTERNATIVES);
+    assert!(
+        issue
+            .alternatives
+            .iter()
+            .all(|alternative| alternative.ends_with('…')
+                && alternative.chars().count() <= review::ISSUE_PREVIEW_CHARS + 1)
+    );
+    assert!(
+        issue
+            .message
+            .contains("all 64 reader alternatives remain in the project")
+    );
+    assert_eq!(std::fs::read(p.page_path(1)).unwrap(), before);
+    let saved = p.load(1).unwrap();
+    assert_eq!(saved.content.blocks[0].alternatives.len(), 64);
+    assert!(saved.content.blocks[0].text.ends_with("total 100"));
+}
+
+#[test]
+fn large_tables_keep_high_impact_totals_and_report_source_free_preview_truncation() {
+    let mut b = Block {
+        kind: "table".into(),
+        header_rows: 1,
+        ..Default::default()
+    };
+    b.rows.push(
+        (0..40)
+            .map(|column| {
+                if column == 0 {
+                    "Label".into()
+                } else {
+                    "Amount".into()
+                }
+            })
+            .collect(),
+    );
+    for row in 1..100 {
+        b.rows.push(
+            (0..40)
+                .map(|column| {
+                    if column == 0 {
+                        if row == 99 {
+                            "Grand total".into()
+                        } else {
+                            format!("Item {row}")
+                        }
+                    } else if row == 99 {
+                        "999".into()
+                    } else if column <= 20 && row >= 61 {
+                        "unclear amount".into()
+                    } else {
+                        "1".into()
+                    }
+                })
+                .collect(),
+        );
+    }
+    b.alternatives = vec!["සිංහල reader evidence ".repeat(1000); 64];
+    b.validate().unwrap();
+    let before = fingerprint(&b).unwrap();
+    let issues = review::table_issues(1, 0, &b);
+    assert_eq!(issues.len(), review::MAX_TABLE_ISSUES + 1);
+    let summary = &issues[0];
+    assert_eq!(summary.kind, "table-truncated");
+    assert_eq!(summary.page, 0);
+    assert!(summary.reading.is_empty());
+    assert!(summary.region.is_none());
+    assert!(summary.alternatives.is_empty());
+    assert!(summary.message.contains("further suggestions were omitted"));
+    let details = &issues[1..];
+    assert_eq!(
+        details.iter().filter(|issue| issue.kind == "total").count(),
+        19
+    );
+    assert!(
+        details
+            .windows(2)
+            .all(|pair| pair[0].priority >= pair[1].priority)
+    );
+    assert!(details.iter().all(|issue| issue.alternatives.len()
+        <= review::ISSUE_PREVIEW_ALTERNATIVES
+        && issue.reading.chars().count() <= review::ISSUE_PREVIEW_CHARS + 1));
+    assert_eq!(fingerprint(&b).unwrap(), before);
+}
+
+#[test]
+fn review_queue_retains_late_high_impact_issues_with_explicit_cap_and_exposes_remaining_pages() {
+    let f = fixture(21);
+    let p = &f.project;
+    for n in 1..=21 {
+        let mut page = p.load(n).unwrap();
+        page.content.blocks = (0..500)
+            .map(|_| Block::text("ordinary uncertain words"))
+            .collect();
+        if n == 21 {
+            page.content.blocks[499] = Block {
+                text: "Confirmed amount 100".into(),
+                confidence: Some(1.0),
+                alternatives: vec!["reader: Confirmed amount 200".into()],
+                ..Block::text("")
+            };
+        }
+        p.save(&page).unwrap();
+    }
+    let before = std::fs::read(p.page_path(21)).unwrap();
+    let issues = review::issues(p).unwrap();
+    assert_eq!(issues.len(), review::MAX_REVIEW_ISSUES + 1);
+    let summary = &issues[0];
+    assert_eq!(summary.kind, "queue-truncated");
+    assert_eq!(summary.page, 0);
+    assert!(
+        summary.reading.is_empty() && summary.alternatives.is_empty() && summary.region.is_none()
+    );
+    assert!(summary.message.contains("10500"));
+    assert!(summary.message.contains("500 were omitted"));
+    assert_eq!(
+        (issues[1].page, issues[1].block, issues[1].priority),
+        (21, 499, 100)
+    );
+    assert!(issues.iter().skip(1).all(|issue| issue.page != 0));
+    assert_eq!(std::fs::read(p.page_path(21)).unwrap(), before);
+    let mut page = p.load(1).unwrap();
+    page.reviewed = true;
+    p.save(&page).unwrap();
+    let refreshed = review::issues(p).unwrap();
+    assert_eq!(refreshed.len(), review::MAX_REVIEW_ISSUES);
+    assert!(
+        !refreshed
+            .iter()
+            .any(|issue| issue.kind == "queue-truncated")
+    );
+    assert!(
+        refreshed
+            .iter()
+            .any(|issue| issue.page == 21 && issue.block == 499)
+    );
+}
+
+#[test]
+fn review_transactions_use_the_same_candidate_validation_as_project_storage() {
+    let f = fixture(1);
+    let p = &f.project;
+    let before = p.load(1).unwrap();
+    let mut after = before.clone();
+    after.candidates.push(Candidate {
+        region: None,
+        model_id: "reader".into(),
+        family: "family".into(),
+        view: "full".into(),
+        content: PageContent::default(),
+        reliability: 5.0,
+    });
+    assert!(after.validate().is_err());
+    assert!(review::commit(p, &before, &after, "Excessive reader reliability").is_err());
+    assert!(!p.root.join("review-history.json").exists());
+    assert!(!p.root.join("review-pending.json").exists());
+    assert_eq!(
+        fingerprint(&p.load(1).unwrap()).unwrap(),
+        fingerprint(&before).unwrap()
+    );
+}
 #[test]
 fn interrupted_transactions_recover_idempotently_and_keep_original_pages() {
     let f = fixture(1);

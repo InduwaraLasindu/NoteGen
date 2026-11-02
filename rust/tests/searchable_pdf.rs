@@ -149,6 +149,7 @@ fn native_searchable_export_has_source_pages_unicode_embedded_font_and_grounded_
         )
         .unwrap()
         .as_image()
+        .unwrap()
         .to_rgb8();
     assert_eq!(rendered.get_pixel(120, 160), f.image.get_pixel(120, 160));
     assert_eq!(rendered.get_pixel(20, 20), f.image.get_pixel(20, 20));

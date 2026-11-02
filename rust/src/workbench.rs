@@ -162,7 +162,7 @@ impl Review {
         self.page = page.clone();
         self.baseline = page;
         self.dirty = false;
-        self.issues = crate::review::issues(&self.project)?;
+        self.refresh_issues();
         self.revision_name.clear();
         Ok(())
     }
@@ -185,9 +185,31 @@ impl Review {
         self.selected = self
             .selected
             .min(self.page.content.blocks.len().saturating_sub(1));
-        self.issues = crate::review::issues(&self.project)?;
+        self.refresh_issues();
         self.dirty = false;
         Ok(())
+    }
+    fn refresh_issues(&mut self) {
+        match crate::review::issues(&self.project) {
+            Ok(issues) => {
+                self.issues = issues;
+                self.issue_notice.clear();
+            }
+            Err(e) => {
+                self.issues.clear();
+                self.issue_notice = format!(
+                    "Saved changes are preserved. Review queue could not be refreshed: {e}. Open Recovery to inspect other checkpoints."
+                );
+            }
+        }
+        self.issue_page = self.issue_page.min(
+            self.issues
+                .iter()
+                .filter(|i| i.page > 0)
+                .count()
+                .saturating_sub(1)
+                / 100,
+        );
     }
 }
 
@@ -892,8 +914,16 @@ impl Desktop {
     pub(super) fn issue_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(format!("Review queue · {} suggestions",r.issues.len())).show(ui,|ui| {
             ui.small("Totals, number conflicts and uncertain regions are ranked by impact. Suggestions never rewrite a value.");
+            if !r.issue_notice.is_empty(){ui.colored_label(Color32::from_rgb(241,187,111),&r.issue_notice);}
+            for notice in r.issues.iter().filter(|i|i.page==0){ui.colored_label(Color32::from_rgb(241,187,111),&notice.message);}
+            let count=r.issues.iter().filter(|i|i.page>0).count();let pages=count.div_ceil(100).max(1);r.issue_page=r.issue_page.min(pages-1);
+            ui.horizontal(|ui|{
+                if ui.add_enabled(r.issue_page>0,egui::Button::new("Previous issues")).clicked(){r.issue_page-=1;}
+                ui.small(format!("{} / {pages}",r.issue_page+1));
+                if ui.add_enabled(r.issue_page+1<pages,egui::Button::new("Next issues")).clicked(){r.issue_page+=1;}
+            });
             let mut chosen=None;
-            for issue in r.issues.iter().take(100) {
+            for issue in r.issues.iter().filter(|i|i.page>0).skip(r.issue_page*100).take(100) {
                 let label=format!("P{} · page {} · {}",issue.priority,issue.page,issue.message);
                 if ui.add_enabled(!r.dirty,egui::Button::new(label)).clicked() { chosen=Some((issue.page,issue.block)); }
             }

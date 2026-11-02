@@ -6,12 +6,35 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
 pub const INVALIDATED_SOURCE_WARNING: &str = "WARNING: SOURCE CHANGED OR UNAVAILABLE";
 pub const RECOVERY_EXPORT_NOTICE: &str = "This manual recovery export contains preserved recognition. The input changed or became unavailable during conversion. Verify every page against the original source.";
+pub const ROUNDTRIP_UNAVAILABLE_NOTICE: &str = "Word correction import is unavailable for this large export. All content is preserved. Export a smaller project to enable correction import.";
+const DOCUMENT_HEADER:&[u8]=br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>"#;
+fn correction_baseline(
+    baseline: &mut crate::roundtrip::Baseline,
+    document: &Path,
+) -> Result<Option<String>> {
+    if !crate::roundtrip::enabled(baseline)
+        || fs::metadata(document)?.len() > crate::roundtrip::XML_LIMIT
+    {
+        crate::roundtrip::disable(baseline);
+        return Ok(None);
+    }
+    let mut text = String::new();
+    fs::File::open(document)?
+        .take(crate::roundtrip::XML_LIMIT + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > crate::roundtrip::XML_LIMIT {
+        crate::roundtrip::disable(baseline);
+        return Ok(None);
+    }
+    crate::roundtrip::seal(baseline, &text)?;
+    crate::roundtrip::baseline_xml(baseline)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,22 +165,25 @@ fn rtl(c: char) -> bool {
 }
 
 pub fn xml(text: &str) -> String {
-    text.chars()
-        .filter(|c| {
-            matches!(*c, '\t' | '\n' | '\r')
-                || (*c >= ' ' && *c <= '\u{d7ff}')
-                || (*c >= '\u{e000}' && *c <= '\u{fffd}')
-                || *c >= '\u{10000}'
-        })
-        .map(|c| match c {
-            '&' => "&amp;".into(),
-            '<' => "&lt;".into(),
-            '>' => "&gt;".into(),
-            '"' => "&quot;".into(),
-            '\'' => "&apos;".into(),
-            _ => c.to_string(),
-        })
-        .collect()
+    let mut result = String::with_capacity(text.len());
+    for c in text.chars() {
+        if !(matches!(c, '\t' | '\n' | '\r')
+            || (' '..='\u{d7ff}').contains(&c)
+            || ('\u{e000}'..='\u{fffd}').contains(&c)
+            || c >= '\u{10000}')
+        {
+            continue;
+        }
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&apos;"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 pub fn paragraph(text: &str, style: &str) -> String {
     let clean = crate::roundtrip::clean(text);
@@ -313,10 +339,10 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
     let assets = tempfile::tempdir_in(parent)?;
     let document = assets.path().join("document.xml");
     let mut body = BufWriter::new(fs::File::create(&document)?);
-    body.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>"#)?;
+    body.write_all(DOCUMENT_HEADER)?;
     let mut media = vec![];
     let mut rels = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="notegenBaseline" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/>"#,
+        r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
     );
     let mut baseline = crate::roundtrip::baseline(project)?;
     let profile = style_profile(project)?;
@@ -365,6 +391,7 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
             body.write_all(paragraph(warning, "Caption").as_bytes())?;
         }
         for (block_index, b) in page.content.blocks.iter().enumerate() {
+            c.check()?;
             b.validate()?;
             match b.kind.as_str() {
                 "table" => body.write_all(table(b, *n, block_index, &mut baseline).as_bytes())?,
@@ -497,9 +524,11 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
     body.write_all(b"<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1080\" w:right=\"1080\" w:bottom=\"1080\" w:left=\"1080\"/></w:sectPr></w:body></w:document>")?;
     body.flush()?;
     drop(body);
-    let document_text = fs::read_to_string(&document)?;
-    crate::roundtrip::seal(&mut baseline, &document_text)?;
-    let baseline_xml = crate::roundtrip::baseline_xml(&baseline)?;
+    let baseline_xml = correction_baseline(&mut baseline, &document)?;
+    drop(baseline);
+    if baseline_xml.is_some() {
+        rels.push_str(r#"<Relationship Id="notegenBaseline" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/>"#);
+    }
     rels.push_str("</Relationships>");
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     {
@@ -507,32 +536,54 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
         let opts =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         let styles = styles_xml(&profile);
+        let mut content_types = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>"#,
+        );
+        if baseline_xml.is_some() {
+            content_types.push_str(r#"<Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>"#);
+        }
+        content_types.push_str("</Types>");
         for (name, content) in [
-            (
-                "[Content_Types].xml",
-                r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/></Types>"#,
-            ),
+            ("[Content_Types].xml", content_types.as_str()),
             (
                 "_rels/.rels",
                 r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="document" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
             ),
             ("word/_rels/document.xml.rels", &rels),
             ("word/styles.xml", &styles),
-            ("customXml/item1.xml", &baseline_xml),
-            (
-                "customXml/itemProps1.xml",
-                r#"<?xml version="1.0" encoding="UTF-8"?><ds:datastoreItem ds:itemID="{7D87000D-A59F-4AF8-BE3C-9166A3DC0350}" xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"><ds:schemaRefs><ds:schemaRef ds:uri="urn:notegen:roundtrip:1"/></ds:schemaRefs></ds:datastoreItem>"#,
-            ),
-            (
-                "customXml/_rels/item1.xml.rels",
-                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="properties" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>"#,
-            ),
         ] {
             zip.start_file(name, opts)?;
             zip.write_all(content.as_bytes())?;
         }
+        if let Some(baseline_xml) = &baseline_xml {
+            for (name, content) in [
+                ("customXml/item1.xml", baseline_xml.as_str()),
+                (
+                    "customXml/itemProps1.xml",
+                    r#"<?xml version="1.0" encoding="UTF-8"?><ds:datastoreItem ds:itemID="{7D87000D-A59F-4AF8-BE3C-9166A3DC0350}" xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"><ds:schemaRefs><ds:schemaRef ds:uri="urn:notegen:roundtrip:1"/></ds:schemaRefs></ds:datastoreItem>"#,
+                ),
+                (
+                    "customXml/_rels/item1.xml.rels",
+                    r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="properties" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>"#,
+                ),
+            ] {
+                zip.start_file(name, opts)?;
+                zip.write_all(content.as_bytes())?;
+            }
+        }
         zip.start_file("word/document.xml", opts)?;
-        std::io::copy(&mut fs::File::open(document)?, &mut zip)?;
+        let mut source = fs::File::open(document)?;
+        if baseline_xml.is_none() {
+            let mut header = vec![0; DOCUMENT_HEADER.len()];
+            source.read_exact(&mut header)?;
+            anyhow::ensure!(
+                header.as_slice() == DOCUMENT_HEADER,
+                Fault::new("NG400", "Word document header changed during export")
+            );
+            zip.write_all(&header)?;
+            zip.write_all(paragraph(ROUNDTRIP_UNAVAILABLE_NOTICE, "Caption").as_bytes())?;
+        }
+        std::io::copy(&mut source, &mut zip)?;
         for (index, path) in media.iter().enumerate() {
             c.check()?;
             zip.start_file(format!("word/media/image{}.jpg", index + 1), opts)?;

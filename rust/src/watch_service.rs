@@ -45,11 +45,57 @@ pub struct WatchSummary {
     pub converted: u64,
     pub failed_attempts: u64,
     pub skipped_duplicate_files: u64,
+    #[serde(default)]
+    pub duplicate_summary_truncated: bool,
     pub waiting_stable: usize,
     pub rejected_files: usize,
     pub cancelled: bool,
     pub output_files: Vec<PathBuf>,
     pub note: String,
+}
+const MAX_SUMMARY_NAMES: usize = 10_000;
+fn observe_duplicates(
+    names: &mut BTreeSet<String>,
+    incoming: impl IntoIterator<Item = String>,
+    summary: &mut WatchSummary,
+) {
+    let was_truncated = summary.duplicate_summary_truncated;
+    for name in incoming {
+        if names.contains(&name) {
+            continue;
+        }
+        if names.len() < MAX_SUMMARY_NAMES {
+            names.insert(name);
+        } else {
+            summary.duplicate_summary_truncated = true;
+        }
+    }
+    summary.skipped_duplicate_files = names.len() as u64;
+    if summary.duplicate_summary_truncated && !was_truncated {
+        if !summary.note.is_empty() {
+            summary.note.push('\n');
+        }
+        summary.note.push_str("Duplicate-file summary is capped at 10,000 distinct filenames; additional skipped duplicate filenames were observed. Import receipts remain complete and separate.");
+    }
+}
+fn refresh_rejections(
+    saved: &mut BTreeMap<String, String>,
+    current: &[watch::RejectedFile],
+) -> Vec<watch::RejectedFile> {
+    let current_names = current
+        .iter()
+        .take(MAX_SUMMARY_NAMES)
+        .map(|rejected| rejected.filename.as_str())
+        .collect::<BTreeSet<_>>();
+    saved.retain(|name, _| current_names.contains(name.as_str()));
+    let mut changed = vec![];
+    for rejected in current.iter().take(MAX_SUMMARY_NAMES) {
+        if saved.get(&rejected.filename) != Some(&rejected.reason) {
+            saved.insert(rejected.filename.clone(), rejected.reason.clone());
+            changed.push(rejected.clone());
+        }
+    }
+    changed
 }
 fn path_identity(path: &Path) -> Result<PathBuf> {
     watch::no_links(path)?;
@@ -374,32 +420,24 @@ pub fn run(
         let report = watch::scan(&config, &mut state.watch, now, c)?;
         summary.waiting_stable = report.waiting_stable.len();
         summary.rejected_files = report.rejected.len();
-        rejected_reasons.retain(|name, _| {
-            report
-                .rejected
-                .iter()
-                .any(|rejected| &rejected.filename == name)
-        });
-        for rejected in &report.rejected {
-            if rejected_reasons.get(&rejected.filename) != Some(&rejected.reason) {
-                log.emit(
-                    "watch",
-                    format!(
-                        "{} was not imported: {}",
-                        rejected.filename, rejected.reason
-                    ),
-                    0,
-                    0,
-                    0,
-                    "NG100",
-                );
-                rejected_reasons.insert(rejected.filename.clone(), rejected.reason.clone());
-            }
+        for rejected in refresh_rejections(&mut rejected_reasons, &report.rejected) {
+            log.emit(
+                "watch",
+                format!(
+                    "{} was not imported: {}",
+                    rejected.filename, rejected.reason
+                ),
+                0,
+                0,
+                0,
+                "NG100",
+            );
         }
-        for name in report.skipped_duplicates {
-            duplicate_names.insert(name);
-        }
-        summary.skipped_duplicate_files = duplicate_names.len() as u64;
+        observe_duplicates(
+            &mut duplicate_names,
+            report.skipped_duplicates,
+            &mut summary,
+        );
         state.failures.retain(|_, failure| {
             state
                 .watch
@@ -547,6 +585,92 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn duplicate_summary_caps_names_without_counting_repeats_and_marks_overflow_once() {
+        let mut names = BTreeSet::new();
+        let mut summary = WatchSummary::default();
+        observe_duplicates(
+            &mut names,
+            (0..MAX_SUMMARY_NAMES).map(|n| format!("scan-{n}.png")),
+            &mut summary,
+        );
+        assert_eq!(summary.skipped_duplicate_files, 10_000);
+        assert!(!summary.duplicate_summary_truncated);
+        observe_duplicates(
+            &mut names,
+            ["scan-0.png".into(), "scan-9999.png".into()],
+            &mut summary,
+        );
+        assert!(!summary.duplicate_summary_truncated);
+        observe_duplicates(
+            &mut names,
+            (10_000..20_000).map(|n| format!("scan-{n}.png")),
+            &mut summary,
+        );
+        assert_eq!(names.len(), MAX_SUMMARY_NAMES);
+        assert_eq!(summary.skipped_duplicate_files, 10_000);
+        assert!(summary.duplicate_summary_truncated);
+        assert!(
+            summary
+                .note
+                .contains("additional skipped duplicate filenames")
+        );
+        let note = summary.note.clone();
+        observe_duplicates(&mut names, ["another-duplicate.png".into()], &mut summary);
+        assert_eq!(summary.note, note);
+    }
+    #[test]
+    fn rejection_deduplication_tracks_only_current_poll_and_reannounces_changed_errors() {
+        let rejected = |filename: &str, reason: &str| watch::RejectedFile {
+            filename: filename.into(),
+            reason: reason.into(),
+        };
+        let mut saved = BTreeMap::new();
+        let first = vec![rejected("a.png", "locked"), rejected("b.pdf", "empty")];
+        assert_eq!(refresh_rejections(&mut saved, &first).len(), 2);
+        assert!(refresh_rejections(&mut saved, &first).is_empty());
+        let next = vec![rejected("b.pdf", "too large"), rejected("c.png", "locked")];
+        assert_eq!(refresh_rejections(&mut saved, &next).len(), 2);
+        assert!(!saved.contains_key("a.png"));
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved["b.pdf"], "too large");
+        assert!(refresh_rejections(&mut saved, &[]).is_empty());
+        assert!(saved.is_empty());
+    }
+    #[test]
+    fn many_rejection_polls_stay_bounded_without_pruning_successful_import_receipts() {
+        let mut state = ServiceState::default();
+        state.watch.imported.insert(
+            "completed.png".into(),
+            watch::ImportedFile {
+                filename: "completed.png".into(),
+                sha256: "a".repeat(64),
+                bytes: 12,
+                modified_nanos: 1,
+                project_id: "completed-project".into(),
+                imported_at: 10,
+            },
+        );
+        let before = fingerprint(&state.watch.imported).unwrap();
+        let mut saved = BTreeMap::new();
+        for poll in 0..3 {
+            let current = (0..MAX_SUMMARY_NAMES + 5)
+                .map(|n| watch::RejectedFile {
+                    filename: format!("poll-{poll}-file-{n}.pdf"),
+                    reason: "locked".into(),
+                })
+                .collect::<Vec<_>>();
+            refresh_rejections(&mut saved, &current);
+            assert_eq!(saved.len(), MAX_SUMMARY_NAMES);
+            assert!(
+                saved
+                    .keys()
+                    .all(|name| name.starts_with(&format!("poll-{poll}-")))
+            );
+        }
+        assert_eq!(fingerprint(&state.watch.imported).unwrap(), before);
+        assert!(state.watch.imported.contains_key("completed.png"));
+    }
     #[test]
     fn retry_backoff_is_exponential_bounded_and_handles_overflow() {
         assert_eq!(

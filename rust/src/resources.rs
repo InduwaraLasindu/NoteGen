@@ -31,6 +31,7 @@ pub struct Reservations {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceValues {
     pub cpu_threads: usize,
     pub ram_fraction: f32,
@@ -41,6 +42,12 @@ pub struct ResourceValues {
     pub idle_fps: u32,
 }
 impl ResourceValues {
+    fn validate(&self) -> Result<()> {
+        // Keep persisted previews subject to the same numeric bounds as ordinary settings.
+        let mut candidate = Settings::default();
+        self.write(&mut candidate);
+        candidate.validate()
+    }
     fn capture(s: &Settings) -> Self {
         Self {
             cpu_threads: s.cpu_threads,
@@ -63,7 +70,8 @@ impl ResourceValues {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourcePreview {
     pub profile: PowerProfile,
     pub before: ResourceValues,
@@ -86,6 +94,9 @@ impl ResourcePreview {
         expected: &ResourceValues,
         next: &ResourceValues,
     ) -> Result<()> {
+        // Validate both directions before mutating anything, including the future undo state.
+        self.before.validate()?;
+        self.after.validate()?;
         anyhow::ensure!(
             ResourceValues::capture(s) == *expected,
             Fault::new(

@@ -114,6 +114,7 @@ fn lock(p: &Project) -> Result<fs::File> {
     Ok(f)
 }
 fn page_valid(p: &Project, page: &Page) -> Result<()> {
+    page.validate()?;
     anyhow::ensure!(
         p.manifest.pages.contains(&page.page) && page.image == format!("page-{:05}.png", page.page),
         fail("Revision references an invalid source page")
@@ -724,8 +725,66 @@ pub struct Issue {
     pub reading: String,
     pub region: Option<BoxRect>,
     pub alternatives: Vec<String>,
+    #[serde(default)]
+    pub preview_truncated: bool,
+}
+/// Real issues retained globally; an additional page-zero notice reports omissions.
+pub const MAX_REVIEW_ISSUES: usize = 10_000;
+/// Highest-impact details retained for a single table.
+pub const MAX_TABLE_ISSUES: usize = 128;
+pub const ISSUE_PREVIEW_CHARS: usize = 240;
+pub const ISSUE_PREVIEW_ALTERNATIVES: usize = 4;
+fn short_preview(mut characters: impl Iterator<Item = char>) -> (String, bool) {
+    let mut text: String = characters.by_ref().take(ISSUE_PREVIEW_CHARS).collect();
+    let truncated = characters.next().is_some();
+    if truncated {
+        text.push('…');
+    }
+    (text, truncated)
+}
+fn block_preview(b: &Block) -> (String, bool) {
+    if b.kind == "table" {
+        short_preview(b.rows.iter().enumerate().flat_map(|(row, values)| {
+            values.iter().enumerate().flat_map(move |(col, value)| {
+                let separator = if col > 0 {
+                    Some('\t')
+                } else if row > 0 {
+                    Some('\n')
+                } else {
+                    None
+                };
+                separator.into_iter().chain(value.chars())
+            })
+        }))
+    } else {
+        short_preview(b.text.chars())
+    }
 }
 fn issue(page: usize, block: usize, b: &Block, priority: u8, kind: &str, message: &str) -> Issue {
+    issue_with_reading(page, block, b, priority, kind, message, None)
+}
+fn issue_with_reading(
+    page: usize,
+    block: usize,
+    b: &Block,
+    priority: u8,
+    kind: &str,
+    message: &str,
+    reading: Option<&str>,
+) -> Issue {
+    let (reading, mut truncated) =
+        reading.map_or_else(|| block_preview(b), |text| short_preview(text.chars()));
+    let alternatives = b
+        .alternatives
+        .iter()
+        .take(ISSUE_PREVIEW_ALTERNATIVES)
+        .map(|text| {
+            let (preview, shortened) = short_preview(text.chars());
+            truncated |= shortened;
+            preview
+        })
+        .collect();
+    truncated |= b.alternatives.len() > ISSUE_PREVIEW_ALTERNATIVES;
     Issue {
         id: format!("p{page}-b{block}-{kind}"),
         page,
@@ -734,10 +793,109 @@ fn issue(page: usize, block: usize, b: &Block, priority: u8, kind: &str, message
         col: None,
         priority,
         kind: kind.into(),
-        message: message.into(),
-        reading: b.plain(),
-        region: b.bbox.clone(),
-        alternatives: b.alternatives.clone(),
+        message: if truncated {
+            format!(
+                "{message} Preview shortened; full text and all {} reader alternatives remain in the project.",
+                b.alternatives.len()
+            )
+        } else {
+            message.into()
+        },
+        reading,
+        region: b.bbox.as_ref().filter(|region| region.valid()).cloned(),
+        alternatives,
+        preview_truncated: truncated,
+    }
+}
+type IssueRank = (
+    std::cmp::Reverse<u8>,
+    usize,
+    usize,
+    Option<usize>,
+    Option<usize>,
+    String,
+);
+struct RankedIssue {
+    rank: IssueRank,
+    issue: Issue,
+}
+impl PartialEq for RankedIssue {
+    fn eq(&self, other: &Self) -> bool {
+        self.rank == other.rank
+    }
+}
+impl Eq for RankedIssue {}
+impl PartialOrd for RankedIssue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RankedIssue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank.cmp(&other.rank)
+    }
+}
+struct BoundedIssues {
+    heap: std::collections::BinaryHeap<RankedIssue>,
+    limit: usize,
+    total: usize,
+}
+impl BoundedIssues {
+    fn new(limit: usize) -> Self {
+        Self {
+            heap: std::collections::BinaryHeap::with_capacity(limit),
+            limit,
+            total: 0,
+        }
+    }
+    fn retain(&mut self, issue: Issue) {
+        let rank = (
+            std::cmp::Reverse(issue.priority),
+            issue.page,
+            issue.block,
+            issue.row,
+            issue.col,
+            issue.id.clone(),
+        );
+        if self.heap.len() < self.limit {
+            self.heap.push(RankedIssue { rank, issue });
+        } else if self.heap.peek().is_some_and(|worst| rank < worst.rank) {
+            self.heap.pop();
+            self.heap.push(RankedIssue { rank, issue });
+        }
+    }
+    fn push(&mut self, issue: Issue) {
+        self.total = self.total.saturating_add(1);
+        self.retain(issue);
+    }
+    fn absorb(&mut self, batch: Self) {
+        self.total = self.total.saturating_add(batch.total);
+        for retained in batch.heap {
+            self.retain(retained.issue);
+        }
+    }
+    fn sorted(self) -> Vec<Issue> {
+        self.heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|ranked| ranked.issue)
+            .collect()
+    }
+}
+fn truncation_notice(kind: &str, message: String) -> Issue {
+    Issue {
+        id: format!("review-{kind}-notice"),
+        page: 0,
+        block: 0,
+        row: None,
+        col: None,
+        priority: 255,
+        kind: kind.into(),
+        message,
+        reading: String::new(),
+        region: None,
+        alternatives: vec![],
+        preview_truncated: true,
     }
 }
 fn number(value: &str) -> Option<f64> {
@@ -759,22 +917,38 @@ fn number(value: &str) -> Option<f64> {
     let n = value.parse::<f64>().ok()?;
     n.is_finite().then_some(if negative { -n } else { n })
 }
-fn numeric_tokens(value: &str) -> Vec<String> {
+fn total_label(value: &str) -> Option<&'static str> {
+    let value = value.trim();
+    ["total", "grand total", "subtotal"]
+        .into_iter()
+        .find(|label| value.eq_ignore_ascii_case(label))
+}
+fn numeric_tokens(value: &str) -> impl Iterator<Item = &str> {
     static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"[-+]?\d+(?:[.,]\d+)*(?:[eE][-+]?\d+)?").expect("fixed numeric pattern")
     });
-    PATTERN
-        .find_iter(value)
-        .map(|m| m.as_str().into())
-        .collect()
+    PATTERN.find_iter(value).map(|m| m.as_str())
 }
 /// Conservative table suggestions. Values and source evidence are never rewritten.
 pub fn table_issues(page: usize, index: usize, b: &Block) -> Vec<Issue> {
-    if b.kind != "table" || b.rows.is_empty() {
-        return vec![];
+    let candidates = table_candidates(page, index, b);
+    let total = candidates.total;
+    let mut retained = candidates.sorted();
+    if total > retained.len() {
+        retained.insert(0, truncation_notice("table-truncated", format!("Table preview for page {page}, block {} retains the {MAX_TABLE_ISSUES} highest-impact suggestions; {} further suggestions were omitted. Full source and reader evidence remain in the project.", index + 1, total - retained.len())));
     }
-    let mut out = vec![];
+    retained
+}
+fn table_candidates(page: usize, index: usize, b: &Block) -> BoundedIssues {
+    let mut out = BoundedIssues::new(MAX_TABLE_ISSUES);
+    if b.kind != "table" || b.rows.is_empty() {
+        return out;
+    }
     let cols = b.rows[0].len();
+    if b.rows.len() > 100 || cols == 0 || cols > 40 || b.header_rows > b.rows.len() {
+        out.push(issue(page, index, b, 95, "table-dimensions", "The table exceeds supported row/column/header limits; repair or split it before export."));
+        return out;
+    }
     if b.rows.iter().any(|r| r.len() != cols) {
         out.push(issue(
             page,
@@ -799,20 +973,22 @@ pub fn table_issues(page: usize, index: usize, b: &Block) -> Vec<Issue> {
         if numeric >= 2 && numeric * 2 > values.len() {
             for (r, s) in &values {
                 if number(s).is_none()
-                    && !["—", "-", "n/a"].contains(&s.trim().to_lowercase().as_str())
+                    && !["—", "-", "n/a"]
+                        .iter()
+                        .any(|missing| s.trim().eq_ignore_ascii_case(missing))
                 {
-                    let mut i = issue(
+                    let mut i = issue_with_reading(
                         page,
                         index,
                         b,
                         75,
                         "column-type",
                         "This cell differs from the mostly numeric column; confirm its digits, units or intended text.",
+                        Some(s),
                     );
                     i.id = format!("p{page}-b{index}-r{r}-c{col}-type");
                     i.row = Some(*r);
                     i.col = Some(col);
-                    i.reading = (*s).into();
                     out.push(i);
                 }
             }
@@ -822,13 +998,9 @@ pub fn table_issues(page: usize, index: usize, b: &Block) -> Vec<Issue> {
         return out;
     }
     for (r, row) in b.rows.iter().enumerate().skip(b.header_rows) {
-        let label = row
-            .first()
-            .map(|s| s.trim().to_lowercase())
-            .unwrap_or_default();
-        if !["total", "grand total", "subtotal"].contains(&label.as_str()) {
+        let Some(label) = row.first().and_then(|value| total_label(value)) else {
             continue;
-        }
+        };
         for (col, stated) in row.iter().enumerate().skip(1) {
             let Some(stated) = number(stated) else {
                 continue;
@@ -839,18 +1011,15 @@ pub fn table_issues(page: usize, index: usize, b: &Block) -> Vec<Issue> {
                 b.rows[..r]
                     .iter()
                     .rposition(|row| {
-                        row.first().is_some_and(|v| {
-                            ["total", "subtotal"].contains(&v.trim().to_lowercase().as_str())
-                        })
+                        row.first()
+                            .is_some_and(|v| matches!(total_label(v), Some("total" | "subtotal")))
                     })
                     .map_or(b.header_rows, |i| i + 1)
             };
             let mut terms = vec![];
             let mut complete = true;
             for source in &b.rows[start..r] {
-                if source.first().is_some_and(|v| {
-                    ["total", "subtotal", "grand total"].contains(&v.trim().to_lowercase().as_str())
-                }) {
+                if source.first().is_some_and(|v| total_label(v).is_some()) {
                     continue;
                 }
                 let value = &source[col];
@@ -870,18 +1039,19 @@ pub fn table_issues(page: usize, index: usize, b: &Block) -> Vec<Issue> {
             if calculated.is_finite()
                 && (calculated - stated).abs() > 0.005_f64.max(stated.abs() * 1e-9)
             {
-                let mut i = issue(
+                let reading = format!("Stated {stated}; calculated {calculated}");
+                let mut i = issue_with_reading(
                     page,
                     index,
                     b,
                     98,
                     "total",
                     "The stated total differs from the numeric cells above. Check the source; no value has been changed.",
+                    Some(&reading),
                 );
                 i.id = format!("p{page}-b{index}-r{r}-c{col}-total");
                 i.row = Some(r);
                 i.col = Some(col);
-                i.reading = format!("Stated {stated}; calculated {calculated}");
                 out.push(i);
             }
         }
@@ -892,14 +1062,14 @@ pub fn table_issues(page: usize, index: usize, b: &Block) -> Vec<Issue> {
 pub fn issues(p: &Project) -> Result<Vec<Issue>> {
     let _guard = lock(p)?;
     recover_locked(p)?;
-    let mut out = vec![];
+    let mut out = BoundedIssues::new(MAX_REVIEW_ISSUES);
     for n in &p.manifest.pages {
         let page = p.load(*n)?;
         if page.reviewed {
             continue;
         }
         for (index, b) in page.content.blocks.iter().enumerate() {
-            out.extend(table_issues(*n, index, b));
+            out.absorb(table_candidates(*n, index, b));
             let reading = b.plain();
             let numeric = reading.chars().any(|c| c.is_ascii_digit());
             if numeric
@@ -908,7 +1078,7 @@ pub fn issues(p: &Project) -> Result<Vec<Issue>> {
                         .split_once(": ")
                         .filter(|(prefix, _)| !prefix.contains(char::is_whitespace))
                         .map_or(a.as_str(), |(_, text)| text);
-                    numeric_tokens(alternative) != numeric_tokens(&reading)
+                    numeric_tokens(alternative).ne(numeric_tokens(&reading))
                 })
             {
                 out.push(issue(
@@ -922,7 +1092,10 @@ pub fn issues(p: &Project) -> Result<Vec<Issue>> {
             } else if b.uncertain
                 || b.confidence
                     .is_none_or(|c| c < p.manifest.settings.review_threshold)
-                || reading.to_lowercase().contains("[illegible]")
+                || reading
+                    .as_bytes()
+                    .windows(b"[illegible]".len())
+                    .any(|span| span.eq_ignore_ascii_case(b"[illegible]"))
             {
                 let priority = if numeric {
                     90
@@ -951,8 +1124,12 @@ pub fn issues(p: &Project) -> Result<Vec<Issue>> {
             }
         }
     }
-    out.sort_by_key(|i| (std::cmp::Reverse(i.priority), i.page, i.block, i.row, i.col));
-    Ok(out)
+    let total = out.total;
+    let mut retained = out.sorted();
+    if total > retained.len() {
+        retained.insert(0, truncation_notice("queue-truncated", format!("Review queue retains {} of {total} suggestions; {} were omitted. Limits are {MAX_REVIEW_ISSUES} issues overall and {MAX_TABLE_ISSUES} per table, keeping higher-impact issues first. Full source and reader evidence remain in the project. Review/approve retained pages and refresh to expose more suggestions.", retained.len(), total - retained.len())));
+    }
+    Ok(retained)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

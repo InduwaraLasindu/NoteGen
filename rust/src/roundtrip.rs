@@ -8,12 +8,28 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
-    path::Path,
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
 };
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const NS: &str = "urn:notegen:roundtrip:1";
-const XML_LIMIT: u64 = 32_000_000;
+pub(crate) const XML_LIMIT: u64 = 32_000_000;
+const FIELD_LIMIT: usize = 100_000;
+const TEXT_BUDGET: usize = 8_000_000;
+const METADATA_BUDGET: usize = 16_000_000;
+const SHAPE_LIMIT: usize = 20_000;
+const LAYOUT_BUDGET: usize = 4_000_000;
+const LAYOUT_LIMIT: usize = 200_000;
+const PREVIEW_SOURCE_BUDGET: u64 = 128_000_000;
+const PREVIEW_RESULT_BUDGET: usize = 32_000_000;
+const APPLY_SNAPSHOT_BUDGET: u64 = 64_000_000;
+#[derive(Clone, Debug, Default)]
+struct ExportBudget {
+    disabled: bool,
+    text_bytes: usize,
+    metadata_bytes: usize,
+    shapes: usize,
+}
 fn fault(s: &str) -> anyhow::Error {
     Fault::new("NG500", s).into()
 }
@@ -55,6 +71,8 @@ pub(crate) struct Baseline {
     pages: BTreeMap<usize, Vec<Shape>>,
     fields: Vec<BaselineField>,
     layout: Vec<String>,
+    #[serde(skip)]
+    budget: ExportBudget,
 }
 pub(crate) fn baseline(p: &Project) -> Result<Baseline> {
     Ok(Baseline {
@@ -64,11 +82,40 @@ pub(crate) fn baseline(p: &Project) -> Result<Baseline> {
         pages: BTreeMap::new(),
         fields: vec![],
         layout: vec![],
+        budget: ExportBudget::default(),
     })
 }
 pub(crate) fn record_page(b: &mut Baseline, page: &Page) {
-    b.pages
-        .insert(page.page, page.content.blocks.iter().map(shape).collect());
+    if !enabled(b) {
+        return;
+    }
+    if b.budget.shapes.saturating_add(page.content.blocks.len()) > SHAPE_LIMIT {
+        disable(b);
+        return;
+    }
+    let mut shapes = vec![];
+    for block in &page.content.blocks {
+        let entry = shape(block);
+        let cost =
+            serde_json::to_vec(&entry).map_or(usize::MAX, |data| data.len().saturating_add(16));
+        if b.budget.metadata_bytes.saturating_add(cost) > METADATA_BUDGET {
+            disable(b);
+            return;
+        }
+        b.budget.metadata_bytes += cost;
+        b.budget.shapes += 1;
+        shapes.push(entry);
+    }
+    b.pages.insert(page.page, shapes);
+}
+pub(crate) fn enabled(b: &Baseline) -> bool {
+    !b.budget.disabled
+}
+pub(crate) fn disable(b: &mut Baseline) {
+    b.budget.disabled = true;
+    b.pages = BTreeMap::new();
+    b.fields = vec![];
+    b.layout = vec![];
 }
 pub(crate) fn clean(text: &str) -> String {
     text.replace("\r\n", "\n")
@@ -90,16 +137,32 @@ pub(crate) fn tagged(
     text: &str,
     content: &str,
 ) -> String {
+    if !enabled(b) {
+        return content.into();
+    }
+    if b.fields.len() >= FIELD_LIMIT || b.budget.text_bytes.saturating_add(text.len()) > TEXT_BUDGET
+    {
+        disable(b);
+        return content.into();
+    }
     let tag = format!("ng:p{page}:b{block}:{field}");
     let id = b.fields.len() + 1;
-    b.fields.push(BaselineField {
+    let entry = BaselineField {
         tag: tag.clone(),
         page,
         block,
         field: field.into(),
         text: clean(text),
         format: None,
-    });
+    };
+    let cost = serde_json::to_vec(&entry).map_or(usize::MAX, |data| data.len().saturating_add(48));
+    if b.budget.metadata_bytes.saturating_add(cost) > METADATA_BUDGET {
+        disable(b);
+        return content.into();
+    }
+    b.budget.metadata_bytes += cost;
+    b.budget.text_bytes += text.len();
+    b.fields.push(entry);
     format!(
         "<w:sdt><w:sdtPr><w:alias w:val=\"NoteGen source page {page}, block {}\"/><w:tag w:val=\"{}\"/><w:id w:val=\"{id}\"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>",
         block + 1,
@@ -139,26 +202,45 @@ fn tag<'a, 'input>(n: roxmltree::Node<'a, 'input>) -> Option<&'a str> {
         .find(|n| named(*n, "tag"))?
         .attribute((W, "val"))
 }
-fn text(n: roxmltree::Node<'_, '_>) -> String {
-    let paragraphs: Vec<_> = n.descendants().filter(|n| named(*n, "p")).collect();
-    let mut result = vec![];
-    for paragraph in paragraphs {
-        let mut line = String::new();
-        for node in paragraph.descendants() {
-            if named(node, "t") {
-                line.push_str(node.text().unwrap_or(""));
-            } else if named(node, "tab") {
-                line.push('\t');
-            } else if named(node, "br") || named(node, "cr") {
-                line.push('\n');
+fn text(n: roxmltree::Node<'_, '_>) -> Result<String> {
+    let mut result = String::new();
+    let mut paragraph = false;
+    for node in n.descendants() {
+        if named(node, "p") {
+            if paragraph {
+                anyhow::ensure!(
+                    result.len() < 120000,
+                    fault("Word correction field is too large")
+                );
+                result.push('\n');
             }
+            paragraph = true;
+        } else if named(node, "t") {
+            let value = node.text().unwrap_or("");
+            anyhow::ensure!(
+                result.len().saturating_add(value.len()) <= 120000,
+                fault("Word correction field is too large")
+            );
+            result.push_str(value);
+        } else if named(node, "tab") {
+            anyhow::ensure!(
+                result.len() < 120000,
+                fault("Word correction field is too large")
+            );
+            result.push('\t');
+        } else if named(node, "br") || named(node, "cr") {
+            anyhow::ensure!(
+                result.len() < 120000,
+                fault("Word correction field is too large")
+            );
+            result.push('\n');
         }
-        result.push(line);
     }
-    result.join("\n")
+    Ok(result)
 }
-fn layout(doc: &roxmltree::Document<'_>) -> Vec<String> {
+fn layout(doc: &roxmltree::Document<'_>) -> Result<Vec<String>> {
     let mut out = vec![];
+    let mut retained = 0usize;
     for n in doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().namespace() == Some(W))
@@ -166,37 +248,80 @@ fn layout(doc: &roxmltree::Document<'_>) -> Vec<String> {
         if n.ancestors().skip(1).any(|a| named(a, "sdt")) {
             continue;
         }
-        match n.tag_name().name() {
-            "sdt" => out.push(format!("control:{}", tag(n).unwrap_or("unknown"))),
-            "p" => out.push(format!("paragraph:{}", text(n))),
-            "tbl" | "tr" | "tc" => out.push(n.tag_name().name().into()),
-            "gridSpan" | "vMerge" => out.push(format!(
+        let item = match n.tag_name().name() {
+            "sdt" => format!("control:{}", tag(n).unwrap_or("unknown")),
+            "p" => {
+                anyhow::ensure!(
+                    n.range().len() <= LAYOUT_BUDGET,
+                    fault(
+                        "Word correction structure is too large; split into a smaller export/import"
+                    )
+                );
+                format!("paragraph:{}", text(n)?)
+            }
+            "tbl" | "tr" | "tc" => n.tag_name().name().into(),
+            "gridSpan" | "vMerge" => format!(
                 "{}:{}",
                 n.tag_name().name(),
                 n.attribute((W, "val")).unwrap_or("")
-            )),
-            _ => {}
-        }
+            ),
+            _ => continue,
+        };
+        retained = retained.saturating_add(
+            serde_json::to_vec(&item).map_or(usize::MAX, |data| data.len().saturating_add(1)),
+        );
+        anyhow::ensure!(
+            retained <= LAYOUT_BUDGET && out.len() < LAYOUT_LIMIT,
+            fault("Word correction structure is too large; split into a smaller export/import")
+        );
+        out.push(item);
     }
-    out
+    Ok(out)
 }
 pub(crate) fn seal(b: &mut Baseline, document: &str) -> Result<()> {
-    b.layout = layout(&parse(document)?);
-    anyhow::ensure!(
-        b.fields.len() <= 100000,
-        fault("Word round-trip supports at most 100,000 source fields per export")
-    );
+    if !enabled(b) {
+        return Ok(());
+    }
+    if document.len() as u64 > XML_LIMIT {
+        disable(b);
+        return Ok(());
+    }
+    let parsed = match parse(document) {
+        Ok(parsed) => parsed,
+        Err(error)
+            if error
+                .downcast_ref::<roxmltree::Error>()
+                .is_some_and(|e| matches!(e, roxmltree::Error::NodesLimitReached)) =>
+        {
+            disable(b);
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    match layout(&parsed) {
+        Ok(items) => b.layout = items,
+        Err(_) => disable(b),
+    }
     Ok(())
 }
-pub(crate) fn baseline_xml(b: &Baseline) -> Result<String> {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(b)?);
-    anyhow::ensure!(
-        encoded.len() as u64 <= XML_LIMIT,
-        fault("Word correction baseline is too large; export a smaller project")
-    );
-    Ok(format!(
+pub(crate) fn baseline_xml(b: &Baseline) -> Result<Option<String>> {
+    if !enabled(b) {
+        return Ok(None);
+    }
+    let bytes = serde_json::to_vec(b)?;
+    if bytes
+        .len()
+        .div_ceil(3)
+        .saturating_mul(4)
+        .saturating_add(256)
+        > XML_LIMIT as usize
+    {
+        return Ok(None);
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(Some(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ng:baseline xmlns:ng=\"{NS}\">{encoded}</ng:baseline>"
-    ))
+    )))
 }
 fn zip_text(zip: &mut zip::ZipArchive<fs::File>, name: &str) -> Result<String> {
     let mut file = zip.by_name(name)?;
@@ -275,6 +400,67 @@ fn set_field(b: &mut Block, field: &str, value: String) -> Result<()> {
     }
     Ok(())
 }
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CurrentPage {
+    page: usize,
+    image: String,
+    content: PageContent,
+}
+fn checkpoint(p: &Project, n: usize) -> Result<PathBuf> {
+    let edits = p.root.join(format!("page-{n:05}.edits.json"));
+    let path = if edits.is_file() {
+        edits
+    } else {
+        p.page_path(n)
+    };
+    anyhow::ensure!(
+        path.canonicalize()?.parent() == Some(p.root.canonicalize()?.as_path()),
+        fault("Word correction checkpoint resolves outside its project")
+    );
+    Ok(path)
+}
+fn current_page(p: &Project, n: usize, c: &Control) -> Result<(CurrentPage, String)> {
+    let path = checkpoint(p, n)?;
+    anyhow::ensure!(
+        fs::metadata(&path)?.len() <= XML_LIMIT,
+        fault("Word correction checkpoint is too large; split into a smaller import")
+    );
+    let digest = hash_file(&path, c)?;
+    let page: CurrentPage =
+        serde_json::from_reader(BufReader::new(fs::File::open(&path)?).take(XML_LIMIT + 1))?;
+    anyhow::ensure!(
+        page.page == n && page.image == format!("page-{n:05}.png"),
+        fault("Word correction checkpoint source identity changed")
+    );
+    page.content.validate()?;
+    anyhow::ensure!(
+        hash_file(&path, c)? == digest,
+        fault("Project changed while previewing Word corrections; preview again")
+    );
+    Ok((page, digest))
+}
+fn same_shape(saved: &Shape, block: &Block) -> bool {
+    saved.kind == block.kind
+        && saved.bbox == block.bbox
+        && saved.rows == block.rows.len()
+        && saved.cols == block.rows.first().map_or(0, Vec::len)
+        && saved.merges == block.merges
+}
+fn load_snapshot(path: &Path, page: usize, admitted_bytes: u64) -> Result<Page> {
+    let file = fs::File::open(path)?;
+    anyhow::ensure!(
+        file.metadata()?.len() <= admitted_bytes,
+        fault("Word correction checkpoint grew after admission; preview again or split the import")
+    );
+    let snapshot: Page = serde_json::from_reader(BufReader::new(file).take(admitted_bytes + 1))?;
+    anyhow::ensure!(
+        snapshot.page == page && snapshot.image == format!("page-{page:05}.png"),
+        fault("Word correction checkpoint source identity changed")
+    );
+    snapshot.content.validate()?;
+    Ok(snapshot)
+}
 pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
     c.check()?;
     let file = fs::File::open(input)?;
@@ -306,6 +492,12 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
             fault("Expanded Word archive exceeds 512 MB")
         );
     }
+    anyhow::ensure!(
+        names.contains("customXml/item1.xml"),
+        fault(
+            "Word correction import is unavailable for this document; export a smaller project to include its correction baseline"
+        )
+    );
     let xml = zip_text(&mut zip, "customXml/item1.xml")?;
     let data = parse(&xml)?;
     let root = data.root_element();
@@ -321,6 +513,9 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
         fault("Word baseline exceeds its size limit")
     );
     let b: Baseline = serde_json::from_slice(&bytes)?;
+    drop(bytes);
+    drop(data);
+    drop(xml);
     let digest = fingerprint(&p.manifest)?;
     anyhow::ensure!(
         b.schema == 1
@@ -405,6 +600,11 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
             .any(|name| named(n, name))
         }) {
             invalid.insert(key.to_string());
+            actual.insert(
+                key.to_string(),
+                "[unsupported Word source structure]".into(),
+            );
+            continue;
         }
         let format = formats.get(key).copied().flatten();
         let math: Vec<_> = content
@@ -432,7 +632,7 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
             if !math.is_empty() {
                 invalid.insert(key.to_string());
             }
-            clean(&text(content))
+            clean(&text(content)?)
         };
         anyhow::ensure!(
             value.len() <= 120000,
@@ -440,7 +640,9 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
         );
         actual.insert(key.to_string(), value);
     }
-    let layout_changed = layout(&doc) != b.layout;
+    let layout_changed = layout(&doc)? != b.layout;
+    drop(doc);
+    drop(document);
     let mut out = Preview {
         schema: 1,
         document_sha256: hash_file(input, c)?,
@@ -452,71 +654,95 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
     if layout_changed {
         out.warnings.push("Word page/block/table structure or untracked content changed. Resolve structural changes before importing text corrections.".into());
     }
-    let mut pages = BTreeMap::new();
-    for n in b.pages.keys() {
-        let page = p.load(*n)?;
-        out.page_digests.insert(*n, fingerprint(&page)?);
-        pages.insert(*n, page);
-    }
+    let mut fields_by_page: BTreeMap<usize, Vec<&BaselineField>> = BTreeMap::new();
     for field in &b.fields {
+        fields_by_page.entry(field.page).or_default().push(field);
+    }
+    let mut source_bytes = 0u64;
+    let mut result_bytes = 0usize;
+    for n in &p.manifest.pages {
+        let Some(fields) = fields_by_page.get(n) else {
+            continue;
+        };
         c.check()?;
-        let page = pages
-            .get(&field.page)
-            .ok_or_else(|| fault("Word baseline page is absent"))?;
-        let block = page.content.blocks.get(field.block);
-        let shape_changed = b.pages.get(&field.page).is_none_or(|shapes| {
-            *shapes != page.content.blocks.iter().map(shape).collect::<Vec<_>>()
+        source_bytes = source_bytes.saturating_add(fs::metadata(checkpoint(p, *n)?)?.len());
+        anyhow::ensure!(
+            source_bytes <= PREVIEW_SOURCE_BUDGET,
+            fault(
+                "Word correction preview exceeds its checkpoint budget; split into a smaller import"
+            )
+        );
+        let (page, page_digest) = current_page(p, *n, c)?;
+        out.page_digests.insert(*n, page_digest);
+        let shape_changed = b.pages.get(n).is_none_or(|shapes| {
+            shapes.len() != page.content.blocks.len()
+                || !shapes
+                    .iter()
+                    .zip(&page.content.blocks)
+                    .all(|(saved, block)| same_shape(saved, block))
         });
-        let current = block
-            .and_then(|b| field_text(b, &field.field).ok())
-            .map(clean)
-            .unwrap_or_default();
-        let imported = actual.get(&field.tag).cloned();
-        let baseline_comparison = if field.format.as_deref() == Some("omml") {
-            crate::equations::canonical(&field.text)?
-        } else {
-            field.text.clone()
-        };
-        let current_comparison = if field.format.as_deref() == Some("omml") {
-            crate::equations::canonical(&current).unwrap_or_else(|_| current.clone())
-        } else {
-            current.clone()
-        };
-        let (status, message) = if layout_changed
-            || shape_changed
-            || invalid.contains(&field.tag)
-            || imported.is_none()
-        {
-            (
-                "structural_conflict",
-                "Source controls, block geometry or Word structure changed. Review manually.",
-            )
-        } else if imported.as_ref() == Some(&baseline_comparison) {
-            ("unchanged", "No Word correction to import.")
-        } else if imported.as_ref() == Some(&current_comparison) {
-            (
-                "already_applied",
-                "This correction is already present in the project.",
-            )
-        } else if current_comparison != baseline_comparison {
-            (
-                "conflict",
-                "Both Word and the project changed this field. Compare against the source before resolving.",
-            )
-        } else {
-            ("changed", "Ready for explicit selection and import.")
-        };
-        out.fields.push(ImportField {
-            tag: field.tag.clone(),
-            page: field.page,
-            block: field.block,
-            field: field.field.clone(),
-            baseline: field.text.clone(),
-            current,
-            imported,
-            status: status.into(),
-            message: message.into(),
-        });
+        for field in fields {
+            c.check()?;
+            let block = page.content.blocks.get(field.block);
+            let current = block
+                .and_then(|b| field_text(b, &field.field).ok())
+                .map(clean)
+                .unwrap_or_default();
+            let imported = actual.get(&field.tag).cloned();
+            let baseline_comparison = if field.format.as_deref() == Some("omml") {
+                crate::equations::canonical(&field.text)?
+            } else {
+                field.text.clone()
+            };
+            let current_comparison = if field.format.as_deref() == Some("omml") {
+                crate::equations::canonical(&current).unwrap_or_else(|_| current.clone())
+            } else {
+                current.clone()
+            };
+            let (status, message) = if layout_changed
+                || shape_changed
+                || invalid.contains(&field.tag)
+                || imported.is_none()
+            {
+                (
+                    "structural_conflict",
+                    "Source controls, block geometry or Word structure changed. Review manually.",
+                )
+            } else if imported.as_ref() == Some(&baseline_comparison) {
+                ("unchanged", "No Word correction to import.")
+            } else if imported.as_ref() == Some(&current_comparison) {
+                (
+                    "already_applied",
+                    "This correction is already present in the project.",
+                )
+            } else if current_comparison != baseline_comparison {
+                (
+                    "conflict",
+                    "Both Word and the project changed this field. Compare against the source before resolving.",
+                )
+            } else {
+                ("changed", "Ready for explicit selection and import.")
+            };
+            let entry = ImportField {
+                tag: field.tag.clone(),
+                page: field.page,
+                block: field.block,
+                field: field.field.clone(),
+                baseline: field.text.clone(),
+                current,
+                imported,
+                status: status.into(),
+                message: message.into(),
+            };
+            result_bytes = result_bytes.saturating_add(serde_json::to_vec(&entry)?.len());
+            anyhow::ensure!(
+                result_bytes <= PREVIEW_RESULT_BUDGET,
+                fault(
+                    "Word correction preview exceeds its retained text budget; split into a smaller import"
+                )
+            );
+            out.fields.push(entry);
+        }
     }
     Ok(out)
 }
@@ -532,6 +758,7 @@ pub fn apply(
     anyhow::ensure!(
         !selected.is_empty()
             && selected.len() <= 100000
+            && selected.iter().all(|tag| tag.len() <= 256)
             && selected.iter().collect::<BTreeSet<_>>().len() == selected.len(),
         fault("Select distinct Word corrections to import")
     );
@@ -540,20 +767,65 @@ pub fn apply(
         fingerprint(&fresh)? == fingerprint(inspected)?,
         fault("Word document or project changed after preview; preview again")
     );
+    let by_tag: BTreeMap<_, _> = fresh
+        .fields
+        .iter()
+        .map(|field| (field.tag.as_str(), field))
+        .collect();
+    let mut admitted = BTreeMap::new();
+    let mut retained = 0u64;
+    for key in selected {
+        let field = by_tag
+            .get(key.as_str())
+            .ok_or_else(|| fault("Unknown selected Word correction"))?;
+        anyhow::ensure!(
+            field.status == "changed",
+            fault("Selected Word correction has a conflict or no change")
+        );
+        if let std::collections::btree_map::Entry::Vacant(entry) = admitted.entry(field.page) {
+            let bytes = fs::metadata(checkpoint(p, field.page)?)?.len();
+            let cost = bytes.saturating_mul(32).saturating_add(4096);
+            retained = retained.saturating_add(cost);
+            anyhow::ensure!(
+                retained <= APPLY_SNAPSHOT_BUDGET,
+                fault(
+                    "Word correction import exceeds its retained page/evidence budget; select fewer pages or split into a smaller import"
+                )
+            );
+            entry.insert(bytes);
+        }
+    }
     let mut pages: BTreeMap<usize, (Page, Page)> = BTreeMap::new();
     for key in selected {
         c.check()?;
-        let f = fresh
-            .fields
-            .iter()
-            .find(|f| &f.tag == key)
+        let f = by_tag
+            .get(key.as_str())
             .ok_or_else(|| fault("Unknown selected Word correction"))?;
         anyhow::ensure!(
             f.status == "changed",
             fault("Selected Word correction has a conflict or no change")
         );
         if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(f.page) {
-            let before = p.load(f.page)?;
+            let path = checkpoint(p, f.page)?;
+            let digest = fresh
+                .page_digests
+                .get(&f.page)
+                .ok_or_else(|| fault("Missing Word correction checkpoint digest"))?;
+            anyhow::ensure!(
+                hash_file(&path, c)? == *digest,
+                fault("Project changed after Word correction preview; preview again")
+            );
+            let before = load_snapshot(
+                &path,
+                f.page,
+                *admitted
+                    .get(&f.page)
+                    .ok_or_else(|| fault("Missing Word correction snapshot admission"))?,
+            )?;
+            anyhow::ensure!(
+                hash_file(&path, c)? == *digest,
+                fault("Project changed while staging Word corrections; preview again")
+            );
             entry.insert((before.clone(), before));
         }
         let (_, after) = pages
