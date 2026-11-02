@@ -55,7 +55,7 @@ pub fn preparation_admission(
     let required_mib = (u64::from(s.max_pixels) * 64).div_ceil(1_048_576) + 512;
     let available_mib = hw
         .free_ram_mib
-        .min((hw.ram_mib as f64 * s.ram_fraction) as u64)
+        .min((hw.ram_mib as f64 * f64::from(s.ram_fraction)) as u64)
         .saturating_sub(s.reserve_ram_mib);
     let reason = if mode == PreparationMode::Sequential {
         "Sequential preparation selected; overlap requires explicit opt-in."
