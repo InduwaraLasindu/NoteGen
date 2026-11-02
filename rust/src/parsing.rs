@@ -218,8 +218,9 @@ pub fn structured(text: &str) -> Result<PageContent> {
     Ok(p)
 }
 
-/// Keep a useful reading when the model cannot locate a region. Never guess units
-/// or invent a precise crop: preserve the full source for an uncertain figure.
+/// Keep useful reader content when optional region or merge claims are invalid.
+/// Never guess a crop or table topology: preserve cells in their reported places
+/// and require review when an entire table's merge claims must be omitted.
 pub fn structured_reader(text: &str) -> Result<PageContent> {
     let text = text
         .trim()
@@ -229,16 +230,29 @@ pub fn structured_reader(text: &str) -> Result<PageContent> {
     let mut page: PageContent = serde_json::from_str(text)
         .map_err(|_| Fault::new("NG201", "Structured model output is not valid page JSON"))?;
     let mut repaired = 0;
-    for block in &mut page.blocks {
+    let mut unmerged = vec![];
+    for (index, block) in page.blocks.iter_mut().enumerate() {
         let invalid = block.bbox.as_ref().is_some_and(|b| !b.valid());
         if invalid || (block.kind == "figure" && block.bbox.is_none()) {
             block.bbox = (block.kind == "figure").then(BoxRect::full);
             block.uncertain = true;
             repaired += 1;
         }
+        if block.kind == "table" && !block.merges.is_empty() && block.validate().is_err() {
+            // Do not retain an apparently valid subset: an in-bounds span can
+            // still cover a distinct cell when the model's topology conflicts.
+            // Recovery is allowed only if every other field validates unchanged.
+            block.merges.clear();
+            block.validate()?;
+            block.uncertain = true;
+            unmerged.push((index + 1).to_string());
+        }
     }
     if repaired > 0 {
         page.warnings.push(format!("{repaired} source regions could not be located. Uncertain figures retain the full source page; verify their boundaries in Review."));
+    }
+    if !unmerged.is_empty() {
+        page.warnings.push(format!("Table blocks {} contain invalid or overlapping merge metadata. All merge claims for those tables were omitted; every cell remains in its original row and column. Verify the unmerged layout against the scan and raw reader response in Review.", unmerged.join(", ")));
     }
     page.validate()?;
     anyhow::ensure!(

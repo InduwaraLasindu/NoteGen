@@ -82,6 +82,10 @@ pub fn refine_regions(page: &mut Page, s: &Settings) {
         if text.len() < block.plain().len() / 3 || text.len() > block.plain().len().max(20) * 4 {
             continue;
         }
+        // Agreement measures matching readings, not whether a reader's layout
+        // or legibility concern has been resolved. Table replacement below must
+        // retain both the original concern and uncertainty in the selected crop.
+        let prior_uncertain = block.uncertain;
         block.alternatives = readings
             .iter()
             .map(|r| format!("{}: {}", r.model_id, r.content.plain()))
@@ -99,7 +103,9 @@ pub fn refine_regions(page: &mut Page, s: &Settings) {
                 block.text = text;
             }
         }
-        block.uncertain = agreement < s.agreement_threshold
+        block.uncertain = prior_uncertain
+            || result.blocks.iter().any(|b| b.uncertain)
+            || agreement < s.agreement_threshold
             || result.warnings.iter().any(|w| w.contains("Numeric"));
         if !result.warnings.is_empty() {
             page.content.warnings.extend(result.warnings);

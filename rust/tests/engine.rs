@@ -1128,6 +1128,340 @@ fn valid_reader_boxes_are_preserved_without_repair() {
     );
 }
 #[test]
+fn native_qwen_invalid_merges_keep_every_cell_and_raw_response() {
+    // Exact synthetic-fixture response from Windows run 41499768733, artifact
+    // 13170838495, qwen35-2b-page-00001-W9tCzs.txt (no response edits).
+    let raw = include_str!("fixtures/qwen35-2b-invalid-table-merges.json");
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        hex::encode(Sha256::digest(raw.as_bytes())),
+        "856b9dc8639661b8c8b8aad711da301aa04c4652cc70ac541b9f9e9c2fd0ae91"
+    );
+    let original: PageContent = serde_json::from_str(raw).unwrap();
+    assert_eq!(original.blocks[0].merges.len(), 4);
+    let mut merge_only = original.blocks[0].clone();
+    merge_only.bbox = None;
+    assert!(
+        merge_only
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid table merge")
+    );
+    assert!(parsing::structured(raw).is_err());
+
+    let page = parsing::structured_reader(raw).unwrap();
+    page.validate().unwrap();
+    assert_eq!(page.blocks.len(), original.blocks.len());
+    assert_eq!(page.summary, original.summary);
+    assert!(page.warnings.starts_with(&original.warnings));
+    assert!(page.warnings.iter().any(|w| w.contains("Table blocks 1")
+        && w.contains("All merge claims")
+        && w.contains("every cell remains")
+        && w.contains("Review")));
+    for (index, (actual, mut expected)) in page.blocks.iter().zip(original.blocks).enumerate() {
+        // Both raw source boxes are invalid, independently of the bad merges.
+        expected.bbox = None;
+        expected.uncertain = true;
+        if index == 0 {
+            expected.merges.clear();
+        }
+        assert_eq!(actual, &expected);
+    }
+    assert_eq!(
+        page.blocks[0].rows,
+        vec![vec!["Item", "Amount"], vec!["Sales", "1250"]]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = Activity {
+        path: Some(dir.path().join("activity.jsonl")),
+        callback: None,
+    };
+    log.capture_response("qwen35-2b", 1, raw).unwrap();
+    let evidence = fs::read_dir(dir.path().join("responses"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(fs::read(evidence).unwrap(), raw.as_bytes());
+    let source_page = Page {
+        page: 1,
+        image: "page-00001.png".into(),
+        content: page,
+        agreement: 1.,
+        ..Default::default()
+    };
+    assert!(source_page.needs_review(0.5));
+    let project = project(&dir.path().join("project"), vec![1]);
+    project.save(&source_page).unwrap();
+    let output = dir.path().join("recovered.docx");
+    word::export(&project, &output, &Control::default()).unwrap();
+    let mut archive = zip::ZipArchive::new(fs::File::open(output).unwrap()).unwrap();
+    let mut xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    let document = roxmltree::Document::parse(&xml).unwrap();
+    let cells = document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name((
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "tc",
+            ))
+        })
+        .map(|cell| {
+            cell.descendants()
+                .filter(|node| {
+                    node.has_tag_name((
+                        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                        "t",
+                    ))
+                })
+                .filter_map(|node| node.text())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cells, ["Item", "Amount", "Sales", "1250"]);
+    assert!(!xml.contains("<w:gridSpan") && !xml.contains("<w:vMerge"));
+    assert!(xml.contains("All merge claims") && xml.contains("REVIEW NEEDED"));
+}
+
+#[test]
+fn recovered_table_review_status_survives_agreeing_full_and_crop_readers() {
+    let parsed =
+        parsing::structured_reader(include_str!("fixtures/qwen35-2b-invalid-table-merges.json"))
+            .unwrap();
+    let region = BoxRect {
+        left: 0.1,
+        top: 0.25,
+        right: 0.9,
+        bottom: 0.6,
+    };
+    let recovered = Candidate {
+        region: None,
+        model_id: "recovered-qwen".into(),
+        family: "qwen".into(),
+        view: "full".into(),
+        content: parsed.clone(),
+        reliability: 0.95,
+    };
+    let mut independent = recovered.clone();
+    independent.model_id = "independent-reader".into();
+    independent.family = "independent".into();
+    independent.reliability = 0.9;
+    independent.content.warnings.clear();
+    for block in &mut independent.content.blocks {
+        block.uncertain = false;
+    }
+    independent.content.blocks[0].bbox = Some(region.clone());
+    let full = vec![recovered, independent.clone()];
+    let (selected, agreement) = consensus::select(&full, 2, 0.92);
+    assert_eq!(agreement, 1.);
+    assert!(selected.blocks[0].uncertain);
+    assert_eq!(selected.blocks[0].bbox, Some(region.clone()));
+    assert_eq!(selected.warnings, parsed.warnings);
+
+    let mut candidates = full;
+    for (id, family) in [("crop-a", "crop-family-a"), ("crop-b", "crop-family-b")] {
+        candidates.push(Candidate {
+            region: Some(region.clone()),
+            model_id: id.into(),
+            family: family.into(),
+            view: "crop".into(),
+            content: PageContent {
+                blocks: vec![independent.content.blocks[0].clone()],
+                ..Default::default()
+            },
+            reliability: 0.9,
+        });
+    }
+    let mut page = Page {
+        content: selected,
+        candidates,
+        agreement,
+        ..Default::default()
+    };
+    consensus::refine_regions(&mut page, &Settings::default());
+    assert_eq!(page.content.blocks[0].rows, parsed.blocks[0].rows);
+    assert_eq!(page.content.blocks[0].bbox, Some(region));
+    assert!(page.content.blocks[0].merges.is_empty());
+    assert!(page.content.blocks[0].uncertain);
+    assert_eq!(page.content.blocks[0].alternatives.len(), 2);
+    assert_eq!(page.content.warnings, parsed.warnings);
+    assert!(page.needs_review(0.5));
+}
+
+#[test]
+fn agreeing_crops_preserve_prior_and_selected_reader_uncertainty() {
+    for kind in ["text", "table"] {
+        for (prior, crop) in [(true, false), (false, true), (false, false)] {
+            let parsed = parsing::structured_reader(
+                &serde_json::json!({"blocks":[{
+                    "kind": kind,
+                    "text": "Amount 1250 Ω",
+                    "rows": [["Amount", "1250 Ω"]],
+                    "box": {"left":0.1,"top":0.2,"right":0.9,"bottom":0.6},
+                    "uncertain": crop,
+                    "confidence": 0.99
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+            let mut original = parsed.blocks[0].clone();
+            original.uncertain = prior;
+            let mut page = Page {
+                content: PageContent {
+                    blocks: vec![original.clone()],
+                    ..Default::default()
+                },
+                candidates: [("a", "one"), ("b", "two")]
+                    .into_iter()
+                    .map(|(id, family)| Candidate {
+                        region: original.bbox.clone(),
+                        model_id: id.into(),
+                        family: family.into(),
+                        view: "crop".into(),
+                        content: parsed.clone(),
+                        reliability: 0.9,
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            consensus::refine_regions(&mut page, &Settings::default());
+            let block = &page.content.blocks[0];
+            assert_eq!(block.uncertain, prior || crop, "{kind} {prior} {crop}");
+            assert_eq!(block.plain(), original.plain());
+            assert_eq!(block.bbox, original.bbox);
+            assert_eq!(block.alternatives.len(), 2);
+            block.validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn reader_merge_recovery_discards_all_claims_only_for_affected_tables() {
+    let table = Block {
+        kind: "table".into(),
+        rows: vec![
+            vec!["Item Ω".into(), "Amount".into()],
+            vec!["Sales".into(), "1250.00".into()],
+        ],
+        text: "Additional exact reader text".into(),
+        bbox: Some(BoxRect::full()),
+        confidence: Some(0.91),
+        header_rows: 1,
+        description: "Exact description".into(),
+        interpretation: "Qualified reading".into(),
+        alternatives: vec!["125O.00?".into()],
+        ..Default::default()
+    };
+    let merge = |row, col, rowspan, colspan| Merge {
+        row,
+        col,
+        rowspan,
+        colspan,
+    };
+    let valid_merge = merge(0, 0, 1, 1);
+    let mut valid_table = table.clone();
+    valid_table.merges = vec![valid_merge.clone()];
+    let valid_page = PageContent {
+        blocks: vec![valid_table.clone()],
+        ..Default::default()
+    };
+    let valid_raw = serde_json::to_string(&valid_page).unwrap();
+    let valid_result = parsing::structured_reader(&valid_raw).unwrap();
+    assert_eq!(valid_result.blocks, valid_page.blocks);
+    assert!(valid_result.warnings.is_empty());
+    assert!(parsing::structured(&valid_raw).is_ok());
+
+    for invalid in [
+        merge(0, 0, 0, 1),
+        merge(0, 0, 1, 0),
+        merge(2, 0, 1, 1),
+        merge(0, 2, 1, 1),
+        merge(0, 1, 1, 2),
+        merge(1, 0, 2, 1),
+        merge(usize::MAX, 0, 2, 1),
+        merge(0, usize::MAX, 1, 2),
+        merge(0, 0, usize::MAX, 1),
+        merge(0, 0, 1, usize::MAX),
+        // An individually valid span overlaps the preceding 1x1 claim.
+        merge(0, 0, 1, 2),
+    ] {
+        let mut bad_table = table.clone();
+        bad_table.merges = vec![valid_merge.clone(), invalid.clone()];
+        let original = PageContent {
+            blocks: vec![Block::text("Before"), bad_table, valid_table.clone()],
+            warnings: vec!["Original reader warning".into()],
+            summary: "Exact summary".into(),
+        };
+        let raw = serde_json::to_string(&original).unwrap();
+        assert!(parsing::structured(&raw).is_err(), "{invalid:?}");
+        let recovered = parsing::structured_reader(&raw).unwrap();
+        recovered.validate().unwrap();
+        let mut expected = original.blocks.clone();
+        expected[1].merges.clear();
+        expected[1].uncertain = true;
+        assert_eq!(recovered.blocks, expected, "{invalid:?}");
+        assert_eq!(recovered.summary, original.summary);
+        assert_eq!(recovered.warnings.len(), 2);
+        assert_eq!(recovered.warnings[0], original.warnings[0]);
+        assert!(recovered.warnings[1].contains("Table blocks 2 contain"));
+    }
+
+    // Merge recovery must not admit a malformed table or other invalid fields.
+    for change in 0..4 {
+        let mut invalid = table.clone();
+        invalid.merges = vec![merge(0, 1, 1, 2)];
+        match change {
+            0 => {
+                invalid.rows[1].pop().unwrap();
+            }
+            1 => {
+                invalid.header_rows = 3;
+            }
+            2 => {
+                invalid.confidence = Some(1.1);
+            }
+            _ => {
+                invalid.text = "x".repeat(120000);
+            }
+        };
+        let raw = serde_json::to_string(&PageContent {
+            blocks: vec![invalid],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(parsing::structured_reader(&raw).is_err());
+    }
+
+    // A page at the block limit still gets a single bounded, source-linked notice.
+    let mut invalid = table;
+    invalid.merges = vec![merge(0, 1, 1, 2)];
+    let raw = serde_json::to_string(&PageContent {
+        blocks: vec![invalid; 500],
+        ..Default::default()
+    })
+    .unwrap();
+    let recovered = parsing::structured_reader(&raw).unwrap();
+    assert_eq!(recovered.blocks.len(), 500);
+    assert_eq!(recovered.warnings.len(), 1);
+    assert!(recovered.warnings[0].contains("499, 500 contain"));
+    assert!(recovered.warnings[0].len() <= 8000);
+    assert!(
+        recovered
+            .blocks
+            .iter()
+            .all(|block| block.uncertain && block.merges.is_empty())
+    );
+}
+
+#[test]
 fn raw_reader_evidence_is_retained_with_safe_unique_names() {
     let dir = tempfile::tempdir().unwrap();
     let log = Activity {
