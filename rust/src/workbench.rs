@@ -1076,7 +1076,7 @@ impl Desktop {
             .char_limit(2048)
             .hint_text("Paste a private-update bearer token")
             .show(ui);
-        output.response = output.response.accessible_name("Private-update bearer token. Masked input; stored only after choosing Store token in Windows.");
+        output.response.response = output.response.response.accessible_name("Private-update bearer token. Masked input; stored only after choosing Store token in Windows.");
         output.state.clear_undoer();
         output.state.store(ctx, output.response.id);
         if ui

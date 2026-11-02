@@ -8,7 +8,7 @@ on:
     inputs:
       version:
         description: Installer release version
-        default: '0.4.1'
+        default: '0.5.0'
         required: true
       source_run:
         description: Successful Rust verification workflow run
@@ -36,7 +36,7 @@ jobs:
       source_sha: ${{ steps.payload.outputs.source_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_VERSION: ${{ inputs.version || '0.4.1' }}
+      RELEASE_VERSION: ${{ inputs.version || '0.5.0' }}
       SOURCE_RUN: ${{ inputs.source_run || github.event.workflow_run.id || '' }}
       SOURCE_SHA: ${{ inputs.source_sha || github.event.workflow_run.head_sha || '' }}
     steps:

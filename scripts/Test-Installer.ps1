@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.4.1',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='',[string]$PreviousVersion='0.4.1')
+param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.5.0',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='',[string]$PreviousVersion='0.4.1')
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$' -or $PreviousVersion -notmatch '^\d+\.\d+\.\d+$'){throw 'Installer versions must use major.minor.patch.'}
 $Installer=(Resolve-Path $Installer).Path

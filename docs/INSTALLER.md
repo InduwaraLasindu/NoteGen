@@ -52,4 +52,4 @@ containing spaces and checks preservation of user-created files before publishin
 The AI setup dry run performs no downloads. This pipeline does not repeat unaffected
 Rust/model tests; those are attached to the verified source build.
 
-Version 0.4.1 corrects live preview source selection and cleanup. See [patch details](RELEASE_0.4.1.md).
+Version 0.5.0 adds project and review tools, additional exports and optional local resources. See the [workbench guide](WORKBENCH.md) and [implementation ledger](FEATURES_0.5.0.md) for supported workflows and remaining scope.

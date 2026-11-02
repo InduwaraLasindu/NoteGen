@@ -2827,14 +2827,16 @@ mod acceptance {
                     egui::Pos2::ZERO,
                     Vec2::new(1200., 900.),
                 )),
-                modifiers,
-                events: vec![egui::Event::Key {
-                    key: egui::Key::Enter,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers,
-                }],
+                events: vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    },
+                ],
                 ..Default::default()
             },
             |ui| app.review_ui(ui.ctx()),
