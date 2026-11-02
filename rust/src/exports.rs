@@ -96,6 +96,9 @@ fn file_uri(path: &Path) -> Result<String> {
         .map_err(|_| Fault::new("NG400", "Cannot construct a local source link").into())
 }
 fn source_uri(project: &Project, page: &Page, region: &BoxRect) -> Result<String> {
+    if crate::redactions::is_export_projection(project) {
+        return Ok(String::new());
+    }
     let mut uri = file_uri(&project.root.canonicalize()?.join(&page.image))?;
     uri.push_str(&format!(
         "#xywh=percent,{:.4},{:.4},{:.4},{:.4}",
@@ -107,6 +110,9 @@ fn source_uri(project: &Project, page: &Page, region: &BoxRect) -> Result<String
     Ok(uri)
 }
 fn checkpoint_uri(project: &Project, page: &Page) -> Result<String> {
+    if crate::redactions::is_export_projection(project) {
+        return Ok(String::new());
+    }
     let edits = project
         .root
         .join(format!("page-{:05}.edits.json", page.page));
@@ -167,6 +173,17 @@ fn evidence_index(page: &Page, checkpoint: &str) -> Result<HashMap<String, Vec<E
     Ok(found)
 }
 pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
+    let projection = crate::redactions::ExportProjection::new(project, c)?;
+    let visible = projection
+        .as_ref()
+        .map_or(project, |projection| projection.project());
+    let result = traceability_inner(visible, c)?;
+    if let Some(projection) = &projection {
+        projection.verify_unchanged(project, c)?;
+    }
+    Ok(result)
+}
+fn traceability_inner(project: &Project, c: &Control) -> Result<Traceability> {
     c.check()?;
     let mut result = Traceability {
         schema: 1,
@@ -175,6 +192,9 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
         evidence_note: "Source coordinates refer to the saved scan, not an inferred cell grid. Exact reader-value matches are candidates, not proof of correctness; repeated values may match multiple regions. At most four exact matches per value and 100,000 distinct evidence values per page are retained. Missing evidence means no exact match was retained. Confidence is uncalibrated. Source links depend on the local project remaining available.".into(),
         pages: vec![],
     };
+    if crate::redactions::is_export_projection(project) {
+        result.evidence_note = crate::redactions::EXPORT_NOTICE.into();
+    }
     let mut total_cells = 0usize;
     let mut total_blocks = 0usize;
     let mut total_layers = 0usize;
@@ -365,6 +385,17 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
         Format::Latex => out.write_all(b"% Compile with XeLaTeX or LuaLaTeX for Unicode text.\n\\documentclass{article}\n\\usepackage{fontspec}\n\\usepackage{hyperref}\n\\usepackage{longtable}\n\\begin{document}\n\\section*{NoteGen transcription}\nConfidence is uncalibrated. Compare uncertain content with the source scan. Local links require the project files.\n\n")?,
         _ => out.write_all(b"# NoteGen transcription\n\nConfidence is uncalibrated. Compare uncertain content with its source scan. Local links require the project files.\n\n")?,
     }
+    if crate::redactions::is_export_projection(project) {
+        match format {
+            Format::Html => writeln!(
+                out,
+                "<p class=\"review\">{}</p>",
+                xml(crate::redactions::EXPORT_NOTICE)
+            )?,
+            Format::Latex => writeln!(out, "{}\\par", latex(crate::redactions::EXPORT_NOTICE))?,
+            _ => writeln!(out, "> {}\n", markdown(crate::redactions::EXPORT_NOTICE))?,
+        }
+    }
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
@@ -426,13 +457,22 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
             );
             match format {
                 Format::Html => {
-                    writeln!(
-                        out,
-                        "<article id=\"page-{n}-block-{}\" dir=\"auto\"><p><a href=\"{}\">Source: {}</a></p>",
-                        index + 1,
-                        xml(&uri),
-                        xml(&status)
-                    )?;
+                    if uri.is_empty() {
+                        writeln!(
+                            out,
+                            "<article id=\"page-{n}-block-{}\" dir=\"auto\"><p>Source: {} · private link omitted</p>",
+                            index + 1,
+                            xml(&status)
+                        )?;
+                    } else {
+                        writeln!(
+                            out,
+                            "<article id=\"page-{n}-block-{}\" dir=\"auto\"><p><a href=\"{}\">Source: {}</a></p>",
+                            index + 1,
+                            xml(&uri),
+                            xml(&status)
+                        )?;
+                    }
                     for layer in layers
                         .iter()
                         .filter(|a| a.confirmed() && a.assignment.block == index)
@@ -453,12 +493,16 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                                 write!(out, "<tr>")?;
                                 for cell in row {
                                     let tag = if ri < b.header_rows { "th" } else { "td" };
-                                    write!(
-                                        out,
-                                        "<{tag}><a href=\"{}\">{}</a></{tag}>",
-                                        xml(&uri),
-                                        xml(cell)
-                                    )?;
+                                    if uri.is_empty() {
+                                        write!(out, "<{tag}>{}</{tag}>", xml(cell))?;
+                                    } else {
+                                        write!(
+                                            out,
+                                            "<{tag}><a href=\"{}\">{}</a></{tag}>",
+                                            xml(&uri),
+                                            xml(cell)
+                                        )?;
+                                    }
                                 }
                                 writeln!(out, "</tr>")?;
                             }
@@ -477,12 +521,20 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                 }
                 Format::Latex => {
                     // All document text is escaped, including equations. Never execute untrusted TeX.
-                    writeln!(
-                        out,
-                        "\\noindent Source: \\href{{{}}}{{{}}}\\par",
-                        latex(&uri),
-                        latex(&status)
-                    )?;
+                    if uri.is_empty() {
+                        writeln!(
+                            out,
+                            "\\noindent Source: {} -- private link omitted\\par",
+                            latex(&status)
+                        )?;
+                    } else {
+                        writeln!(
+                            out,
+                            "\\noindent Source: \\href{{{}}}{{{}}}\\par",
+                            latex(&uri),
+                            latex(&status)
+                        )?;
+                    }
                     for layer in layers
                         .iter()
                         .filter(|a| a.confirmed() && a.assignment.block == index)
@@ -519,7 +571,15 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                     }
                 }
                 _ => {
-                    writeln!(out, "[Source: {}](<{uri}>)\n", markdown(&status))?;
+                    if uri.is_empty() {
+                        writeln!(
+                            out,
+                            "Source: {} · private link omitted\n",
+                            markdown(&status)
+                        )?;
+                    } else {
+                        writeln!(out, "[Source: {}](<{uri}>)\n", markdown(&status))?;
+                    }
                     for layer in layers
                         .iter()
                         .filter(|a| a.confirmed() && a.assignment.block == index)
@@ -668,6 +728,12 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
         r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
     );
     let mut review_row = 1usize;
+    if crate::redactions::is_export_projection(project) {
+        review_row = 2;
+        review.push_str("<row r=\"2\">");
+        review.push_str(&inline_cell("D2", crate::redactions::EXPORT_NOTICE, 2)?);
+        review.push_str("</row>");
+    }
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
@@ -703,7 +769,10 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
             let mut rels = String::from(
                 r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
             );
-            rels.push_str(&format!(r#"<Relationship Id="source" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/></Relationships>"#, xml(&uri)));
+            if !uri.is_empty() {
+                rels.push_str(&format!(r#"<Relationship Id="source" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#, xml(&uri)));
+            }
+            rels.push_str("</Relationships>");
             let warning = format!(
                 "{}{}{}",
                 if uncertain { "Uncertain content. " } else { "" },
@@ -728,10 +797,12 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
                             style
                         },
                     )?);
-                    links.push_str(&format!(
-                        "<hyperlink ref=\"{address}\" r:id=\"source\" tooltip=\"{}\"/>",
-                        xml(&warning)
-                    ));
+                    if !uri.is_empty() {
+                        links.push_str(&format!(
+                            "<hyperlink ref=\"{address}\" r:id=\"source\" tooltip=\"{}\"/>",
+                            xml(&warning)
+                        ));
+                    }
                     review_row += 1;
                     anyhow::ensure!(
                         review_row <= 1_048_576,
@@ -769,10 +840,12 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
                         )?);
                     }
                     review.push_str("</row>");
-                    review_links.push_str(&format!(
-                        "<hyperlink ref=\"H{review_row}\" r:id=\"link{review_row}\"/>"
-                    ));
-                    review_rels.push_str(&format!(r#"<Relationship Id="link{review_row}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#, xml(&uri)));
+                    if !uri.is_empty() {
+                        review_links.push_str(&format!(
+                            "<hyperlink ref=\"H{review_row}\" r:id=\"link{review_row}\"/>"
+                        ));
+                        review_rels.push_str(&format!(r#"<Relationship Id="link{review_row}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#, xml(&uri)));
+                    }
                 }
                 sheet.push_str("</row>");
             }
@@ -951,7 +1024,7 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
     Ok(())
 }
 
-fn output_parent(project: &Project, target: &Path) -> Result<std::path::PathBuf> {
+pub(crate) fn output_parent(project: &Project, target: &Path) -> Result<std::path::PathBuf> {
     let parent = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -993,6 +1066,16 @@ fn output_parent(project: &Project, target: &Path) -> Result<std::path::PathBuf>
 /// Export atomically outside project data, without replacing any existing output
 /// (including raced creations). New files cannot shadow checkpoint/control files.
 pub fn export(project: &Project, target: &Path, format: Format, c: &Control) -> Result<()> {
+    output_parent(project, target)?;
+    anyhow::ensure!(
+        !target.exists(),
+        Fault::new("NG401", "Output already exists")
+    );
+    crate::redactions::export_projected(project, target, c, |visible, output| {
+        export_inner(visible, output, format, c)
+    })
+}
+fn export_inner(project: &Project, target: &Path, format: Format, c: &Control) -> Result<()> {
     let operation = || -> Result<()> {
         c.check()?;
         anyhow::ensure!(

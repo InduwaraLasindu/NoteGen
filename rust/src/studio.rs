@@ -51,6 +51,8 @@ struct Teach {
     region: BoxRect,
     label: String,
     glyph: bool,
+    font_shape: usize,
+    alternate: u8,
     notes: String,
     texture: Option<egui::TextureHandle>,
 }
@@ -214,7 +216,8 @@ impl Desktop {
             self.notice = error.to_string();
             return;
         }
-        self.control = Control::default();
+        self.release_warm_reader();
+        self.control = self.fresh_operation_control();
         let c = self.control.clone();
         let tx = self.tx.clone();
         let cx = ctx.clone();
@@ -562,6 +565,32 @@ impl Desktop {
         });
         ui.separator();
         ui.strong("Font coverage");
+        ui.horizontal_wrapped(|ui| {
+            for (redo, label) in [
+                (false, "Undo learned-example edit"),
+                (true, "Redo learned-example edit"),
+            ] {
+                if ui
+                    .add_enabled(self.worker.is_none(), egui::Button::new(label))
+                    .clicked()
+                {
+                    let root = self.state.settings.writer.root.clone();
+                    let id = profile.id.clone();
+                    self.studio_task(ctx, move |_, _| {
+                        let profile = if redo {
+                            crate::writer_history::redo(&root, &id)?
+                        } else {
+                            crate::writer_history::undo(&root, &id)?
+                        };
+                        Ok(StudioMessage::Done(format!(
+                            "{} · active revision {}",
+                            label, profile.revision
+                        )))
+                    });
+                }
+            }
+        });
+        ui.small(crate::writer_history::RETENTION_NOTE);
         let coverage = writers::coverage(&profile);
         ui.horizontal_wrapped(|ui| {
             for ch in ('A'..='Z').chain('a'..='z').chain('0'..='9') {
@@ -574,7 +603,37 @@ impl Desktop {
                 ));
             }
         });
-        ui.small("Label isolated characters to build a personal print-style font. Whole words help recognition; they cannot supply reliable individual font outlines.");
+        ui.label(format!(
+            "Confirmed Unicode glyphs: {}",
+            if coverage.is_empty() {
+                "none"
+            } else {
+                &coverage
+            }
+        ));
+        match fontpack::coverage(&self.state.settings.writer.root, &profile.id) {
+            Ok(report) => {
+                for shape in report.shapes {
+                    ui.label(format!(
+                        "{} · {} · {} confirmed example(s)",
+                        shape.label,
+                        shape.feature,
+                        shape.sample_ids.len()
+                    ));
+                }
+                if !report.component_placeholders.is_empty() {
+                    ui.label(format!(
+                        "Unconfirmed component placeholders: {}",
+                        report.component_placeholders
+                    ));
+                }
+                ui.small(report.note);
+            }
+            Err(error) => {
+                ui.colored_label(Color32::LIGHT_RED, error.to_string());
+            }
+        }
+        ui.small("Teach a visible Unicode character, a whole grapheme cluster, a ligature, or a numbered stylistic alternate. Only confirmed samples provide outlines.");
         egui::CollapsingHeader::new("Font options & export")
             .default_open(true)
             .show(ui, |ui| {
@@ -590,6 +649,28 @@ impl Desktop {
                     egui::Slider::new(&mut self.studio.font.threshold, 32..=224)
                         .text("Ink threshold / average weight"),
                 );
+                if ui
+                    .add_enabled(
+                        self.worker.is_none(),
+                        egui::Button::new("Save shaping proof sheet"),
+                    )
+                    .clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("HTML proof", &["html"])
+                        .set_file_name(format!("{}-proof.html", profile.id))
+                        .save_file()
+                {
+                    let root = self.state.settings.writer.root.clone();
+                    let id = profile.id.clone();
+                    let options = self.studio.font.clone();
+                    self.studio_task(ctx, move |c, _| {
+                        crate::profile_tools::font_proof_sheet(&root, &id, &path, &options, &c)?;
+                        Ok(StudioMessage::Done(format!(
+                            "Shaping proof saved: {}",
+                            path.display()
+                        )))
+                    });
+                }
                 if ui
                     .add_enabled(
                         self.worker.is_none(),
@@ -618,10 +699,12 @@ impl Desktop {
             for sample in profile.samples.iter().rev().take(30) {
                 ui.horizontal(|ui| {
                     ui.monospace(&sample.label);
-                    ui.small(if sample.glyph {
-                        "letter"
-                    } else {
-                        "word / phrase"
+                    ui.small(match &sample.font_shape {
+                        Some(writers::FontShape::Ligature) => "font ligature",
+                        Some(writers::FontShape::Cluster) => "font cluster",
+                        Some(writers::FontShape::Alternate { .. }) => "font alternate",
+                        None if sample.glyph => "Unicode glyph",
+                        None => "word / phrase",
                     });
                     if ui
                         .add_enabled(self.worker.is_none(), egui::Button::new("Forget example"))
@@ -761,15 +844,19 @@ impl Desktop {
                             )
                             .clicked()
                         {
-                            let dir = self.state.settings.models_dir.clone();
-                            let model = m.clone();
-                            self.studio_task(ctx, move |c, log| {
-                                let m = models::install(&dir, &model, &update, &c, &log)?;
-                                Ok(StudioMessage::Done(format!(
-                                    "Activated {}. Previous version retained.",
-                                    m.name
-                                )))
-                            });
+                            if let Err(error) = self.prepare_download_control() {
+                                self.notice = error.to_string();
+                            } else {
+                                let dir = self.state.settings.models_dir.clone();
+                                let model = m.clone();
+                                self.studio_task(ctx, move |c, log| {
+                                    let m = models::install(&dir, &model, &update, &c, &log)?;
+                                    Ok(StudioMessage::Done(format!(
+                                        "Activated {}. Previous version retained.",
+                                        m.name
+                                    )))
+                                });
+                            }
                         }
                     }
                 });
@@ -871,22 +958,42 @@ impl Desktop {
         ui.small("Public references can be incomplete or wrong. They guide contextual interpretation and never supply missing source words or digits.");
     }
     pub(super) fn prepare_teach(&mut self, r: &Review, region: BoxRect, ctx: &egui::Context) {
-        let texture = writers::open_image(&r.project.image(r.page.page), 40_000_000)
-            .ok()
-            .map(|im| {
-                let (x, y, w, h) = region.pixels(im.width(), im.height());
-                texture(
-                    ctx,
-                    "teach-crop",
-                    im.crop_imm(x, y, w - x, h - y).thumbnail(600, 260),
-                )
-            });
+        if r.page.confirmed_redactions.iter().any(|mask| {
+            region.left < mask.region.right
+                && region.right > mask.region.left
+                && region.top < mask.region.bottom
+                && region.bottom > mask.region.top
+        }) {
+            self.notice =
+                "Choose visible writing outside confirmed source masks for a learned example."
+                    .into();
+            return;
+        }
+        let image =
+            match crate::redactions::effective_page(&r.project, &r.page, &Control::default()) {
+                Ok((_, image, _)) => image,
+                Err(error) => {
+                    self.notice = error.to_string();
+                    return;
+                }
+            };
+        let texture = Some({
+            let im = image;
+            let (x, y, w, h) = region.pixels(im.width(), im.height());
+            texture(
+                ctx,
+                "teach-crop",
+                im.crop_imm(x, y, w - x, h - y).thumbnail(600, 260),
+            )
+        });
         self.studio.teach = Some(Teach {
             project: r.project.clone(),
             page: r.page.page,
             region,
             label: String::new(),
             glyph: false,
+            font_shape: 0,
+            alternate: 1,
             notes: String::new(),
             texture,
         });
@@ -900,12 +1007,16 @@ impl Desktop {
         egui::Window::new("Label handwriting / context").open(&mut open).default_width(650.).fade_in(motion::enabled(&self.state.settings.ui)).show(ctx,|ui|{
    if let Some(t)=&teach.texture{ui.image((t.id(),t.size_vec2()));}
    ui.label("What does this area say or represent?");ui.add(egui::TextEdit::singleline(&mut teach.label).hint_text("Exact confirmed letter, word, number or phrase").char_limit(160).desired_width(f32::INFINITY));
-   ui.checkbox(&mut teach.glyph,"This is one isolated English letter / digit / punctuation mark (also builds font coverage)");
+   ui.checkbox(&mut teach.glyph,"One visible Unicode character (also builds font coverage)");
+   egui::ComboBox::from_label("Confirmed font form").selected_text(["Recognition example / default glyph", "Ligature", "Grapheme cluster", "Stylistic alternate"][teach.font_shape.min(3)]).show_ui(ui, |ui| {
+       for (index,label) in ["Recognition example / default glyph", "Ligature", "Grapheme cluster", "Stylistic alternate"].iter().enumerate() { ui.selectable_value(&mut teach.font_shape,index,*label); }
+   });
+   if teach.font_shape == 3 { ui.add(egui::Slider::new(&mut teach.alternate, 1..=16).text("Alternate index")); }
    ui.label("Optional meaning, topic, special spelling or context");ui.add(egui::TextEdit::multiline(&mut teach.notes).desired_rows(3).char_limit(4000).desired_width(f32::INFINITY));
    let writer=self.state.settings.writer.id.clone();let name=self.studio.profiles.iter().find(|p|Some(&p.id)==writer.as_ref()).map(|p|p.name.clone());
    ui.horizontal_wrapped(|ui|{
     if ui.add_enabled(!teach.notes.trim().is_empty(),egui::Button::new("Save project context")).clicked(){match assistance::add_context(&teach.project,&format!("Page {}, region {:?}: {}. Label: {}",teach.page,teach.region,teach.notes,teach.label)){Ok(())=>{self.notice="Project context saved. Use Re-read with context to obtain a new interpretation.".into();saved=true;},Err(e)=>self.studio.error=e.to_string()}}
-    if ui.add_enabled(self.worker.is_none() && name.is_some() && !teach.label.trim().is_empty(),egui::Button::new(format!("Teach {}",name.as_deref().unwrap_or("a writer")))).clicked(){let root=self.state.settings.writer.root.clone();let id=writer.clone().unwrap();let image=teach.project.image(teach.page);let region=teach.region.clone();let label=teach.label.clone();let glyph=teach.glyph;let source=format!("{} page {}",teach.project.root.display(),teach.page);self.studio_task(ctx,move|_,_|{let image=writers::open_image(&image,40_000_000)?;writers::add_example(&root,&id,&image,region,&label,glyph,&source)?;Ok(StudioMessage::Done("Confirmed handwriting example saved. Future scans can use this shape.".into()))});saved=true;}
+    if ui.add_enabled(self.worker.is_none() && name.is_some() && !teach.label.trim().is_empty(),egui::Button::new(format!("Teach {}",name.as_deref().unwrap_or("a writer")))).clicked(){let root=self.state.settings.writer.root.clone();let id=writer.clone().unwrap();let project=teach.project.clone();let number=teach.page;let region=teach.region.clone();let label=teach.label.clone();let glyph=teach.glyph;let shape=match teach.font_shape { 1=>Some(writers::FontShape::Ligature), 2=>Some(writers::FontShape::Cluster), 3=>Some(writers::FontShape::Alternate { index:teach.alternate }), _=>None };let source=format!("{} page {}",teach.project.root.display(),teach.page);self.studio_task(ctx,move|c,_|{let page=project.load(number)?;let (_,image,_)=crate::redactions::effective_page(&project,&page,&c)?;if let Some(shape)=shape { writers::add_font_example(&root,&id,&image,region,&label,shape,&source)?; } else { writers::add_example(&root,&id,&image,region,&label,glyph,&source)?; } Ok(StudioMessage::Done("Confirmed handwriting example saved. Future scans can use this shape.".into()))});saved=true;}
    });
    if name.is_none(){ui.small("Select or add a writer in Studio → Writers & fonts to remember letter and word shapes.");}
   });
@@ -946,7 +1057,7 @@ impl Desktop {
    ui.label("Extra context for a new AI reading (optional)");ui.add(egui::TextEdit::multiline(&mut answer.context).desired_rows(2).char_limit(4000).desired_width(f32::INFINITY));
    let can_learn=self.state.settings.writer.id.is_some() && question.region.is_some() && question.field=="text";
    ui.add_enabled(can_learn,egui::Checkbox::new(&mut answer.learn,"Remember this confirmed crop for the selected writer"));
-   if answer.learn{ui.checkbox(&mut answer.glyph,"One isolated English glyph");}
+   if answer.learn{ui.checkbox(&mut answer.glyph,"One visible Unicode character");}
    if !pending.error.is_empty(){ui.colored_label(Color32::from_rgb(240,160,130),&pending.error);}
    ui.small("Leave the correction empty when unsure. Context can request a new local vision reading; it never silently replaces confirmed text.");
    ui.horizontal(|ui|{

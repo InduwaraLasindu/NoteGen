@@ -106,14 +106,9 @@ fn edit_sample(
     sample_id: &str,
     change: impl FnOnce(&mut writers::Sample) -> Result<()>,
 ) -> Result<Profile> {
-    let dir = writers::folder(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(".lock"))?;
-    lock.lock()?;
+    let _lock = crate::writer_history::lock(root, id)?;
     let mut p = writers::read(root, id)?;
+    let before = p.clone();
     let sample = p
         .samples
         .iter_mut()
@@ -122,7 +117,12 @@ fn edit_sample(
     change(sample)?;
     writers::bump_revision(&mut p)?;
     writers::validate(&p)?;
-    atomic_json(&dir.join("profile.json"), &p)?;
+    crate::writer_history::commit_locked(
+        root,
+        &before,
+        &p,
+        "Edit learned example conditions or quarantine",
+    )?;
     Ok(p)
 }
 pub fn set_conditions(

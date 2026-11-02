@@ -137,10 +137,14 @@ fn evidence_label(page: &Page) -> String {
         ),
     }
 }
+#[path = "download_ui.rs"]
+mod download_ui;
 #[path = "experience.rs"]
 mod experience;
 #[path = "studio.rs"]
 mod studio;
+#[path = "vault_ui.rs"]
+mod vault_ui;
 #[path = "workbench.rs"]
 mod workbench;
 
@@ -183,6 +187,89 @@ struct Review {
     crop_mode: bool,
     crop_start: Option<egui::Pos2>,
     crop: Option<BoxRect>,
+    last_source_crop: Option<BoxRect>,
+    magnifier: Option<SourceMagnifier>,
+}
+fn review_source(project: &Project, page: &Page) -> Result<image::DynamicImage> {
+    if page.confirmed_redactions.is_empty() {
+        crate::writers::open_image(&project.image(page.page), 40_000_000)
+    } else {
+        // Source identity is rechecked; a stale mask never falls back to the
+        // unmasked original. Keep the exact checkpoint as the edit baseline.
+        Ok(crate::redactions::effective_page(project, page, &Control::default())?.1)
+    }
+}
+struct SourceMagnifier {
+    source: image::DynamicImage,
+    region: [u32; 4],
+    tile: [u32; 4],
+    texture: egui::TextureHandle,
+    zoom: f32,
+}
+impl SourceMagnifier {
+    fn new(source: image::DynamicImage, region: &BoxRect, ctx: &egui::Context) -> Result<Self> {
+        anyhow::ensure!(
+            region.valid(),
+            Fault::new("NG500", "Select valid source bounds to magnify")
+        );
+        let (width, height) = (source.width(), source.height());
+        anyhow::ensure!(
+            width > 0 && height > 0 && u64::from(width) * u64::from(height) <= 40_000_000,
+            Fault::new("NG500", "Source exceeds the magnifier image budget")
+        );
+        let left = ((region.left * width as f32).floor() as u32).min(width - 1);
+        let top = ((region.top * height as f32).floor() as u32).min(height - 1);
+        let right = ((region.right * width as f32).ceil() as u32).clamp(left + 1, width);
+        let bottom = ((region.bottom * height as f32).ceil() as u32).clamp(top + 1, height);
+        let edge = ctx.input(|input| input.max_texture_side).clamp(1, 4096) as u32;
+        let tile_width = (right - left).min(edge);
+        let tile_height = (bottom - top)
+            .min(edge)
+            .min((4_194_304 / tile_width).max(1));
+        let x = left + (right - left - tile_width) / 2;
+        let y = top + (bottom - top - tile_height) / 2;
+        let rgba = source.crop_imm(x, y, tile_width, tile_height).to_rgba8();
+        let texture = ctx.load_texture(
+            "review-original-pixels",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [tile_width as usize, tile_height as usize],
+                rgba.as_raw(),
+            ),
+            egui::TextureOptions::NEAREST,
+        );
+        Ok(Self {
+            source,
+            region: [left, top, right, bottom],
+            tile: [x, y, tile_width, tile_height],
+            texture,
+            zoom: 1.,
+        })
+    }
+    fn pan(&mut self, dx: i64, dy: i64) {
+        let x = (i64::from(self.tile[0]) + dx).clamp(
+            i64::from(self.region[0]),
+            i64::from(self.region[2] - self.tile[2]),
+        ) as u32;
+        let y = (i64::from(self.tile[1]) + dy).clamp(
+            i64::from(self.region[1]),
+            i64::from(self.region[3] - self.tile[3]),
+        ) as u32;
+        if (x, y) != (self.tile[0], self.tile[1]) {
+            self.tile[0] = x;
+            self.tile[1] = y;
+            let rgba = self
+                .source
+                .crop_imm(x, y, self.tile[2], self.tile[3])
+                .to_rgba8();
+            self.texture.set(
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [self.tile[2] as usize, self.tile[3] as usize],
+                    rgba.as_raw(),
+                ),
+                egui::TextureOptions::NEAREST,
+            );
+        }
+    }
 }
 impl Review {
     fn load(project: Project, index: usize, ctx: &egui::Context) -> Result<Self> {
@@ -191,25 +278,47 @@ impl Review {
             .pages
             .get(index)
             .ok_or_else(|| Fault::new("NG500", "Page does not exist"))?;
-        let page = project.load(n)?;
-        let texture = crate::writers::open_image(&project.image(n), 40_000_000)
-            .ok()
-            .map(|im| {
-                let limit = ctx.input(|i| i.max_texture_side).clamp(1, 2048) as u32;
-                let rgba = im
-                    .thumbnail(im.width().min(limit), im.height().min(limit))
-                    .to_rgba8();
-                ctx.load_texture(
-                    format!("{}:{n}", project.root.display()),
-                    egui::ColorImage::from_rgba_unmultiplied(
-                        [rgba.width() as usize, rgba.height() as usize],
-                        rgba.as_raw(),
-                    ),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
+        let mut page = project.load(n)?;
+        let mut normalized = false;
+        let mut masked_source = None;
+        if !page.confirmed_redactions.is_empty() {
+            let (mut effective, image, _) =
+                crate::redactions::effective_page(&project, &page, &Control::default())?;
+            masked_source = Some(image);
+            if fingerprint(&effective)? != fingerprint(&page)? {
+                effective.edited = true;
+                effective.reviewed = false;
+                crate::review::commit(
+                    &project,
+                    &page,
+                    &effective,
+                    "Apply confirmed mask visibility",
+                )?;
+                page = project.load(n)?;
+                normalized = true;
+            }
+        }
+        let source = if page.confirmed_redactions.is_empty() {
+            review_source(&project, &page).ok()
+        } else {
+            masked_source
+        };
+        let texture = source.map(|im| {
+            let limit = ctx.input(|i| i.max_texture_side).clamp(1, 2048) as u32;
+            let rgba = im
+                .thumbnail(im.width().min(limit), im.height().min(limit))
+                .to_rgba8();
+            ctx.load_texture(
+                format!("{}:{n}", project.root.display()),
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [rgba.width() as usize, rgba.height() as usize],
+                    rgba.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
         let raw = serde_json::to_string_pretty(&page.content)?;
-        let (issues, issue_notice) = match crate::review::issues(&project) {
+        let (issues, mut issue_notice) = match crate::review::issues(&project) {
             Ok(issues) => (issues, String::new()),
             Err(e) => (
                 vec![],
@@ -218,6 +327,11 @@ impl Review {
                 ),
             ),
         };
+        if normalized {
+            issue_notice = format!(
+                "Confirmed mask visibility was applied as a recoverable review revision. Covered text is retained only in private history. {issue_notice}"
+            );
+        }
         let layer_cache = crate::layers::report(&page)?;
         Ok(Self {
             project,
@@ -243,6 +357,8 @@ impl Review {
             crop_mode: false,
             crop_start: None,
             crop: None,
+            last_source_crop: None,
+            magnifier: None,
         })
     }
 }
@@ -254,6 +370,8 @@ enum ReviewAction {
     Defer,
 }
 pub struct Desktop {
+    downloads: download_ui::Downloads,
+    vault: vault_ui::VaultUi,
     workbench: workbench::Workbench,
     studio: studio::Studio,
     experience: experience::Experience,
@@ -312,6 +430,8 @@ impl Desktop {
             state.settings.experience.warm_reader_ttl_secs,
         );
         Self {
+            downloads: download_ui::Downloads::default(),
+            vault: vault_ui::VaultUi::default(),
             workbench: workbench::Workbench::default(),
             studio,
             experience: experience::Experience::default(),
@@ -704,7 +824,7 @@ impl Desktop {
         } else {
             self.warm_pool.clone()
         };
-        self.control = Control::default();
+        self.control = self.fresh_operation_control();
         let cancelled = self.control.cancelled.clone();
         let questions = self.tx.clone();
         let question_ctx = ctx.clone();
@@ -856,6 +976,10 @@ impl Desktop {
             self.notice = format!("Could not save review draft: {e}");
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        if ctx.input(|i| i.viewport().close_requested()) && self.vault.blocks_close() {
+            self.vault.request_close();
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.background()).inner_margin(if self.state.settings.ui.compact {
             18}
         else{
@@ -870,6 +994,7 @@ impl Desktop {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
                     if ui.button(self.tr("projects_tools")).clicked(){self.tools_open(0);}
                     if ui.button(self.tr("settings")).clicked() { self.experience.open = true; }
+                    if ui.button("Downloads").clicked() { self.downloads_open(); }
                     if ui.button(self.tr("advanced")).clicked(){
                         self.advanced_open();
                     }
@@ -991,6 +1116,8 @@ impl Desktop {
         self.settings_ui(&ctx);
         self.review_ui(&ctx);
         self.studio_ui(&ctx);
+        self.downloads_ui(&ctx);
+        self.vault.ui(&ctx, &self.state.settings);
         self.workbench_ui(&ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if let Some(delay) = motion::repaint_delay(
@@ -1263,6 +1390,10 @@ impl Desktop {
         });
     }
     fn begin_ai_setup(&mut self, ctx: &egui::Context) {
+        if let Err(error) = self.prepare_download_control() {
+            self.notice = error.to_string();
+            return;
+        }
         let mut settings = self.state.settings.clone();
         let preset = settings.preset;
         settings.preset = Preset::Maximum;
@@ -1883,6 +2014,13 @@ impl Desktop {
                     }
                 }
                 if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Re-read with context")).clicked(){self.reconsider_review(&r.project,ctx);}
+                if ui.button("Magnify selected block").on_hover_text("Load a bounded crop from original source pixels; use Tab and Enter to open, then the magnifier's pan buttons.").clicked(){
+                    let region=r.page.content.blocks.get(r.selected).and_then(|block|block.bbox.clone()).unwrap_or_else(BoxRect::full);
+                    match review_source(&r.project,&r.page).and_then(|image|SourceMagnifier::new(image,&region,ctx)){Ok(view)=>r.magnifier=Some(view),Err(error)=>self.review_error=error.to_string()}
+                }
+                if ui.add_enabled(r.last_source_crop.is_some(),egui::Button::new("Magnify last source crop")).clicked() && let Some(region)=&r.last_source_crop {
+                    match review_source(&r.project,&r.page).and_then(|image|SourceMagnifier::new(image,region,ctx)){Ok(view)=>r.magnifier=Some(view),Err(error)=>self.review_error=error.to_string()}
+                }
             });
             // The window scroll area has an unbounded content height. Use its
             // finite clip height and reserve wrapped action/help rows instead.
@@ -1906,7 +2044,7 @@ impl Desktop {
                                     if box_rect.valid(){r.crop=Some(box_rect);}
                             }
                             if let Some(b)=&r.crop{let selected=egui::Rect::from_min_max(rect.min+Vec2::new(b.left*rect.width(),b.top*rect.height()),rect.min+Vec2::new(b.right*rect.width(),b.bottom*rect.height()));ui.painter().rect_filled(selected,2,self.accent().gamma_multiply(0.12));ui.painter().rect_stroke(selected,2,egui::Stroke::new(2.,self.accent()),egui::StrokeKind::Inside);}
-                            if response.drag_stopped() && let Some(region)=r.crop.take(){self.prepare_teach(&r,region,ctx);r.crop_start=None;r.crop_mode=false;}
+                            if response.drag_stopped() && let Some(region)=r.crop.take(){r.last_source_crop=Some(region.clone());self.prepare_teach(&r,region,ctx);r.crop_start=None;r.crop_mode=false;}
                         }
                         for(i,b)in r.page.content.blocks.iter().enumerate(){
                             if r.heatmap && r.issues.iter().any(|issue| issue.page==r.page.page && issue.block==i)
@@ -1948,6 +2086,9 @@ impl Desktop {
                     }
                     );
                     let mut changed=false;
+                    let mask_placeholder = !r.page.confirmed_redactions.is_empty() && r.page.content.blocks.get(r.selected).is_some_and(|block| block.text == "[redacted]" && block.bbox.as_ref().is_some_and(|bounds| r.page.confirmed_redactions.iter().any(|mask| &mask.region == bounds)));
+                    if mask_placeholder { ui.label("Confirmed source redaction. Remove the mask explicitly in Privacy tools to change it."); }
+                    ui.add_enabled_ui(!mask_placeholder, |ui| {
                     if let Some(b)=r.page.content.blocks.get_mut(r.selected){
                         ui.separator();
                         ui.horizontal(|ui|{
@@ -1996,6 +2137,7 @@ impl Desktop {
                             ui.small(format!("Alternative: {alt}"));
                         }
                     }
+                    });
                     if changed{
                         r.dirty=true;
                         r.page.reviewed=false;
@@ -2016,7 +2158,7 @@ impl Desktop {
                         }
                     }
                     );
-                    if ui.button("Edit page JSON").clicked(){
+                    if ui.add_enabled(r.page.confirmed_redactions.is_empty(), egui::Button::new("Edit page JSON")).clicked(){
                         r.raw=serde_json::to_string_pretty(&r.page.content).unwrap_or_default();
                         r.raw_open = !r.raw_open;
                     }
@@ -2061,6 +2203,7 @@ impl Desktop {
             ui.small("Drafts preserve your edits across resume. Mark reviewed only after comparing with the source. Exports use a new filename.");
         }
         );
+        Self::magnifier_ui(&mut r, ctx);
         if let Some((a, b)) = reorder
             && b < r.page.content.blocks.len()
         {
@@ -2114,6 +2257,39 @@ impl Desktop {
         }
         self.review = Some(r);
         self.review_open = open;
+    }
+    fn magnifier_ui(review: &mut Review, ctx: &egui::Context) {
+        let Some(view) = &mut review.magnifier else {
+            return;
+        };
+        let mut open = true;
+        let mut close = false;
+        let bounds = ctx.content_rect().shrink(8.);
+        egui::Window::new("Source magnifier · original pixels")
+            .id(egui::Id::unique("notegen-source-magnifier")).open(&mut open)
+            .default_size([690., 540.]).max_height(bounds.height()).constrain_to(bounds).vscroll(true)
+            .show(ctx, |ui| {
+                ui.label(format!("Page {} · source crop {} × {} px · texture keeps every original pixel", review.page.page, view.tile[2], view.tile[3]));
+                ui.small("Large regions use a movable tile, never a downscaled image. At most 4 Mi pixels are uploaded; the source cache is limited to 40 million pixels. Closing this window releases the crop and source cache.");
+                ui.horizontal_wrapped(|ui| {
+                    let step_x = i64::from((view.tile[2] / 2).max(1));
+                    let step_y = i64::from((view.tile[3] / 2).max(1));
+                    if ui.add_enabled(view.tile[0] > view.region[0], egui::Button::new("Pan left")).clicked() { view.pan(-step_x,0); }
+                    if ui.add_enabled(view.tile[0] + view.tile[2] < view.region[2], egui::Button::new("Pan right")).clicked() { view.pan(step_x,0); }
+                    if ui.add_enabled(view.tile[1] > view.region[1], egui::Button::new("Pan up")).clicked() { view.pan(0,-step_y); }
+                    if ui.add_enabled(view.tile[1] + view.tile[3] < view.region[3], egui::Button::new("Pan down")).clicked() { view.pan(0,step_y); }
+                    ui.add(egui::Slider::new(&mut view.zoom,1.0..=4.0).text("Magnifier zoom"));
+                });
+                egui::ScrollArea::both().id_salt("original-pixel-crop").max_height((bounds.height() - 185.).max(96.)).show(ui, |ui| {
+                    ui.add(egui::Image::new(&view.texture).alt_text(format!("Original-resolution source crop for page {}. Confirmed redactions remain opaque.", review.page.page))
+                        .fit_to_exact_size(view.texture.size_vec2() * view.zoom));
+                });
+                ui.small(format!("Source coordinates: x{}–{}, y{}–{}", view.tile[0], view.tile[0]+view.tile[2], view.tile[1], view.tile[1]+view.tile[3]));
+                if ui.button("Close source magnifier").clicked() { close = true; }
+            });
+        if !open || close {
+            review.magnifier = None;
+        }
     }
     fn accent(&self) -> Color32 {
         let a = self.state.settings.ui.accent;
@@ -2815,6 +2991,111 @@ mod acceptance {
                 .unwrap();
         }
         (dir, project)
+    }
+
+    fn uploaded_crop(ctx: &egui::Context, id: egui::TextureId) -> std::sync::Arc<egui::ColorImage> {
+        let mut delta = ctx.tex_manager().write().take_delta();
+        let (_, image) = delta
+            .set
+            .iter()
+            .find(|(texture, _)| *texture == id)
+            .expect("crop upload");
+        let image = image.image.clone();
+        delta.clear();
+        let egui::ImageData::Color(image) = image;
+        image
+    }
+
+    #[test]
+    fn magnifier_keeps_original_pixels_and_pans_within_the_selected_region() {
+        let ctx = egui::Context::default();
+        let mut image = image::RgbaImage::from_pixel(3000, 2000, image::Rgba([30, 40, 50, 255]));
+        image.put_pixel(1500, 1000, image::Rgba([7, 99, 201, 255]));
+        let mut view = SourceMagnifier::new(
+            image::DynamicImage::ImageRgba8(image),
+            &BoxRect::full(),
+            &ctx,
+        )
+        .unwrap();
+        assert!(u64::from(view.tile[2]) * u64::from(view.tile[3]) <= 4_194_304);
+        assert!(view.tile[2] <= ctx.input(|input| input.max_texture_side) as u32);
+        let pixels = uploaded_crop(&ctx, view.texture.id());
+        assert_eq!(pixels.size, [view.tile[2] as usize, view.tile[3] as usize]);
+        let x = 1500 - view.tile[0];
+        let y = 1000 - view.tile[1];
+        assert_eq!(
+            pixels[(x as usize, y as usize)],
+            Color32::from_rgb(7, 99, 201)
+        );
+        view.pan(-100_000, -100_000);
+        assert_eq!(&view.tile[..2], &[0, 0]);
+        view.pan(100_000, 100_000);
+        assert_eq!(view.tile[0] + view.tile[2], 3000);
+        assert_eq!(view.tile[1] + view.tile[3], 2000);
+    }
+
+    #[test]
+    fn review_and_magnifier_use_opaque_confirmed_masks_and_stale_sources_fail_closed() {
+        let (_temp, project) = two_page_review();
+        image::RgbImage::from_pixel(40, 40, image::Rgb([210, 30, 60]))
+            .save(project.image(1))
+            .unwrap();
+        let original = fs::read(project.image(1)).unwrap();
+        let mut page = project.load(1).unwrap();
+        let mask = crate::redactions::MaskSpec {
+            region: BoxRect {
+                left: 0.25,
+                top: 0.25,
+                right: 0.75,
+                bottom: 0.75,
+            },
+            reason: crate::redactions::Reason::PersonalInformation,
+        };
+        let preview =
+            crate::redactions::preview_confirmation(&project, &page, &[mask], &Control::default())
+                .unwrap();
+        page.confirmed_redactions = crate::redactions::confirm(
+            &project,
+            &page,
+            &preview,
+            &preview.token,
+            &[0],
+            &Control::default(),
+        )
+        .unwrap();
+        project.save(&page).unwrap();
+        let checkpoint = project.load(1).unwrap();
+        let ctx = egui::Context::default();
+        let review = Review::load(project.clone(), 0, &ctx).unwrap();
+        assert_eq!(
+            fingerprint(&review.baseline).unwrap(),
+            fingerprint(&checkpoint).unwrap()
+        );
+        assert_eq!(
+            fingerprint(&review.page).unwrap(),
+            fingerprint(&checkpoint).unwrap()
+        );
+        let pixels = uploaded_crop(&ctx, review.texture.as_ref().unwrap().id());
+        assert_eq!(pixels[(20, 20)], Color32::BLACK);
+        assert_eq!(pixels[(0, 0)], Color32::from_rgb(210, 30, 60));
+        let magnifier = SourceMagnifier::new(
+            review_source(&project, &review.page).unwrap(),
+            &BoxRect::full(),
+            &ctx,
+        )
+        .unwrap();
+        let magnified = uploaded_crop(&ctx, magnifier.texture.id());
+        assert_eq!(magnified[(20, 20)], Color32::BLACK);
+        assert_eq!(fs::read(project.image(1)).unwrap(), original);
+        assert_eq!(
+            fingerprint(&project.load(1).unwrap()).unwrap(),
+            fingerprint(&checkpoint).unwrap()
+        );
+        image::RgbImage::from_pixel(40, 40, image::Rgb([0, 255, 0]))
+            .save(project.image(1))
+            .unwrap();
+        assert!(Review::load(project.clone(), 0, &ctx).is_err());
+        assert!(review_source(&project, &review.page).is_err());
     }
 
     fn review_access_tree(

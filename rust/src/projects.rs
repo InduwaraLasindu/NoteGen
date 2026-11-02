@@ -393,7 +393,16 @@ pub fn search(roots: &[PathBuf], query: &str, limit: usize) -> Result<SearchRepo
                     continue;
                 }
             };
-            for (index, b) in page.content.blocks.iter().enumerate() {
+            let visible = match crate::redactions::visible_blocks(&p, &page, &Control::default()) {
+                Ok(visible) => visible,
+                Err(error) => {
+                    report
+                        .warnings
+                        .push(format!("{} page {n}: {error}", root.display()));
+                    continue;
+                }
+            };
+            for (index, b) in visible.iter().map(|(index, block)| (*index, block)) {
                 let text = format!("{}\n{}\n{}", b.plain(), b.description, b.interpretation);
                 if !text.to_lowercase().contains(&query) {
                     continue;
@@ -407,7 +416,11 @@ pub fn search(roots: &[PathBuf], query: &str, limit: usize) -> Result<SearchRepo
                     page: *n,
                     block: index,
                     region: b.bbox.clone(),
-                    image: p.image(*n),
+                    image: if page.confirmed_redactions.is_empty() {
+                        p.image(*n)
+                    } else {
+                        PathBuf::new()
+                    },
                     kind: b.kind.clone(),
                     reviewed: page.reviewed,
                     excerpt: excerpt(text.trim(), &query),

@@ -128,6 +128,8 @@ pub struct Settings {
     pub pdfium: PathBuf,
     pub server: PathBuf,
     pub models_dir: PathBuf,
+    pub shared_model_store: PathBuf,
+    pub project_lock: Option<PathBuf>,
     pub endpoint: String,
     pub external_server: bool,
     pub subject: String,
@@ -195,6 +197,8 @@ impl Default for Settings {
                 .map(|r| r.server)
                 .unwrap_or_else(|| "runtime/llama-server.exe".into()),
             models_dir: "models".into(),
+            shared_model_store: crate::model_store::default_root().unwrap_or_default(),
+            project_lock: None,
             endpoint: "http://127.0.0.1:18745".into(),
             external_server: false,
             subject: String::new(),
@@ -395,6 +399,21 @@ impl Settings {
             return bad("Invalid model allowlist");
         }
         self.assistance.validate()?;
+        if self.shared_model_store.as_os_str().is_empty()
+            || self.shared_model_store.to_string_lossy().len() > 4096
+            || self
+                .shared_model_store
+                .to_string_lossy()
+                .chars()
+                .any(char::is_control)
+            || self.project_lock.as_ref().is_some_and(|path| {
+                path.as_os_str().is_empty()
+                    || path.to_string_lossy().len() > 4096
+                    || path.to_string_lossy().chars().any(char::is_control)
+            })
+        {
+            return bad("Choose a bounded shared model store and optional project lock path");
+        }
         self.experience.validate()?;
         anyhow::ensure!(
             self.writer

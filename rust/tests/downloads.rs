@@ -280,6 +280,42 @@ fn resumed_standalone_job_never_changes_installed_registration() {
     assert_eq!(fingerprint(&manager.list().unwrap()).unwrap().len(), 64);
 }
 
+#[test]
+fn explicit_enqueue_revalidates_completed_staging_after_consumption_but_preserves_user_stops() {
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("manager");
+    let candidate = spec(root.path(), "consumed");
+    let manager = Manager::open(&folder).unwrap();
+    let job = manager.enqueue(candidate.clone()).unwrap();
+    drop(manager);
+    let state = folder.join("jobs.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    value["jobs"][0]["status"] = "complete".into();
+    value["jobs"][0]["received_bytes"] = 32.into();
+    fs::write(&state, serde_json::to_vec(&value).unwrap()).unwrap();
+    fs::write(&candidate.target, [1u8; 32]).unwrap();
+    let final_file = root.path().join("activated.gguf");
+    fs::rename(&candidate.target, &final_file).unwrap();
+    let manager = Manager::open(&folder).unwrap();
+    assert_eq!(manager.list().unwrap()[0].status, Status::Complete);
+    let queued = manager.enqueue(candidate.clone()).unwrap();
+    assert_eq!(queued.id, job.id);
+    assert_eq!(queued.status, Status::Queued);
+    assert_eq!(queued.received_bytes, 0);
+    assert!(!candidate.target.exists());
+    assert_eq!(fs::read(final_file).unwrap(), [1u8; 32]);
+    manager.pause(&job.id).unwrap();
+    assert_eq!(
+        manager.enqueue(candidate.clone()).unwrap().status,
+        Status::Paused
+    );
+    manager.cancel(&job.id).unwrap();
+    assert_eq!(
+        manager.enqueue(candidate).unwrap().status,
+        Status::Cancelled
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn manager_and_transfer_paths_reject_symlinks() {

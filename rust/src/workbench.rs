@@ -55,6 +55,10 @@ pub(super) struct Workbench {
     secret: String,
     credentials: Option<crate::credentials::CredentialStatus>,
     confirm_credential_removal: bool,
+    mask_preview: Option<crate::redactions::ConfirmationPreview>,
+    mask_selected: BTreeSet<usize>,
+    mask_reason: usize,
+    share_preview: Option<crate::redactions::SharePreview>,
     rx: Option<mpsc::Receiver<std::result::Result<Report, String>>>,
 }
 impl Drop for Workbench {
@@ -288,6 +292,9 @@ impl Review {
     }
     pub(super) fn save(&mut self, approved: bool) -> Result<()> {
         let mut page = self.page.clone();
+        if !page.confirmed_redactions.is_empty() {
+            page = crate::redactions::effective_page(&self.project, &page, &Control::default())?.0;
+        }
         page.edited = true;
         page.reviewed = approved;
         let label = if self.revision_name.trim().is_empty() {
@@ -309,6 +316,10 @@ impl Review {
         }
         self.page = page.clone();
         self.baseline = page;
+        self.selected = self
+            .selected
+            .min(self.page.content.blocks.len().saturating_sub(1));
+        self.raw = serde_json::to_string_pretty(&self.page.content)?;
         self.dirty = false;
         self.refresh_issues();
         self.revision_name.clear();
@@ -368,6 +379,220 @@ impl Review {
 }
 
 impl Desktop {
+    fn redaction_tools(&mut self, w: &mut Workbench, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.separator();
+        ui.heading("Confirmed source masks and sharing");
+        ui.label(crate::redactions::LIMITS);
+        let Some((project, page, region, dirty)) = self.review.as_ref().map(|r| {
+            (
+                r.project.clone(),
+                r.page.clone(),
+                r.crop.clone().or_else(|| {
+                    r.page
+                        .content
+                        .blocks
+                        .get(r.selected)
+                        .and_then(|b| b.bbox.clone())
+                }),
+                r.dirty || r.raw_open,
+            )
+        }) else {
+            ui.label("Open a project page to confirm source masks or create a sharing copy.");
+            return;
+        };
+        let ready = !dirty && self.worker.is_none() && w.rx.is_none();
+        let reasons = [
+            crate::redactions::Reason::PersonalInformation,
+            crate::redactions::Reason::AccountInformation,
+            crate::redactions::Reason::Address,
+            crate::redactions::Reason::ConfirmedOpaqueCover,
+            crate::redactions::Reason::Other,
+        ];
+        let labels = [
+            "Personal information",
+            "Account information",
+            "Address",
+            "Confirmed opaque cover",
+            "Other",
+        ];
+        egui::ComboBox::from_label("Mask reason")
+            .selected_text(labels[w.mask_reason.min(4)])
+            .show_ui(ui, |ui| {
+                for (i, label) in labels.iter().enumerate() {
+                    ui.selectable_value(&mut w.mask_reason, i, *label);
+                }
+            });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    ready && region.is_some(),
+                    egui::Button::new("Preview selected source region as mask"),
+                )
+                .clicked()
+            {
+                let spec = crate::redactions::MaskSpec {
+                    region: region.clone().expect("enabled measured selection"),
+                    reason: reasons[w.mask_reason.min(4)],
+                };
+                match crate::redactions::preview_confirmation(
+                    &project,
+                    &page,
+                    &[spec],
+                    &Control::default(),
+                ) {
+                    Ok(preview) => {
+                        w.mask_preview = Some(preview);
+                        w.mask_selected = [0].into_iter().collect();
+                    }
+                    Err(error) => w.report = error.to_string(),
+                }
+            }
+            if ui
+                .add_enabled(ready, egui::Button::new("Inspect possible opaque covers"))
+                .clicked()
+            {
+                let proposals =
+                    crate::redactions::effective_page(&project, &page, &Control::default())
+                        .and_then(|(_, image, _)| {
+                            crate::redactions::suggest_opaque_covers(&image, &Control::default())
+                        })
+                        .map(|items| {
+                            items
+                                .into_iter()
+                                .map(|item| crate::redactions::MaskSpec {
+                                    region: item.region,
+                                    reason: crate::redactions::Reason::ConfirmedOpaqueCover,
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                match proposals.and_then(|items| {
+                    crate::redactions::preview_confirmation(
+                        &project,
+                        &page,
+                        &items,
+                        &Control::default(),
+                    )
+                }) {
+                    Ok(preview) => {
+                        w.mask_preview = Some(preview);
+                        w.mask_selected.clear();
+                    }
+                    Err(error) => w.report = error.to_string(),
+                }
+            }
+        });
+        if let Some(preview) = w.mask_preview.clone() {
+            ui.label(&preview.note);
+            for (index, proposal) in preview.proposals.iter().enumerate() {
+                let mut selected = w.mask_selected.contains(&index);
+                if ui
+                    .checkbox(
+                        &mut selected,
+                        format!(
+                            "Cover {} · {:?} · {:?}",
+                            index + 1,
+                            proposal.reason,
+                            proposal.region
+                        ),
+                    )
+                    .changed()
+                {
+                    if selected {
+                        w.mask_selected.insert(index);
+                    } else {
+                        w.mask_selected.remove(&index);
+                    }
+                }
+            }
+            if ui
+                .add_enabled(
+                    ready && !w.mask_selected.is_empty(),
+                    egui::Button::new("Confirm selected source masks"),
+                )
+                .clicked()
+            {
+                let project = project.clone();
+                let number = page.page;
+                let selected = w.mask_selected.iter().copied().collect::<Vec<_>>();
+                self.studio_task(ctx, move |c,_| {
+                    let before = project.load(number)?;
+                    let mut after = before.clone();
+                    after.confirmed_redactions = crate::redactions::confirm(&project, &before, &preview, &preview.token, &selected, &c)?;
+                    after = crate::redactions::effective_page(&project, &after, &c)?.0;
+                    after.edited = true; after.reviewed = false;
+                    crate::review::commit(&project, &before, &after, "Confirm source redactions")?;
+                    Ok(studio::StudioMessage::Done("Source masks confirmed. Review and exports use the masked view. Private originals and undo history are retained.".into()))
+                });
+                w.mask_preview = None;
+                w.mask_selected.clear();
+                w.share_preview = None;
+            }
+        }
+        for mask in &page.confirmed_redactions {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Confirmed {:?} · {:?}", mask.reason, mask.region));
+                if ui.add_enabled(ready, egui::Button::new(format!("Remove mask {}", &mask.id[..8]))).clicked() {
+                    let before = page.clone(); let mut after = before.clone();
+                    after.confirmed_redactions.retain(|item| item.id != mask.id);
+                    after.edited = true; after.reviewed = false;
+                    match crate::review::commit(&project, &before, &after, "Remove source mask; text stays withheld") {
+                        Ok(_) => { let _ = self.open_review(project.root.clone(), ctx); w.report = "Mask removed. Text remains withheld until explicitly re-read or restored through undo.".into(); w.share_preview = None; }
+                        Err(error) => w.report = error.to_string(),
+                    }
+                }
+            });
+        }
+        if ui
+            .add_enabled(
+                ready,
+                egui::Button::new("Preview sharing copy of project pages"),
+            )
+            .clicked()
+        {
+            match crate::redactions::preview_share(
+                &project,
+                &project.manifest.pages,
+                &Control::default(),
+            ) {
+                Ok(preview) => w.share_preview = Some(preview),
+                Err(error) => w.report = error.to_string(),
+            }
+        }
+        if let Some(preview) = w.share_preview.clone() {
+            ui.label(format!(
+                "{} pages · {} confirmed masks · {} withheld blocks",
+                preview.pages.len(),
+                preview.pages.iter().map(|p| p.masks).sum::<usize>(),
+                preview
+                    .pages
+                    .iter()
+                    .map(|p| p.withheld_blocks)
+                    .sum::<usize>()
+            ));
+            ui.label(&preview.note);
+            if ui
+                .add_enabled(ready, egui::Button::new("Build reviewed sharing ZIP"))
+                .clicked()
+                && let Some(output) = rfd::FileDialog::new()
+                    .add_filter("Sharing copy", &["zip"])
+                    .set_file_name("sharing-copy.zip")
+                    .save_file()
+            {
+                self.studio_task(ctx, move |c, _| {
+                    let report = crate::redactions::export_share(
+                        &project,
+                        &preview,
+                        &preview.token,
+                        &output,
+                        &c,
+                    )?;
+                    Ok(studio::StudioMessage::Done(serde_json::to_string_pretty(
+                        &report,
+                    )?))
+                });
+            }
+        }
+    }
     pub(super) fn layer_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Manual annotation layers").show(ui, |ui| {
             ui.small("Label the selected block as original text, a highlight, marginal note, stamp or correction. Labels retain all content. They do not remove ink or redact hidden text. Changed source bindings need explicit reconfirmation.");
@@ -1420,12 +1645,17 @@ impl Desktop {
                     }
                     _=>{
                         ui.heading("Local activity and data");
+                        if ui.button("Encrypted project workspace").clicked() { self.release_warm_reader(); self.vault.open(); }
+                        let connections = crate::connections::snapshot();
+                        ui.label(format!("{} active NoteGen HTTP request(s)",connections.active.len()+connections.additional_active));
+                        for connection in &connections.active { ui.label(format!("{:?} · {} · {:.1}s",connection.purpose,connection.destination,connection.seconds)); }
+                        ui.small(connections.note);
                         ui.label(format!("Recognition endpoint: {}",self.state.settings.endpoint));
                         ui.label(format!("Models: {}",self.state.settings.models_dir.display()));
                         ui.label(format!("Writer examples: {}",self.state.settings.writer.root.display()));
                         ui.label(format!("Automatic update checks: {} · active check: {}",self.state.settings.experience.check_updates,self.experience.checking));
                         ui.label(format!("Optional public lookup: {}",self.state.settings.assistance.web_lookup));
-                        ui.label("Recognition uses a literal loopback connection. Publisher download and update requests may use the internet. Public lookup sends the typed query only when enabled. This panel reports NoteGen settings and active tasks; it is not an OS network monitor.");
+                        ui.label("Recognition uses a literal loopback connection. Publisher downloads and update checks may use the internet. Public lookup sends the typed query only when enabled.");
                         ui.separator();ui.heading("Readable layout");
                         ui.horizontal_wrapped(|ui|{
                             if ui.button("Large text").clicked(){self.state.settings.ui.scale=1.4;self.state.settings.ui.compact=false;}
@@ -1437,6 +1667,7 @@ impl Desktop {
                         ui.small("Ctrl+K opens the command palette. Tab moves focus, Enter activates buttons. Review includes source zoom and disagreement markers.");
                         self.resource_tools(&mut w,ui,ctx);
                         self.credential_tools(&mut w,ui,ctx);
+                        self.redaction_tools(&mut w,ui,ctx);
                     }
                 }
                 if !w.report.is_empty(){ui.separator();Self::accessible_status(ui,"workbench-task-result","Local tool result is available below.",false);ui.add(egui::TextEdit::multiline(&mut w.report).desired_rows(10).desired_width(f32::INFINITY)).accessible_name("Local tool result details");}

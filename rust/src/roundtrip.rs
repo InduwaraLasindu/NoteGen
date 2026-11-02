@@ -492,6 +492,12 @@ fn load_snapshot(path: &Path, page: usize, admitted_bytes: u64) -> Result<Page> 
 }
 pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
     c.check()?;
+    anyhow::ensure!(
+        !crate::redactions::has_masks(p, c)? && !crate::redactions::is_export_projection(p),
+        fault(
+            "Word correction import is unavailable for a redacted export; edit visible content in Review while retaining confirmed masks"
+        )
+    );
     let file = fs::File::open(input)?;
     anyhow::ensure!(
         file.metadata()?.len() <= 512_000_000,

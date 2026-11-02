@@ -224,3 +224,15 @@ path = "rust/tests/downloads.rs"
 name = "vault"
 path = "rust/tests/vault.rs"
 
+[[test]]
+name = "writer_history"
+path = "rust/tests/writer_history.rs"
+
+[[test]]
+name = "model_store"
+path = "rust/tests/model_store.rs"
+
+[[test]]
+name = "canary"
+path = "rust/tests/canary.rs"
+

@@ -1068,7 +1068,8 @@ pub fn issues(p: &Project) -> Result<Vec<Issue>> {
         if page.reviewed {
             continue;
         }
-        for (index, b) in page.content.blocks.iter().enumerate() {
+        let visible = crate::redactions::visible_blocks(p, &page, &Control::default())?;
+        for (index, b) in visible.iter().map(|(index, block)| (*index, block)) {
             out.absorb(table_candidates(*n, index, b));
             let reading = b.plain();
             let numeric = reading.chars().any(|c| c.is_ascii_digit());
@@ -1179,7 +1180,8 @@ fn preview_locked(p: &Project, r: &Rule) -> Result<RulePreview> {
     for n in &r.pages {
         let page = p.load(*n)?;
         preview.page_digests.insert(*n, fingerprint(&page)?);
-        for (index, b) in page.content.blocks.iter().enumerate() {
+        let visible = crate::redactions::visible_blocks(p, &page, &Control::default())?;
+        for (index, b) in visible.iter().map(|(index, block)| (*index, block)) {
             if r.exclude_blocks.contains(&(*n, index)) {
                 continue;
             }

@@ -1,6 +1,8 @@
 pub mod assistance;
 pub mod bundles;
+pub mod canary;
 pub mod cleanup;
+pub mod connections;
 pub mod consensus;
 pub mod credentials;
 #[cfg(feature = "desktop")]
@@ -19,6 +21,7 @@ pub mod languages;
 pub mod layers;
 pub mod localization;
 pub mod maintenance;
+pub mod model_store;
 pub mod models;
 pub mod motion;
 pub mod numeric_integrity;
@@ -50,4 +53,5 @@ pub mod warm_runtime;
 pub mod watch;
 pub mod watch_service;
 pub mod word;
+pub mod writer_history;
 pub mod writers;

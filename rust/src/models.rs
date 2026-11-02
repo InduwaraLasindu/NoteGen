@@ -274,14 +274,17 @@ pub fn check(m: &Model, c: &Control) -> Result<Update> {
         .as_ref()
         .ok_or_else(|| Fault::new("NG650", "Add a publisher repository to enable updates"))?;
     validate_hub(h)?;
+    let url = format!(
+        "https://huggingface.co/api/models/{}/revision/main",
+        h.repository
+    );
+    let connection = crate::connections::begin(&url, crate::connections::Purpose::UpdateCheck);
     let response = client()?
-        .get(format!(
-            "https://huggingface.co/api/models/{}/revision/main",
-            h.repository
-        ))
+        .get(&url)
         .query(&[("blobs", "true")])
         .send()?
         .error_for_status()?;
+    connection.response_url(response.url());
     let mut raw = vec![];
     response.take(8_000_001).read_to_end(&mut raw)?;
     c.check()?;
@@ -494,6 +497,7 @@ async fn download_body_async(
         }
         let offset = part.metadata().map_or(0, |m| m.len());
         c.check_cancelled()?;
+        let connection = crate::connections::begin(url, crate::connections::Purpose::Download);
         let mut request = client.get(url);
         if crate::credentials::publisher_url(url) {
             request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
@@ -509,6 +513,7 @@ async fn download_body_async(
         let mut response = loop {
             tokio::select! {r=&mut sending=>break r?.error_for_status()?,_=tokio::time::sleep(Duration::from_millis(100))=>{if !download_ready(c,transfer)? {continue 'reconnect;}}}
         };
+        connection.response_url(response.url());
         let append = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         if append {
             anyhow::ensure!(
@@ -585,6 +590,7 @@ async fn download_body_async(
             }
         }
         drop(response);
+        drop(connection);
         log.emit(
             "download",
             format!("{} · download complete; verifying SHA256", a.file),
@@ -1217,7 +1223,14 @@ mod tests {
         ));
         transfer.finish(&result).unwrap();
         drop(transfer);
-        server.join().unwrap();
+        // Response cancellation wakes Hyper's connection task. Keep this
+        // current-thread runtime polling while the fixture waits for EOF;
+        // a synchronous join here would stop the very cleanup being tested.
+        rt.block_on(async {
+            tokio::task::spawn_blocking(move || server.join().unwrap())
+                .await
+                .unwrap();
+        });
         if mode == "cancel" {
             assert!(
                 result
@@ -1356,7 +1369,11 @@ mod tests {
         ));
         transfer.finish(&result).unwrap();
         drop(transfer);
-        server.join().unwrap();
+        rt.block_on(async {
+            tokio::task::spawn_blocking(move || server.join().unwrap())
+                .await
+                .unwrap();
+        });
         result.unwrap();
         assert_eq!(fs::read(path).unwrap(), bytes);
         assert_eq!(manager.list().unwrap()[0].status, Status::Complete);

@@ -312,7 +312,15 @@ pub fn safe_image(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(p)
 }
 pub fn export(project: &Project, target: &Path, c: &Control) -> Result<()> {
-    export_inner(project, target, c).map_err(|e| {
+    crate::exports::output_parent(project, target)?;
+    anyhow::ensure!(
+        !target.exists(),
+        Fault::new("NG401", "Output already exists")
+    );
+    crate::redactions::export_projected(project, target, c, |visible, output| {
+        export_inner(visible, output, c)
+    })
+    .map_err(|e| {
         if e.downcast_ref::<Fault>().is_some() {
             e
         } else {
@@ -345,6 +353,10 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
         r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
     );
     let mut baseline = crate::roundtrip::baseline(project)?;
+    let redacted = crate::redactions::is_export_projection(project);
+    if redacted {
+        crate::roundtrip::disable(&mut baseline);
+    }
     let profile = style_profile(project)?;
     let invalidated = project.root.join("input-invalidated.json").is_file();
     if invalidated {
@@ -630,7 +642,12 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
                 Fault::new("NG400", "Word document header changed during export")
             );
             zip.write_all(&header)?;
-            zip.write_all(paragraph(ROUNDTRIP_UNAVAILABLE_NOTICE, "Caption").as_bytes())?;
+            let notice = if redacted {
+                crate::redactions::EXPORT_NOTICE
+            } else {
+                ROUNDTRIP_UNAVAILABLE_NOTICE
+            };
+            zip.write_all(paragraph(notice, "Caption").as_bytes())?;
         }
         std::io::copy(&mut source, &mut zip)?;
         for (index, path) in media.iter().enumerate() {

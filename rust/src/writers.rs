@@ -141,7 +141,15 @@ pub(crate) fn validate(p: &Profile) -> Result<()> {
     Ok(())
 }
 pub fn read(root: &Path, id: &str) -> Result<Profile> {
-    let p: Profile = read_json(&folder(root, id)?.join("profile.json"), 8_000_000)?;
+    let dir = folder(root, id)?;
+    anyhow::ensure!(
+        !dir.join("writer-pending.json").exists(),
+        Fault::new(
+            "NG610",
+            "An interrupted writer edit requires history recovery before using this profile"
+        )
+    );
+    let p: Profile = read_json(&dir.join("profile.json"), 8_000_000)?;
     validate(&p)?;
     anyhow::ensure!(p.id == id, Fault::new("NG610", "Writer ID mismatch"));
     Ok(p)
@@ -191,22 +199,18 @@ pub fn create(root: &Path, name: &str) -> Result<Profile> {
     Ok(p)
 }
 pub fn update(root: &Path, id: &str, name: &str, notes: &str) -> Result<Profile> {
-    let dir = folder(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join(".lock"))?;
-    lock.lock()?;
+    let _lock = crate::writer_history::lock(root, id)?;
     let mut p = read(root, id)?;
+    let before = p.clone();
     p.name = name.trim().into();
     p.notes = notes.into();
     bump_revision(&mut p)?;
     validate(&p)?;
-    atomic_json(&dir.join("profile.json"), &p)?;
+    crate::writer_history::commit_locked(root, &before, &p, "Edit writer details")?;
     Ok(p)
 }
 pub fn remove(root: &Path, id: &str) -> Result<()> {
+    crate::watch::no_links(&folder(root, id)?)?;
     read(root, id)?;
     fs::remove_dir_all(folder(root, id)?)?;
     Ok(())
@@ -368,13 +372,9 @@ fn add_selected_example(
     }[..24]
         .to_string();
     let dir = folder(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(".lock"))?;
-    lock.lock()?;
+    let _lock = crate::writer_history::lock(root, id)?;
     let mut p = read(root, id)?;
+    let before = p.clone();
     if p.samples.iter().any(|s| s.id == sample_id) {
         return Ok(p);
     }
@@ -386,7 +386,20 @@ fn add_selected_example(
     let mut temp = tempfile::Builder::new().suffix(".png").tempfile_in(&dir)?;
     DynamicImage::ImageLuma8(normalized).write_to(&mut temp, image::ImageFormat::Png)?;
     temp.as_file().sync_all()?;
-    temp.persist(dir.join(&filename)).map_err(|e| e.error)?;
+    let target = dir.join(&filename);
+    crate::watch::no_links(&target)?;
+    if target.exists() {
+        anyhow::ensure!(
+            crate::storage::hash_file(temp.path(), &Default::default())?
+                == crate::storage::hash_file(&target, &Default::default())?,
+            Fault::new(
+                "NG610",
+                "An inactive sample with this identity has changed; preserve it before teaching again"
+            )
+        );
+    } else {
+        temp.persist_noclobber(&target).map_err(|e| e.error)?;
+    }
     p.samples.push(Sample {
         id: sample_id,
         label: label.into(),
@@ -400,29 +413,20 @@ fn add_selected_example(
     });
     bump_revision(&mut p)?;
     validate(&p)?;
-    atomic_json(&dir.join("profile.json"), &p)?;
+    crate::writer_history::commit_locked(root, &before, &p, "Teach confirmed handwriting example")?;
     Ok(p)
 }
 pub fn delete_example(root: &Path, id: &str, sample_id: &str) -> Result<Profile> {
-    let dir = folder(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(".lock"))?;
-    lock.lock()?;
+    let _lock = crate::writer_history::lock(root, id)?;
     let mut p = read(root, id)?;
-    let image = p
-        .samples
-        .iter()
-        .find(|s| s.id == sample_id)
-        .map(|s| s.image.clone());
+    let before = p.clone();
+    anyhow::ensure!(
+        p.samples.iter().any(|s| s.id == sample_id),
+        Fault::new("NG610", "Handwriting example not found")
+    );
     p.samples.retain(|s| s.id != sample_id);
     bump_revision(&mut p)?;
-    atomic_json(&dir.join("profile.json"), &p)?;
-    if let Some(image) = image {
-        let _ = fs::remove_file(dir.join(image));
-    }
+    crate::writer_history::commit_locked(root, &before, &p, "Forget active handwriting example")?;
     Ok(p)
 }
 pub fn digest(root: &Path, id: Option<&str>) -> Result<String> {

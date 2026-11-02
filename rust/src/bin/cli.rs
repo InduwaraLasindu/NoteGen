@@ -17,6 +17,10 @@ struct Args {
     installer_progress: bool,
     #[arg(long, global = true)]
     cancel_file: Option<PathBuf>,
+    /// Persisted download queue/policy directory (default: models_dir/.downloads).
+    /// Only asset download/management actions open this store.
+    #[arg(long, global = true)]
+    downloads_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Action,
 }
@@ -175,6 +179,13 @@ fn run_on_worker() -> Result<()> {
         .into())
     })
 }
+fn needs_download_control(action: &Action) -> bool {
+    match action {
+        Action::Setup { .. } | Action::ApplyUpdates { .. } | Action::UpdateModel { .. } => true,
+        Action::Tools { command } => commands::needs_download_control(command),
+        _ => false,
+    }
+}
 fn run() -> Result<()> {
     let args = Args::parse();
     let mut s = if let Some(p) = args.settings {
@@ -183,7 +194,14 @@ fn run() -> Result<()> {
         Settings::default()
     };
     s.validate()?;
-    let c = Control::default();
+    let mut c = Control::default();
+    let needs_downloads = needs_download_control(&args.command);
+    if needs_downloads && c.downloads.is_none() {
+        let directory = args
+            .downloads_dir
+            .unwrap_or_else(|| s.models_dir.join(".downloads"));
+        c.downloads = Some(notegen::downloads::Manager::open(&directory)?);
+    }
     if let Some(path) = args.cancel_file {
         let cancel = c.cancelled.clone();
         // An installer may supply an already-created cancellation marker. Honor
@@ -519,4 +537,66 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn download_directory_is_global_and_store_is_only_required_for_asset_actions() {
+        // Match the bounded stack used by the production clap worker on Windows.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                for (arguments, needs_store) in [
+                    (
+                        vec![
+                            "notegen-cli",
+                            "doctor",
+                            "--downloads-dir",
+                            "a selected store",
+                        ],
+                        false,
+                    ),
+                    (
+                        vec![
+                            "notegen-cli",
+                            "--downloads-dir",
+                            "a selected store",
+                            "setup",
+                            "--runtime-only",
+                        ],
+                        true,
+                    ),
+                    (
+                        vec![
+                            "notegen-cli",
+                            "tools",
+                            "downloads",
+                            "status",
+                            "--downloads-dir",
+                            "a selected store",
+                        ],
+                        true,
+                    ),
+                    (
+                        vec![
+                            "notegen-cli",
+                            "tools",
+                            "language-packs",
+                            "--downloads-dir",
+                            "a selected store",
+                        ],
+                        false,
+                    ),
+                ] {
+                    let args = Args::try_parse_from(arguments).unwrap();
+                    assert_eq!(args.downloads_dir, Some(PathBuf::from("a selected store")));
+                    assert_eq!(needs_download_control(&args.command), needs_store);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

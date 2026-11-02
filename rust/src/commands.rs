@@ -6,6 +6,13 @@ use notegen::{
 use serde::Serialize;
 use std::path::PathBuf;
 
+#[path = "download_commands.rs"]
+mod download_commands;
+#[path = "redaction_commands.rs"]
+mod redaction_commands;
+#[path = "vault_commands.rs"]
+mod vault_commands;
+
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct SupportRequest {
@@ -26,6 +33,39 @@ impl SupportRequest {
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Encrypted project snapshots and guarded temporary work sessions.
+    Vault {
+        #[command(subcommand)]
+        command: vault_commands::Action,
+    },
+    /// Confirm source masks and build a separate sharing copy.
+    Redactions {
+        #[command(subcommand)]
+        command: redaction_commands::Action,
+    },
+    /// Inspect and control persisted, verified asset transfers.
+    Downloads {
+        #[command(subcommand)]
+        command: download_commands::Action,
+    },
+    /// Teach an explicitly confirmed ligature, grapheme cluster or stylistic alternate.
+    TeachFont {
+        writer: String,
+        image: PathBuf,
+        label: String,
+        #[arg(value_parser = ["ligature", "cluster", "alternate"])]
+        shape: String,
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
+        alternate: u8,
+    },
+    FontCoverage {
+        writer: String,
+    },
+    WriterHistory {
+        writer: String,
+        #[arg(value_parser = ["list", "undo", "redo", "recover"])]
+        action: String,
+    },
     /// Create a new retention-managed session. Files are kept until explicit cleanup.
     SessionCreate {
         parent: PathBuf,
@@ -65,6 +105,7 @@ pub enum Action {
         output: PathBuf,
     },
     CredentialStatus,
+    ConnectionStatus,
     RemoveCredential,
     Watch {
         config: PathBuf,
@@ -505,6 +546,41 @@ fn format(value: &str) -> Result<exports::Format> {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::Vault { command } => vault_commands::run(command, s, c),
+        Action::Redactions { command } => redaction_commands::run(command, c),
+        Action::Downloads { command } => download_commands::run(command, c),
+        Action::TeachFont {
+            writer,
+            image,
+            label,
+            shape,
+            alternate,
+        } => {
+            let shape = match shape.as_str() {
+                "ligature" => notegen::writers::FontShape::Ligature,
+                "cluster" => notegen::writers::FontShape::Cluster,
+                _ => notegen::writers::FontShape::Alternate { index: alternate },
+            };
+            let image = notegen::writers::open_image(&image, 40_000_000)?;
+            print(notegen::writers::add_font_example(
+                &s.writer.root,
+                &writer,
+                &image,
+                BoxRect::full(),
+                &label,
+                shape,
+                "CLI confirmed font shape",
+            )?)
+        }
+        Action::FontCoverage { writer } => {
+            print(notegen::fontpack::coverage(&s.writer.root, &writer)?)
+        }
+        Action::WriterHistory { writer, action } => match action.as_str() {
+            "undo" => print(notegen::writer_history::undo(&s.writer.root, &writer)?),
+            "redo" => print(notegen::writer_history::redo(&s.writer.root, &writer)?),
+            "recover" => print(notegen::writer_history::recover(&s.writer.root, &writer)?),
+            _ => print(notegen::writer_history::timeline(&s.writer.root, &writer)?),
+        },
         Action::SessionCreate { parent } => {
             let session = notegen::sessions::Session::create(&parent, c)?;
             print(
@@ -585,6 +661,7 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
             print(report)
         }
         Action::CredentialStatus => print(notegen::credentials::native().status()?),
+        Action::ConnectionStatus => print(notegen::connections::snapshot()),
         Action::RemoveCredential => {
             notegen::credentials::native().delete()?;
             print(notegen::credentials::native().status()?)
@@ -1237,4 +1314,12 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
             c,
         )?),
     }
+}
+
+/// Only commands that receive assets need to acquire the shared download store.
+pub fn needs_download_control(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Downloads { .. } | Action::InstallLanguages { .. } | Action::RepairAssets { .. }
+    )
 }

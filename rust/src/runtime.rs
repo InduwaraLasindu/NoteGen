@@ -120,6 +120,20 @@ pub struct Server {
     pub model: Model,
     pub acceleration_verified: bool,
 }
+fn status_request(
+    request: reqwest::blocking::RequestBuilder,
+) -> Result<(reqwest::blocking::Response, crate::connections::Guard)> {
+    let url = request
+        .try_clone()
+        .ok_or_else(|| Fault::new("NG200", "Reader status request cannot be tracked"))?
+        .build()?
+        .url()
+        .clone();
+    let guard = crate::connections::begin(url.as_str(), crate::connections::Purpose::ReaderStatus);
+    let response = request.send()?;
+    guard.response_url(response.url());
+    Ok((response, guard))
+}
 impl Drop for Server {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Relaxed);
@@ -147,6 +161,102 @@ impl ManagedShutdown {
     }
 }
 impl Server {
+    #[allow(clippy::too_many_arguments)]
+    pub fn read_masked(
+        &self,
+        image: &DynamicImage,
+        identity: &crate::redactions::SourceIdentity,
+        masks: &[crate::redactions::ConfirmedMask],
+        source_view: Option<&BoxRect>,
+        settings: &Settings,
+        c: &Control,
+        log: &Activity,
+        page: usize,
+    ) -> Result<PageContent> {
+        self.read_masked_inner(
+            image,
+            identity,
+            masks,
+            source_view,
+            settings,
+            c,
+            log,
+            page,
+            false,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn read_table_masked(
+        &self,
+        image: &DynamicImage,
+        identity: &crate::redactions::SourceIdentity,
+        masks: &[crate::redactions::ConfirmedMask],
+        source_view: Option<&BoxRect>,
+        settings: &Settings,
+        c: &Control,
+        log: &Activity,
+        page: usize,
+    ) -> Result<PageContent> {
+        self.read_masked_inner(
+            image,
+            identity,
+            masks,
+            source_view,
+            settings,
+            c,
+            log,
+            page,
+            true,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn read_masked_inner(
+        &self,
+        image: &DynamicImage,
+        identity: &crate::redactions::SourceIdentity,
+        masks: &[crate::redactions::ConfirmedMask],
+        source_view: Option<&BoxRect>,
+        settings: &Settings,
+        c: &Control,
+        log: &Activity,
+        page: usize,
+        table: bool,
+    ) -> Result<PageContent> {
+        anyhow::ensure!(
+            self.child.is_some()
+                && self.api_key.is_none()
+                && !settings.external_server
+                && self.model.endpoint.is_none(),
+            Fault::new(
+                "NG200",
+                "Redacted recognition requires a fresh internally owned reader"
+            )
+        );
+        let safe = crate::redactions::private_recognition_settings(settings);
+        let image = crate::redactions::mask_view(image, identity, masks, source_view, c)?;
+        let result = if table {
+            self.read_table(
+                &image,
+                "",
+                crate::redactions::READER_NOTICE,
+                &safe,
+                c,
+                log,
+                page,
+            )
+        } else {
+            self.read(
+                &image,
+                "",
+                crate::redactions::READER_NOTICE,
+                &safe,
+                c,
+                log,
+                page,
+            )
+        }?;
+        Ok(crate::redactions::enforce_view(&result, identity, masks, source_view, c)?.0)
+    }
     /// Logical reset for the pinned b12032 single-slot runtime. Erasing KV alone
     /// leaves task_prev alive; a completed neutral task must replace it first.
     pub(crate) fn reset_for_reuse(&self, c: &Control) -> Result<()> {
@@ -159,7 +269,8 @@ impl Server {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
             .build()?;
-        let json_response = |response: reqwest::blocking::Response| -> Result<Value> {
+        let json_response = |request: reqwest::blocking::RequestBuilder| -> Result<Value> {
+            let (response, _guard) = status_request(request)?;
             let mut bytes = vec![];
             response
                 .error_for_status()?
@@ -182,8 +293,7 @@ impl Server {
             c.check()?;
             let result = json_response(
                 authorize(client.post(format!("{}/slots/0?action=erase", self.endpoint)))
-                    .json(&json!({}))
-                    .send()?,
+                    .json(&json!({})),
             )?;
             anyhow::ensure!(
                 result["id_slot"] == 0 && result["n_erased"].as_u64().is_some(),
@@ -194,12 +304,10 @@ impl Server {
         erase()?;
         c.check()?;
         let result = json_response(
-            authorize(client.post(format!("{}/completion", self.endpoint)))
-                .json(&json!({
-                    "prompt":"NoteGen neutral context reset.","id_slot":0,"cache_prompt":false,
-                    "n_predict":1,"stream":false,"temperature":0,"seed":0
-                }))
-                .send()?,
+            authorize(client.post(format!("{}/completion", self.endpoint))).json(&json!({
+                "prompt":"NoteGen neutral context reset.","id_slot":0,"cache_prompt":false,
+                "n_predict":1,"stream":false,"temperature":0,"seed":0
+            })),
         )?;
         anyhow::ensure!(
             result["stop"].as_bool() == Some(true),
@@ -208,8 +316,7 @@ impl Server {
         // The erase task queues behind release/reset, providing the task_prev barrier.
         erase()?;
         c.check()?;
-        let slots =
-            json_response(authorize(client.get(format!("{}/slots", self.endpoint))).send()?)?;
+        let slots = json_response(authorize(client.get(format!("{}/slots", self.endpoint))))?;
         let slots = slots
             .as_array()
             .ok_or_else(|| Fault::new("NG200", "Reader reset slots unavailable"))?;
@@ -310,11 +417,10 @@ impl Server {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(5))
                 .build()?;
-            let identity: Value = client
-                .get(format!("{}/v1/models", endpoint))
-                .send()?
-                .error_for_status()?
-                .json()?;
+            let (response, identity_guard) =
+                status_request(client.get(format!("{}/v1/models", endpoint)))?;
+            let identity: Value = response.error_for_status()?.json()?;
+            drop(identity_guard);
             anyhow::ensure!(
                 identity["data"].as_array().is_some_and(|items| items
                     .iter()
@@ -460,7 +566,8 @@ impl Server {
                 let raw = fs::read_to_string(&log_path).unwrap_or_default();
                 return Err(classify_server(&raw).into());
             }
-            if let Ok(r) = client.get(format!("{}/health", server.endpoint)).send()
+            if let Ok((r, _guard)) =
+                status_request(client.get(format!("{}/health", server.endpoint)))
                 && r.status().is_success()
             {
                 break;
@@ -758,6 +865,8 @@ fn chat_authenticated(
     api_key: Option<&str>,
 ) -> Result<String> {
     let url = local_endpoint(endpoint)?.join("v1/chat/completions")?;
+    let request_guard =
+        crate::connections::begin(url.as_str(), crate::connections::Purpose::Reader);
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
         let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(s.timeout()).build()?;
         let request = client.post(url).json(&body);
@@ -770,6 +879,7 @@ fn chat_authenticated(
                 _ = tokio::time::sleep(Duration::from_millis(50)) => c.check()?,
             }
         };
+        request_guard.response_url(response.url());
         if response.status().is_redirection() { return Err(Fault::new("NG203", "Inference redirect blocked").into()); }
         let success = response.status().is_success();
         let json_response = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|h| h.to_str().ok()).is_some_and(|h| h.contains("application/json"));

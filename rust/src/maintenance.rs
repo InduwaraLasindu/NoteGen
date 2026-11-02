@@ -107,6 +107,7 @@ impl Report {
 }
 fn metadata(url: &str, c: &Control) -> Result<Value> {
     c.check()?;
+    let request_guard = crate::connections::begin(url, crate::connections::Purpose::UpdateCheck);
     let client = reqwest::blocking::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -120,11 +121,9 @@ fn metadata(url: &str, c: &Control) -> Result<Value> {
     {
         request = request.bearer_auth(token.expose_secret());
     }
-    request
-        .send()?
-        .error_for_status()?
-        .take(4_000_001)
-        .read_to_end(&mut bytes)?;
+    let response = request.send()?.error_for_status()?;
+    request_guard.response_url(response.url());
+    response.take(4_000_001).read_to_end(&mut bytes)?;
     c.check()?;
     anyhow::ensure!(
         bytes.len() <= 4_000_000,

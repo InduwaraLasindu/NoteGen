@@ -539,8 +539,20 @@ impl Manager {
             .state
             .lock()
             .map_err(|_| fault("Download manager lock failed"))?;
-        if let Some(job) = state.store.jobs.iter().find(|j| j.id == id) {
-            return Ok(job.clone());
+        if let Some(index) = state.store.jobs.iter().position(|j| j.id == id) {
+            if state.store.jobs[index].status == Status::Complete
+                && !state.store.jobs[index].user_paused
+            {
+                let previous = state.store.jobs[index].clone();
+                state.store.jobs[index].status = Status::Queued;
+                state.store.jobs[index].received_bytes = 0;
+                state.store.jobs[index].error_code = None;
+                if let Err(error) = self.save(&mut state) {
+                    state.store.jobs[index] = previous;
+                    return Err(error);
+                }
+            }
+            return Ok(state.store.jobs[index].clone());
         }
         anyhow::ensure!(
             state.store.jobs.len() < MAX_JOBS

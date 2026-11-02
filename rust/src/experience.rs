@@ -474,6 +474,10 @@ impl Desktop {
                     )
                     .clicked()
             {
+                if let Err(error) = self.prepare_download_control() {
+                    self.experience.error = error.to_string();
+                    return;
+                }
                 let s = self.state.settings.clone();
                 let report = report.clone();
                 self.studio_task(ctx, move |c, log| {
@@ -509,6 +513,10 @@ impl Desktop {
                         )
                         .clicked()
                 {
+                    if let Err(error) = self.prepare_download_control() {
+                        self.experience.error = error.to_string();
+                        return;
+                    }
                     self.studio_task(ctx, move |c, log| {
                         Ok(studio::StudioMessage::Installer(maintenance::download_app(
                             &app, &c, &log,
@@ -951,14 +959,15 @@ mod warm_preferences_tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000., 400.));
-        let output = ctx.run_ui(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(viewport),
                 ..Default::default()
             },
             |ui| app.warm_reader_status_ui(ui),
         );
-        let tree = output.platform_output.accesskit_update.unwrap();
+        output.textures_delta.clear();
+        let tree = output.platform_output.accesskit_update.take().unwrap();
         let button = &tree
             .nodes
             .iter()
@@ -978,7 +987,7 @@ mod warm_preferences_tests {
         );
         assert!(viewport.contains(position));
         for pressed in [true, false] {
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(viewport),
                     events: vec![
@@ -994,6 +1003,7 @@ mod warm_preferences_tests {
                 },
                 |ui| app.warm_reader_status_ui(ui),
             );
+            output.textures_delta.clear();
         }
         assert!(control.cancelled.load(Ordering::Acquire));
         assert!(job.commit().is_err());

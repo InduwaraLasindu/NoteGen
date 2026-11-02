@@ -640,17 +640,28 @@ pub fn run(
         fault("Source page PNG exceeds the 320 MB trial-copy limit")
     );
     let source_hash = hash_file(&source_path, c)?;
+    let source_identity = crate::redactions::source_identity(project, &source, c)?;
     let work = tempfile::tempdir()?;
     let copy = work.path().join("source-page.png");
-    fs::copy(&source_path, &copy)?;
-    anyhow::ensure!(
-        hash_file(&copy, c)? == source_hash,
-        fault("Source changed while copying; retry the trial")
-    );
+    if source.confirmed_redactions.is_empty() {
+        fs::copy(&source_path, &copy)?;
+        anyhow::ensure!(
+            hash_file(&copy, c)? == source_hash,
+            fault("Source changed while copying; retry the trial")
+        );
+    } else {
+        let (_, image, _) = crate::redactions::effective_page(project, &source, c)?;
+        image.save(&copy)?;
+        anyhow::ensure!(
+            hash_file(&source_path, c)? == source_hash,
+            fault("Source changed while masking the trial")
+        );
+    }
     let image = crate::writers::open_image(&copy, u64::from(settings.max_pixels))?;
     let h = discover(settings, c)?;
     let devices = select_devices(&h, &options.devices)?;
-    let mut common = settings.clone();
+    let mut common =
+        crate::redactions::recognition_settings(settings, &source.confirmed_redactions)?;
     common.backend = Backend::Cpu;
     common.gpu_index = None;
     common.require_acceleration = false;
@@ -776,15 +787,28 @@ pub fn run(
                         options.sample_interval_ms,
                     )?;
                     let read = Instant::now();
-                    let result = server.read(
-                        &image,
-                        "",
-                        &selected.subject,
-                        &selected,
-                        inner,
-                        log,
-                        options.page,
-                    );
+                    let result = if source.confirmed_redactions.is_empty() {
+                        server.read(
+                            &image,
+                            "",
+                            &selected.subject,
+                            &selected,
+                            inner,
+                            log,
+                            options.page,
+                        )
+                    } else {
+                        server.read_masked(
+                            &image,
+                            &source_identity,
+                            &source.confirmed_redactions,
+                            None,
+                            &selected,
+                            inner,
+                            log,
+                            options.page,
+                        )
+                    };
                     trial.read_seconds = Some(read.elapsed().as_secs_f64());
                     trial.elapsed_seconds = started.elapsed().as_secs_f64();
                     trial.memory = sampler.finish();
@@ -792,7 +816,17 @@ pub fn run(
                 } else {
                     let sampler = MemorySampler::start(None, false, options.sample_interval_ms)?;
                     let read = Instant::now();
-                    let result = crate::scan::printed(&image, &selected, inner);
+                    let result =
+                        crate::scan::printed(&image, &selected, inner).and_then(|content| {
+                            crate::redactions::enforce_view(
+                                &content,
+                                &source_identity,
+                                &source.confirmed_redactions,
+                                None,
+                                inner,
+                            )
+                            .map(|(content, _)| content)
+                        });
                     trial.read_seconds = Some(read.elapsed().as_secs_f64());
                     trial.elapsed_seconds = started.elapsed().as_secs_f64();
                     trial.memory = sampler.finish();

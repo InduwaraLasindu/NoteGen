@@ -183,6 +183,28 @@ fn note(page: &mut PdfPage<'_>, bounds: PdfRect, message: &str) -> Result<()> {
 /// Export the saved source images; ungrounded or unsupported text remains image-only and is reported.
 /// The searchable geometry is one measured block rectangle, never invented word/line coordinates.
 pub fn export(project: &Project, target: &Path, options: &Options, c: &Control) -> Result<Report> {
+    crate::exports::output_parent(project, target)?;
+    anyhow::ensure!(
+        !target.exists(),
+        Fault::new("NG401", "Output already exists")
+    );
+    crate::redactions::export_projected(project, target, c, |visible, output| {
+        export_inner(
+            visible,
+            output,
+            options,
+            c,
+            &project.manifest.settings.pdfium,
+        )
+    })
+}
+fn export_inner(
+    project: &Project,
+    target: &Path,
+    options: &Options,
+    c: &Control,
+    pdfium_path: &Path,
+) -> Result<Report> {
     options.validate()?;
     c.check()?;
     anyhow::ensure!(
@@ -218,7 +240,7 @@ pub fn export(project: &Project, target: &Path, options: &Options, c: &Control) 
     let embedding = font_embedding(&bytes)?;
     let coverage = FontArc::try_from_vec(bytes.clone())
         .map_err(|_| Fault::new("NG400", "The selected PDF font could not be read"))?;
-    let pdfium = bind(&project.manifest.settings.pdfium)?;
+    let pdfium = bind(pdfium_path)?;
     let mut document = pdfium.create_new_pdf()?;
     let font = document
         .fonts_mut()

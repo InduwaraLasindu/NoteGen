@@ -19,6 +19,8 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 pub const MAX_MASKS_PER_PAGE: usize = 128;
 pub const READER_NOTICE: &str = "Confirmed opaque source masks must remain [redacted]. Do not infer, reconstruct or guess covered text. Return normalized source boxes for every visible block; ungrounded readings will be withheld.";
+pub const EXPORT_NOTICE: &str = "REDACTED EXPORT: confirmed source masks are applied. Private source links, reader evidence, history and correction-import metadata are omitted. Review all remaining visible content before sharing.";
+const EXPORT_MARKER: &str = "redacted-export.json";
 const MAX_IMAGE_BYTES: u64 = 200_000_000;
 const MAX_SHARE_BYTES: u64 = 4_000_000_000;
 pub const LIMITS: &str = "Masks require explicit human confirmation. Dark rectangles may be legitimate figures; no hidden text is inferred. All ungrounded readings and whole overlapping blocks/tables are withheld rather than reconstructed. Sharing copies omit private evidence, history, settings and annotation metadata. Known-text leak checks cannot identify unknown personal information or prove that unrelated visible content is safe to share. Review every page of the newly built copy. Originals and their private history remain unchanged; this is not secure erasure.";
@@ -130,17 +132,26 @@ pub fn validate_source(masks: &[ConfirmedMask], identity: &SourceIdentity) -> Re
 /// omit unfiltered previous-page/evidence strings and use only effective views.
 pub fn recognition_settings(settings: &Settings, masks: &[ConfirmedMask]) -> Result<Settings> {
     validate_metadata(masks)?;
+    Ok(if masks.is_empty() {
+        settings.clone()
+    } else {
+        private_recognition_settings(settings)
+    })
+}
+pub fn private_recognition_settings(settings: &Settings) -> Settings {
     let mut safe = settings.clone();
-    if !masks.is_empty() {
-        safe.subject.clear();
-        safe.assistance.glossary.clear();
-        safe.assistance.sources.clear();
-        safe.assistance.ask_questions = false;
-        safe.assistance.web_lookup = false;
-        safe.writer.use_examples = false;
-        safe.writer_reference = None;
-    }
-    Ok(safe)
+    safe.subject.clear();
+    safe.assistance = crate::assistance::Options {
+        ask_questions: false,
+        max_questions: 0,
+        ..Default::default()
+    };
+    safe.writer.use_examples = false;
+    safe.writer.id = None;
+    safe.writer_reference = None;
+    safe.experience.live_preview = false;
+    safe.experience.warm_reader = false;
+    safe
 }
 fn read_source(
     project: &Project,
@@ -199,6 +210,39 @@ fn read_source(
 }
 pub fn source_identity(project: &Project, page: &Page, c: &Control) -> Result<SourceIdentity> {
     Ok(read_source(project, page, c)?.0)
+}
+pub fn recognition_view(
+    project: &Project,
+    page: &Page,
+    c: &Control,
+) -> Result<(SourceIdentity, DynamicImage)> {
+    let (identity, original) = read_source(project, page, c)?;
+    let image = mask_view(&original, &identity, &page.confirmed_redactions, None, c)?;
+    Ok((identity, image))
+}
+/// Visible blocks retain their CANONICAL indices. Never write a compacted
+/// effective page back over the canonical review checkpoint.
+pub fn visible_blocks(project: &Project, page: &Page, c: &Control) -> Result<Vec<(usize, Block)>> {
+    if page.confirmed_redactions.is_empty() {
+        return Ok(page.content.blocks.iter().cloned().enumerate().collect());
+    }
+    let identity = source_identity(project, page, c)?;
+    validate_source(&page.confirmed_redactions, &identity)?;
+    let mut visible = vec![];
+    for (index, block) in page.content.blocks.iter().enumerate() {
+        let Some(bounds) = &block.bbox else { continue };
+        if page
+            .confirmed_redactions
+            .iter()
+            .any(|mask| intersection(bounds, &mask.region).is_some())
+        {
+            continue;
+        }
+        let mut block = block.clone();
+        block.alternatives.clear();
+        visible.push((index, block));
+    }
+    Ok(visible)
 }
 fn current(project: &Project, expected: &Page) -> Result<()> {
     no_links(&project.root)?;
@@ -425,6 +469,203 @@ pub fn effective_page(
         effective.source_warnings.clear();
     }
     Ok((effective, image, report))
+}
+
+pub fn has_masks(project: &Project, c: &Control) -> Result<bool> {
+    for number in &project.manifest.pages {
+        c.check()?;
+        let base = project.page_path(*number);
+        let edits = project.root.join(format!("page-{number:05}.edits.json"));
+        if fs::symlink_metadata(&base)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            && fs::symlink_metadata(&edits)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            continue;
+        }
+        if !load_page(project, *number)?.confirmed_redactions.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+pub fn is_export_projection(project: &Project) -> bool {
+    project.root.join(EXPORT_MARKER).is_file()
+}
+
+/// An export-only allowlist. The private project, history and confirmed masks
+/// remain unchanged. Never publish this temporary project as a reusable workspace.
+pub struct ExportProjection {
+    project: Project,
+    _directory: tempfile::TempDir,
+    bindings: Vec<(usize, String, SourceIdentity)>,
+    manifest_digest: String,
+}
+impl ExportProjection {
+    pub fn project(&self) -> &Project {
+        &self.project
+    }
+    pub fn new(original: &Project, c: &Control) -> Result<Option<Self>> {
+        if !has_masks(original, c)? {
+            return Ok(None);
+        }
+        let directory = tempfile::Builder::new()
+            .prefix("notegen-redacted-export-")
+            .tempdir()?;
+        let settings = Settings {
+            server: "runtime/llama-server.exe".into(),
+            tesseract: "tesseract".into(),
+            ..Default::default()
+        };
+        let mut project = Project::open(
+            directory.path().join("project"),
+            Manifest {
+                schema: 2,
+                input_sha256: fingerprint(&(1, "redacted export"))?,
+                fingerprint: fingerprint(&(1, "public export projection"))?,
+                pages: original.manifest.pages.clone(),
+                models: vec![],
+                settings,
+            },
+        )?;
+        let mut bindings = vec![];
+        let mut fragments = BTreeSet::new();
+        let mut source_hashes = vec![];
+        let mut bytes = 0u64;
+        for number in &original.manifest.pages {
+            c.check()?;
+            let private = load_page(original, *number)?;
+            let (identity, image) = read_source(original, &private, c)?;
+            let masked = mask_view(&image, &identity, &private.confirmed_redactions, None, c)?;
+            let (mut content, _) = enforce_view(
+                &private.content,
+                &identity,
+                &private.confirmed_redactions,
+                None,
+                c,
+            )?;
+            fragments.extend(hidden_fragments(&private, c)?);
+            anyhow::ensure!(
+                fragments.len() <= 10000
+                    && fragments.iter().map(String::len).sum::<usize>() <= 8_000_000,
+                fail("Export known-private text exceeds the bounded leak-check budget")
+            );
+            content.summary.clear();
+            content.warnings = vec![EXPORT_NOTICE.into()];
+            for block in &mut content.blocks {
+                block.alternatives.clear();
+            }
+            let public = Page {
+                page: *number,
+                image: format!("page-{number:05}.png"),
+                content,
+                ..Default::default()
+            };
+            masked.save_with_format(project.image(*number), image::ImageFormat::Png)?;
+            project.save(&public)?;
+            source_hashes.push((
+                *number,
+                crate::storage::hash_file(&project.image(*number), c)?,
+            ));
+            bytes = bytes
+                .saturating_add(fs::metadata(project.image(*number))?.len())
+                .saturating_add(fs::metadata(project.page_path(*number))?.len());
+            anyhow::ensure!(
+                bytes <= MAX_SHARE_BYTES,
+                fail("Redacted export projection exceeds 4 GB; export fewer pages")
+            );
+            bindings.push((*number, fingerprint(&private)?, identity));
+        }
+        let matcher =
+            regex::RegexSetBuilder::new(fragments.iter().map(|value| regex::escape(value)))
+                .size_limit(32_000_000)
+                .dfa_size_limit(8_000_000)
+                .build()
+                .map_err(|_| {
+                    fail("Known-private export text exceeds the bounded matcher budget")
+                })?;
+        for number in &project.manifest.pages {
+            check_public_fields(&project.load(*number)?.content, &matcher, c)?;
+        }
+        project.manifest.input_sha256 = fingerprint(&(1, "masked source images", source_hashes))?;
+        project.manifest.fingerprint =
+            fingerprint(&(1, "redacted export", &project.manifest.input_sha256))?;
+        crate::storage::atomic_json(&project.root.join("project.json"), &project.manifest)?;
+        crate::storage::atomic_json(
+            &project.root.join(EXPORT_MARKER),
+            &serde_json::json!({"schema":1,"notice":EXPORT_NOTICE}),
+        )?;
+        if original.root.join("input-invalidated.json").is_file() {
+            crate::storage::atomic_json(
+                &project.root.join("input-invalidated.json"),
+                &serde_json::json!({"reason":"Source invalidated; verify preserved visible pages."}),
+            )?;
+        }
+        let projection = Self {
+            project,
+            _directory: directory,
+            bindings,
+            manifest_digest: fingerprint(&original.manifest)?,
+        };
+        projection.verify_unchanged(original, c)?;
+        Ok(Some(projection))
+    }
+    pub fn verify_unchanged(&self, original: &Project, c: &Control) -> Result<()> {
+        no_links(&original.root.join("project.json"))?;
+        let manifest: Manifest =
+            crate::storage::read_json(&original.root.join("project.json"), 1_000_000)?;
+        anyhow::ensure!(
+            fingerprint(&manifest)? == self.manifest_digest,
+            fail("Project identity changed while exporting")
+        );
+        for (number, digest, identity) in &self.bindings {
+            c.check()?;
+            let page = load_page(original, *number)?;
+            anyhow::ensure!(
+                fingerprint(&page)? == *digest && source_identity(original, &page, c)? == *identity,
+                fail("Private source or masks changed while exporting; export again")
+            );
+        }
+        Ok(())
+    }
+}
+/// The caller must guard the destination against the ORIGINAL project first.
+/// A masked output is published only after source/mask identities are rechecked.
+pub(crate) fn export_projected<T>(
+    original: &Project,
+    target: &Path,
+    c: &Control,
+    write: impl FnOnce(&Project, &Path) -> Result<T>,
+) -> Result<T> {
+    c.check()?;
+    anyhow::ensure!(!target.exists(), fail("Output already exists"));
+    let parent = crate::exports::output_parent(original, target)?;
+    fs::create_dir_all(&parent)?;
+    let parent = crate::exports::output_parent(original, &parent.join("export"))?;
+    let target = parent.join(
+        target
+            .file_name()
+            .ok_or_else(|| fail("Choose an output filename"))?,
+    );
+    let Some(projection) = ExportProjection::new(original, c)? else {
+        return write(original, &target);
+    };
+    let staging = tempfile::Builder::new()
+        .prefix(".notegen-redacted-output-")
+        .tempdir_in(&parent)?;
+    let staged = staging.path().join(
+        target
+            .file_name()
+            .ok_or_else(|| fail("Choose an output filename"))?,
+    );
+    let result = write(projection.project(), &staged)?;
+    projection.verify_unchanged(original, c)?;
+    c.check()?;
+    crate::exports::output_parent(original, &target)?;
+    tempfile::TempPath::try_from_path(staged)?
+        .persist_noclobber(&target)
+        .map_err(|error| error.error)?;
+    Ok(result)
 }
 
 /// Conservative dark, nearly solid connected rectangles only. A figure, chart

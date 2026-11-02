@@ -204,10 +204,13 @@ fn download(dir: &Path, pack: &LanguagePack, c: &Control, log: &Activity) -> Res
             crate::diagnostics::AssetHealth::Missing
         },
     };
-    let staging = tempfile::Builder::new()
-        .prefix(".notegen-ocr-")
-        .tempdir_in(dir)?;
-    let staged = tempfile::TempPath::try_from_path(staging.path().join("verified-asset"))?;
+    // Pin-bound staging survives a paused/cancelled process. The central receiver
+    // verifies retained partial bytes before resuming them; activation stays separate.
+    let staging = dir.join(".notegen-incoming").join(&pack.sha256);
+    plain_path(&staging)?;
+    fs::create_dir_all(&staging)?;
+    plain_path(&staging)?;
+    let staged = tempfile::TempPath::try_from_path(staging.join("verified-asset"))?;
     crate::models::download(
         &pack.url,
         &staged,

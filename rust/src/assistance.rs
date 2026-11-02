@@ -107,6 +107,9 @@ pub struct Guidance {
     pub answers: Vec<Answer>,
 }
 pub fn questions(project: &Project, limit: usize, threshold: f32) -> Result<Vec<Question>> {
+    if crate::redactions::has_masks(project, &Control::default())? {
+        return Ok(vec![]);
+    }
     let answered = load_guidance(project)?;
     let mut out = vec![];
     for n in &project.manifest.pages {
@@ -188,6 +191,9 @@ pub fn questions(project: &Project, limit: usize, threshold: f32) -> Result<Vec<
     Ok(out)
 }
 pub fn load_guidance(project: &Project) -> Result<Guidance> {
+    if crate::redactions::has_masks(project, &Control::default())? {
+        return Ok(Guidance::default());
+    }
     let path = project.root.join("guidance.json");
     if path.exists() {
         read_json(&path, 2_000_000)
@@ -231,6 +237,13 @@ pub fn validate_answers(qs: &[Question], answers: &[Answer]) -> Result<()> {
     Ok(())
 }
 pub fn apply(project: &Project, qs: &[Question], answers: &[Answer]) -> Result<usize> {
+    anyhow::ensure!(
+        !crate::redactions::has_masks(project, &Control::default())?,
+        Fault::new(
+            "NG630",
+            "Clarification assistance is withheld for projects with confirmed masks"
+        )
+    );
     validate_answers(qs, answers)?;
     anyhow::ensure!(
         answers.len() <= 32,
@@ -421,6 +434,10 @@ pub fn search(query: &str, enabled: bool, c: &Control) -> Result<Vec<WebSource>>
             "NoteGen/0.3 (https://github.com/InduwaraLasindu/NoteGen; user-initiated topic lookup)",
         )
         .build()?;
+    let request_guard = crate::connections::begin(
+        "https://en.wikipedia.org/w/api.php",
+        crate::connections::Purpose::PublicLookup,
+    );
     let response = client
         .get("https://en.wikipedia.org/w/api.php")
         .query(&[
@@ -433,6 +450,7 @@ pub fn search(query: &str, enabled: bool, c: &Control) -> Result<Vec<WebSource>>
         ])
         .send()?
         .error_for_status()?;
+    request_guard.response_url(response.url());
     use std::io::Read;
     let mut bytes = vec![];
     response.take(1_000_001).read_to_end(&mut bytes)?;
@@ -473,6 +491,13 @@ pub fn parse_search(bytes: &[u8]) -> Result<Vec<WebSource>> {
 }
 /// Append a manually labelled region or topic without editing the recognized text.
 pub fn add_context(project: &Project, note: &str) -> Result<()> {
+    anyhow::ensure!(
+        !crate::redactions::has_masks(project, &Control::default())?,
+        Fault::new(
+            "NG630",
+            "Context assistance is withheld while confirmed masks exist"
+        )
+    );
     anyhow::ensure!(
         !note.trim().is_empty() && note.len() <= 4000,
         Fault::new("NG630", "Context must contain 1–4000 bytes")
