@@ -8,6 +8,115 @@ use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum Action {
+    RegionRead {
+        project: PathBuf,
+        request: PathBuf,
+    },
+    ReconsiderPages {
+        project: PathBuf,
+        pages: String,
+    },
+    BundlePreview {
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+    },
+    ExportBundle {
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    InspectBundle {
+        input: PathBuf,
+    },
+    ImportBundle {
+        input: PathBuf,
+        destination: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    InstallPreflight {
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+    },
+    CapabilityCards,
+    ResourcePreview {
+        profile: String,
+        #[arg(long, default_value_t = 1)]
+        reserve_cores: usize,
+        #[arg(long)]
+        reserve_ram_mib: Option<u64>,
+        #[arg(long)]
+        reserve_vram_mib: Option<u64>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    ApplyResourcePreview {
+        preview: PathBuf,
+        #[arg(long)]
+        undo: bool,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    TimeBudget {
+        jobs: PathBuf,
+        seconds: f64,
+    },
+    PreviewWord {
+        project: PathBuf,
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    ImportWord {
+        project: PathBuf,
+        input: PathBuf,
+        preview: PathBuf,
+        selections: PathBuf,
+        #[arg(long, default_value = "Confirmed Word corrections")]
+        label: String,
+    },
+    WordStyles {
+        project: PathBuf,
+        #[arg(long)]
+        apply: Option<PathBuf>,
+    },
+    CleanupScan {
+        input: PathBuf,
+        #[arg(long)]
+        options: Option<PathBuf>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    PerspectiveScan {
+        input: PathBuf,
+        corners: PathBuf,
+        width: u32,
+        height: u32,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    SplitScan {
+        input: PathBuf,
+        #[arg(long, default_value_t = 0.5)]
+        gutter_left: f32,
+        #[arg(long, default_value_t = 0.5)]
+        gutter_right: f32,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    RedactScan {
+        input: PathBuf,
+        regions: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Export markdown, html, latex, xlsx or traceability JSON.
     Export {
         project: PathBuf,
@@ -192,6 +301,185 @@ fn format(value: &str) -> Result<exports::Format> {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::RegionRead { project, request } => print(notegen::pipeline::reread_region(
+            &Project::read(project)?,
+            &read_json(&request, 100_000)?,
+            s,
+            c,
+            &Activity::default(),
+        )?),
+        Action::ReconsiderPages { project, pages } => {
+            let p = Project::read(project)?;
+            let maximum = p.manifest.pages.iter().copied().max().unwrap_or(0);
+            let selected = pages_range(&pages, maximum)?;
+            anyhow::ensure!(
+                selected.iter().all(|n| p.manifest.pages.contains(n)),
+                Fault::new("NG100", "Selected page is not in this project")
+            );
+            print(notegen::pipeline::reconsider(
+                &p,
+                &selected,
+                s,
+                c,
+                &Activity::default(),
+            )?)
+        }
+        Action::BundlePreview { models, runtime } => print(notegen::bundles::preview(
+            s,
+            &models,
+            runtime.as_deref(),
+            c,
+        )?),
+        Action::ExportBundle {
+            models,
+            runtime,
+            output,
+        } => notegen::bundles::export(s, &models, runtime.as_deref(), &output, c),
+        Action::InspectBundle { input } => print(notegen::bundles::inspect(&input, c)?),
+        Action::ImportBundle {
+            input,
+            destination,
+            output,
+        } => {
+            anyhow::ensure!(
+                !output.exists(),
+                Fault::new("NG401", "Settings output exists")
+            );
+            let next = notegen::bundles::import(s, &input, &destination, c)?;
+            protected_json(&output, &next)
+        }
+        Action::InstallPreflight { models, runtime } => print(notegen::bundles::preflight(
+            s,
+            &models,
+            runtime.as_deref(),
+            c,
+        )?),
+        Action::CapabilityCards => print(notegen::bundles::capability_cards()?),
+        Action::ResourcePreview {
+            profile,
+            reserve_cores,
+            reserve_ram_mib,
+            reserve_vram_mib,
+            output,
+        } => {
+            let profile = serde_json::from_value(serde_json::Value::String(profile))?;
+            let hw = notegen::hardware::detect_for(s, c);
+            let preview = notegen::resources::preview(
+                s,
+                &hw,
+                profile,
+                &notegen::resources::Reservations {
+                    cpu_cores: reserve_cores,
+                    ram_mib: reserve_ram_mib,
+                    vram_mib: reserve_vram_mib,
+                },
+            )?;
+            protected_json(&output, &preview)?;
+            print(preview)
+        }
+        Action::ApplyResourcePreview {
+            preview,
+            undo,
+            output,
+        } => {
+            let p: notegen::resources::ResourcePreview = read_json(&preview, 1_000_000)?;
+            let mut next = s.clone();
+            if undo {
+                p.undo(&mut next)?;
+            } else {
+                p.apply(&mut next)?;
+            }
+            protected_json(&output, &next)
+        }
+        Action::TimeBudget { jobs, seconds } => print(notegen::resources::time_budget(
+            &read_json::<Vec<notegen::resources::QueueDuration>>(&jobs, 1_000_000)?,
+            seconds,
+        )?),
+        Action::PreviewWord {
+            project,
+            input,
+            output,
+        } => {
+            let preview = notegen::roundtrip::preview(&Project::read(project)?, &input, c)?;
+            protected_json(&output, &preview)?;
+            print(preview)
+        }
+        Action::ImportWord {
+            project,
+            input,
+            preview,
+            selections,
+            label,
+        } => print(notegen::roundtrip::apply(
+            &Project::read(project)?,
+            &input,
+            &read_json(&preview, 32_000_000)?,
+            &read_json::<Vec<String>>(&selections, 1_000_000)?,
+            &label,
+            c,
+        )?),
+        Action::WordStyles { project, apply } => {
+            let p = Project::read(project)?;
+            if let Some(path) = apply {
+                notegen::word::save_style_profile(&p, &read_json(&path, 1_000_000)?)?;
+            }
+            print(notegen::word::style_profile(&p)?)
+        }
+        Action::CleanupScan {
+            input,
+            options,
+            output,
+        } => {
+            let options = if let Some(path) = options {
+                read_json(&path, 100_000)?
+            } else {
+                notegen::scan_tools::CleanupOptions::default()
+            };
+            let im = notegen::writers::open_image(&input, 40_000_000)?;
+            let comparison = notegen::scan_tools::compare(&im, &options, c)?;
+            notegen::scan_tools::export_comparison(&comparison, &output, c)
+        }
+        Action::PerspectiveScan {
+            input,
+            corners,
+            width,
+            height,
+            output,
+        } => {
+            let im = notegen::writers::open_image(&input, 40_000_000)?;
+            let result = notegen::scan_tools::perspective(
+                &im,
+                read_json(&corners, 100_000)?,
+                width,
+                height,
+                c,
+            )?;
+            notegen::scan_tools::write_image(&result, &output, c)
+        }
+        Action::SplitScan {
+            input,
+            gutter_left,
+            gutter_right,
+            output,
+        } => {
+            let im = notegen::writers::open_image(&input, 40_000_000)?;
+            let split = notegen::scan_tools::split_double(&im, gutter_left, gutter_right, c)?;
+            notegen::scan_tools::export_split(&split, &output, c)
+        }
+        Action::RedactScan {
+            input,
+            regions,
+            output,
+        } => {
+            let im = notegen::writers::open_image(&input, 40_000_000)?;
+            notegen::scan_tools::export_redacted(
+                &im,
+                &read_json::<Vec<BoxRect>>(&regions, 100_000)?,
+                &output,
+                c,
+            )
+            .map(|_| ())
+        }
         Action::Export {
             project,
             output,
@@ -260,7 +548,7 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
                 !output.exists(),
                 Fault::new("NG401", "Preview output already exists")
             );
-            atomic_json(&output, &preview)?;
+            protected_json(&output, &preview)?;
             print(preview)
         }
         Action::ApplyRule {
@@ -318,7 +606,7 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
                 !output.exists(),
                 Fault::new("NG401", "Settings output already exists")
             );
-            atomic_json(&output, &projects::load_template(&input)?.settings)
+            protected_json(&output, &projects::load_template(&input)?.settings)
         }
         Action::ProfileCoverage { writer } => {
             print(profile_tools::coaching(&s.writer.root, &writer)?)

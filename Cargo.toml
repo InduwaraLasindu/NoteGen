@@ -139,3 +139,11 @@ path = "rust/tests/resources.rs"
 name = "roundtrip"
 path = "rust/tests/roundtrip.rs"
 
+[[test]]
+name = "scan_tools"
+path = "rust/tests/scan_tools.rs"
+
+[[test]]
+name = "context_history"
+path = "rust/tests/context_history.rs"
+

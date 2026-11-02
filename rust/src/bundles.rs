@@ -125,7 +125,7 @@ fn build_inventory(
     );
     check_path(&settings.models_dir)?;
     let (installed, _) = crate::runtime::inventory_available(&settings.models_dir)?;
-    let mut inventory=Inventory {schema:1,readers:vec![],runtime:None,files:vec![],total_bytes:0,contents_note:"Contains selected reader metadata, GGUF weights/projectors and optional publisher-pinned Windows runtime archives. No document, writer, credential, endpoint or application-settings files are included. Model hashes identify the locally registered revision, not independent publisher authenticity. Runtime archives must match this NoteGen build's compiled pins.".into()};
+    let mut inventory=Inventory {schema:1,readers:vec![],runtime:None,files:vec![],total_bytes:0,contents_note:"Contains selected reader metadata, GGUF weights/projectors and optional publisher-pinned Windows runtime archives. No document, writer, credential, endpoint or application-settings files are included. Model hashes identify the locally registered revision, not independent publisher authenticity. Runtime archives must match this NoteGen build's compiled pins. Runtime activation requires installed NoteGen native dependencies; app-local Microsoft support DLLs are reused only from that target installation.".into()};
     let mut paths = BTreeMap::new();
     for id in ids {
         c.check()?;
@@ -263,7 +263,7 @@ fn validate(inventory: &Inventory) -> Result<()> {
     for reader in &inventory.readers {
         models::validate_model(&reader.model)?;
         anyhow::ensure!(
-            reader_ids.insert(&reader.model.id)
+            reader_ids.insert(reader.model.id.to_ascii_lowercase())
                 && reader.model.endpoint.is_none()
                 && reader.model.alias.is_empty()
                 && reader.model.weights.as_os_str().is_empty()
@@ -604,6 +604,17 @@ pub fn import(
             "Repair existing reader registrations before importing; none were changed"
         )
     );
+    anyhow::ensure!(
+        inventory.readers.iter().all(|reader| {
+            existing.iter().all(|old| {
+                old.id == reader.model.id || !old.id.eq_ignore_ascii_case(&reader.model.id)
+            })
+        }),
+        Fault::new(
+            "NG650",
+            "Imported reader ID conflicts with an existing ID by letter case; no registrations were changed"
+        )
+    );
     for mut model in existing {
         if model.endpoint.is_none() {
             model.weights = model.weights.canonicalize()?;
@@ -652,12 +663,34 @@ pub fn import(
             .map(|s| stage.path().join(s))
             .collect::<Vec<_>>();
         extract_runtime(&archives, &runtime_dir, c)?;
+        for name in [
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+            "msvcp140.dll",
+            "concrt140.dll",
+        ] {
+            c.check()?;
+            let source = setup::runtime_root(settings).join(name);
+            let target = runtime_dir.join(name);
+            if source.is_file() && !target.exists() {
+                check_path(&source)?;
+                anyhow::ensure!(
+                    source.metadata()?.len() <= 20_000_000,
+                    Fault::new(
+                        "NG650",
+                        "Installed runtime support DLL exceeds its size limit"
+                    )
+                );
+                fs::copy(source, target)?;
+            }
+        }
         let server = runtime_dir.join("llama-server.exe");
         anyhow::ensure!(
             server.is_file(),
             Fault::new("NG650", "Offline runtime has no llama-server")
         );
-        // Only compiled-pinned binaries are run, after complete hash verification.
+        // The server comes from compiled-pinned archives. Support DLLs come only
+        // from the target PC's existing installation, matching normal setup.
         let (ok, out, err) = crate::scan::run(
             &server,
             &["--list-devices".into()],

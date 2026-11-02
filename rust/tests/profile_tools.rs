@@ -415,3 +415,31 @@ fn duplicate_sample_ids_and_invalid_quarantine_metadata_are_rejected_on_import_o
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(writers::read(dir.path(), &p.id).is_err());
 }
+
+#[test]
+fn quarantine_reason_changes_leave_exact_recognition_reference_unchanged_and_revision_overflow_fails_safely()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = fixture(root);
+    tools::quarantine(root, &p.id, &p.samples[0].id, "first reason").unwrap();
+    let first = writers::reference(root, &p.id).unwrap().unwrap();
+    tools::quarantine(
+        root,
+        &p.id,
+        &p.samples[0].id,
+        "second administrative reason",
+    )
+    .unwrap();
+    let second = writers::reference(root, &p.id).unwrap().unwrap();
+    assert_eq!(first.description, second.description);
+    assert_eq!(first.png, second.png);
+    assert_eq!(first.revision, second.revision);
+    let path = root.join(&p.id).join("profile.json");
+    let mut value = serde_json::to_value(writers::read(root, &p.id).unwrap()).unwrap();
+    value["revision"] = serde_json::json!(u64::MAX);
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    assert!(tools::restore_example(root, &p.id, &p.samples[0].id).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+}

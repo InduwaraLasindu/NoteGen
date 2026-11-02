@@ -2,6 +2,68 @@ use notegen::{inputs, storage::Control};
 use std::{fs, sync::atomic::Ordering};
 
 #[test]
+fn real_native_ocr_image_folder_conversion_and_resume() {
+    use ab_glyph::FontArc;
+    use notegen::{pipeline, storage::Activity, types::*};
+    let font_path = [
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    .iter()
+    .find(|p| std::path::Path::new(p).is_file())
+    .expect("native tests require a system font");
+    let font = FontArc::try_from_vec(fs::read(font_path).unwrap()).unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let folder = d.path().join("scans");
+    fs::create_dir(&folder).unwrap();
+    let mut im = image::RgbImage::from_pixel(1000, 650, image::Rgb([255, 255, 255]));
+    imageproc::drawing::draw_text_mut(
+        &mut im,
+        image::Rgb([0, 0, 0]),
+        40,
+        60,
+        52.,
+        &font,
+        "Invoice Total 1250",
+    );
+    im.save(folder.join("001.png")).unwrap();
+    im.save(folder.join("002.jpg")).unwrap();
+    let mut s = Settings {
+        preset: Preset::Fast,
+        auto_rotate: false,
+        deskew: false,
+        ..Default::default()
+    };
+    s.assistance.ask_questions = false;
+    for name in ["first.docx", "resumed.docx"] {
+        let done = pipeline::convert(
+            &folder,
+            &d.path().join(name),
+            &s,
+            &Control::default(),
+            &Activity::default(),
+        )
+        .unwrap();
+        assert_eq!(done.pages, 2);
+        assert!(done.output.is_file());
+        for n in [1, 2] {
+            assert!(
+                done.project
+                    .load(n)
+                    .unwrap()
+                    .content
+                    .plain()
+                    .contains("1250")
+            );
+        }
+        assert_eq!(
+            notegen::projects::metadata(&done.project).unwrap().source,
+            Some(folder.canonicalize().unwrap())
+        );
+    }
+}
+
+#[test]
 fn png_and_jpeg_share_page_range_and_pixel_limits() {
     let d = tempfile::tempdir().unwrap();
     for ext in ["png", "jpg"] {

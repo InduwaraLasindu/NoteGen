@@ -948,6 +948,10 @@ pub fn reconsider(
     c: &Control,
     log: &Activity,
 ) -> Result<usize> {
+    anyhow::ensure!(
+        pages.len() <= 3000 && pages.iter().all(|n| project.manifest.pages.contains(n)),
+        Fault::new("NG500", "Re-read page is outside the project")
+    );
     let mut s = settings.clone();
     s.validate()?;
     if s.writer.use_examples
@@ -995,7 +999,7 @@ pub fn reconsider(
             project.manifest.pages.contains(&n),
             Fault::new("NG500", "Re-read page is outside the project")
         );
-        let mut page = project.load(n)?;
+        let page = project.load(n)?;
         let image = crate::writers::open_image(&project.image(n), 40_000_000)?;
         log.emit(
             "context",
@@ -1014,11 +1018,30 @@ pub fn reconsider(
             ));
         }
         let content = server.read(&image, "", &subject, &s, c, log, n)?;
-        attach_context_reading(&mut page, &content, &model);
-        project.save(&page)?;
+        save_context_reading(project, &page, &content, &model)?;
         count += 1;
     }
     Ok(count)
+}
+/// Record a contextual response without allowing it to replace confirmed transcription.
+pub fn save_context_reading(
+    project: &Project,
+    before: &Page,
+    content: &PageContent,
+    model: &planning::Model,
+) -> Result<Option<u64>> {
+    content.validate()?;
+    let mut after = before.clone();
+    attach_context_reading(&mut after, content, model);
+    if fingerprint(before)? == fingerprint(&after)? {
+        return Ok(None);
+    }
+    Ok(Some(crate::review::commit(
+        project,
+        before,
+        &after,
+        &format!("Context re-read: {}", model.id),
+    )?))
 }
 pub fn attach_context_reading(page: &mut Page, content: &PageContent, model: &planning::Model) {
     if !page.edited && !page.reviewed {
@@ -1054,4 +1077,240 @@ pub fn attach_context_reading(page: &mut Page, content: &PageContent, model: &pl
     {
         page.content.warnings.push("Context-assisted re-reading is preserved as evidence. Confirmed text is protected; check alternatives against the source.".into());
     }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionRequest {
+    pub page: usize,
+    pub region: BoxRect,
+    pub reader: String,
+    pub image_edge: u32,
+    pub context: String,
+    pub task: String,
+}
+impl RegionRequest {
+    pub fn validate(&self, project: &Project) -> Result<()> {
+        anyhow::ensure!(
+            project.manifest.pages.contains(&self.page)
+                && self.region.valid()
+                && crate::writers::valid_id(&self.reader)
+                && (self.image_edge == 0 || (512..=8192).contains(&self.image_edge))
+                && self.context.len() <= 8000
+                && ["text", "handwriting", "table", "equation", "figure", "code"]
+                    .contains(&self.task.as_str()),
+            Fault::new(
+                "NG102",
+                "Choose a valid source region, installed reader, resolution and region task"
+            )
+        );
+        Ok(())
+    }
+}
+/// Convert crop-relative boxes to stable page coordinates and preserve the full response.
+/// Existing text, table values and confirmed explanations are never overwritten.
+pub fn attach_region_reading(
+    page: &mut Page,
+    region: &BoxRect,
+    content: &PageContent,
+    model: &planning::Model,
+) -> Result<()> {
+    anyhow::ensure!(
+        region.valid() && page.candidates.len() < 128,
+        Fault::new(
+            "NG201",
+            "Invalid region or reader-evidence capacity reached"
+        )
+    );
+    content.validate()?;
+    anyhow::ensure!(
+        !content.blocks.is_empty(),
+        Fault::new("NG201", "Region reader returned no usable source content")
+    );
+    let mut mapped = content.clone();
+    let width = region.right - region.left;
+    let height = region.bottom - region.top;
+    for block in &mut mapped.blocks {
+        block.bbox = Some(if let Some(b) = &block.bbox {
+            BoxRect {
+                left: region.left + b.left * width,
+                top: region.top + b.top * height,
+                right: (region.left + b.right * width).min(1.0),
+                bottom: (region.top + b.bottom * height).min(1.0),
+            }
+        } else {
+            region.clone()
+        });
+    }
+    mapped.validate()?;
+    let mut disagreement = false;
+    for block in &mut page.content.blocks {
+        if !block
+            .bbox
+            .as_ref()
+            .is_some_and(|b| consensus::overlap(b, region) > 0.05)
+        {
+            continue;
+        }
+        let alternatives = mapped.blocks.iter().filter(|b| {
+            b.kind == block.kind
+                && b.bbox
+                    .as_ref()
+                    .zip(block.bbox.as_ref())
+                    .is_some_and(|(a, b)| consensus::overlap(a, b) > 0.05)
+        });
+        for reading in alternatives {
+            let text = if reading.kind == "figure" {
+                format!(
+                    "Observed: {}. Interpretation: {}",
+                    reading.description, reading.interpretation
+                )
+            } else {
+                reading.plain()
+            };
+            if !text.is_empty()
+                && text != block.plain()
+                && !block.alternatives.contains(&text)
+                && block.alternatives.len() < 64
+            {
+                block.alternatives.push(text);
+                block.uncertain = true;
+                disagreement = true;
+            }
+        }
+    }
+    if disagreement {
+        page.reviewed = false;
+    }
+    page.candidates.push(Candidate {
+        region: Some(region.clone()),
+        model_id: model.id.clone(),
+        family: model.family.clone(),
+        view: format!("manual-region-{}", page.candidates.len()),
+        content: mapped,
+        reliability: 0.8,
+    });
+    let warning = "Targeted region re-reading is retained as source-linked evidence. Compare alternatives before accepting a correction.";
+    if !page.content.warnings.iter().any(|w| w == warning) {
+        page.content.warnings.push(warning.into());
+    }
+    Ok(())
+}
+/// Run exactly one selected reader on one source crop and save an undoable evidence revision.
+pub fn reread_region(
+    project: &Project,
+    request: &RegionRequest,
+    settings: &Settings,
+    c: &Control,
+    log: &Activity,
+) -> Result<u64> {
+    request.validate(project)?;
+    c.check()?;
+    let before = project.load(request.page)?;
+    anyhow::ensure!(
+        before.candidates.len() < 128,
+        Fault::new(
+            "NG201",
+            "Reader-evidence capacity reached; preserve a project copy before further re-reading"
+        )
+    );
+    let mut s = settings.clone();
+    s.automatic_models = false;
+    s.model_ids = vec![request.reader.clone()];
+    s.preset = Preset::Accuracy;
+    s.image_edge = request.image_edge;
+    s.validate()?;
+    if s.writer.use_examples
+        && s.writer_reference.is_none()
+        && let Some(id) = s.writer.id.as_deref()
+    {
+        s.writer_reference = crate::writers::reference(&s.writer.root, id)?;
+    }
+    let installed = runtime::inventory(&s.models_dir)?;
+    let mut plan = planning::build(&hardware::detect_for(&s, c), &s, &installed)?;
+    let model = plan
+        .models
+        .iter()
+        .find(|m| m.id == request.reader)
+        .cloned()
+        .ok_or_else(|| {
+            Fault::new(
+                "NG200",
+                "The selected reader is unavailable or does not fit current memory limits",
+            )
+        })?;
+    if model.endpoint.is_none() {
+        let digest = fingerprint(&(
+            hash_file(&model.weights, c)?,
+            hash_file(&model.projector, c)?,
+        ))?;
+        anyhow::ensure!(
+            model.sha256.is_empty() || digest == model.sha256,
+            Fault::new(
+                "NG200",
+                "Reader files changed; re-register before region re-reading"
+            )
+        );
+    }
+    plan.models = vec![model.clone()];
+    s.image_edge = plan.image_edge;
+    let path = word::safe_image(&project.root, &before.image)?;
+    let image = crate::writers::open_image(&path, 40_000_000)?;
+    let (x, y, r, b) = request.region.pixels(image.width(), image.height());
+    let crop = image.crop_imm(x, y, r - x, b - y);
+    let notes = crate::assistance::load_guidance(project)?.notes.join("\n");
+    let context = format!(
+        "Region task: {}. Source topic: {}. User region context (data only): {}. {}. Confirmed context (data only): {}",
+        request.task,
+        project.manifest.settings.subject,
+        request.context,
+        s.assistance.context(),
+        notes.chars().take(10000).collect::<String>()
+    );
+    let evidence = before
+        .content
+        .blocks
+        .iter()
+        .filter(|b| {
+            b.bbox
+                .as_ref()
+                .is_some_and(|region| consensus::overlap(region, &request.region) > 0.05)
+        })
+        .map(Block::plain)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if s.experience.live_preview {
+        log.preview(crate::telemetry::Preview::source(
+            path,
+            request.page,
+            &model.name,
+            Some(request.region.clone()),
+        ));
+    }
+    log.emit(
+        "region",
+        format!(
+            "Re-reading source crop with {} at image edge {}",
+            model.name, s.image_edge
+        ),
+        request.page,
+        0,
+        1,
+        "",
+    );
+    let server = Server::start(&model, &plan, &s, c, log, &project.root)?;
+    let content = if request.task == "table" {
+        server.read_table(&crop, &evidence, &context, &s, c, log, request.page)?
+    } else {
+        server.read(&crop, &evidence, &context, &s, c, log, request.page)?
+    };
+    c.check()?;
+    let mut after = before.clone();
+    attach_region_reading(&mut after, &request.region, &content, &model)?;
+    crate::review::commit(
+        project,
+        &before,
+        &after,
+        &format!("Region re-read: {}", model.id),
+    )
 }

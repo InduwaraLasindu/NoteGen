@@ -17,12 +17,21 @@ pub fn run(
     timeout: Duration,
     c: &Control,
 ) -> Result<(bool, String, String)> {
+    run_with_threads(exe, args, timeout, c, 4)
+}
+pub fn run_with_threads(
+    exe: &Path,
+    args: &[String],
+    timeout: Duration,
+    c: &Control,
+    threads: usize,
+) -> Result<(bool, String, String)> {
     c.check()?;
     let mut out = tempfile::tempfile()?;
     let mut err = tempfile::tempfile()?;
     let mut child = command(exe)
         .args(args)
-        .env("OMP_THREAD_LIMIT", "4")
+        .env("OMP_THREAD_LIMIT", threads.clamp(1, 512).to_string())
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(err.try_clone()?)
@@ -401,7 +410,14 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
 }
 pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageContent> {
     let dir = tempfile::tempdir()?;
-    let mut gray = enhance(im);
+    let mut gray = if s.cpu_threads == 0 {
+        enhance(im)
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(s.cpu_threads.clamp(1, 512))
+            .build()?
+            .install(|| enhance(im))
+    };
     let original = gray.clone();
     for l in lines(&gray) {
         for y in l.y0.saturating_sub(2)..=(l.y1 + 2).min(gray.height() - 1) {
@@ -412,7 +428,7 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
     }
     let path = dir.path().join("ocr.png");
     gray.save(&path)?;
-    let (ok, text, _) = run(
+    let (ok, text, _) = run_with_threads(
         &s.tesseract,
         &[
             path.to_string_lossy().into(),
@@ -425,6 +441,11 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
         ],
         Duration::from_secs(90),
         c,
+        if s.cpu_threads == 0 {
+            4
+        } else {
+            s.cpu_threads.min(4)
+        },
     )?;
     anyhow::ensure!(
         ok,
@@ -498,7 +519,7 @@ pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImag
     let d = tempfile::tempdir()?;
     let p = d.path().join("osd.png");
     im.thumbnail(1800, 1800).save(&p)?;
-    let r = run(
+    let r = run_with_threads(
         &s.tesseract,
         &[
             p.to_string_lossy().into(),
@@ -508,6 +529,11 @@ pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImag
         ],
         Duration::from_secs(20),
         c,
+        if s.cpu_threads == 0 {
+            4
+        } else {
+            s.cpu_threads.min(4)
+        },
     );
     if let Ok((true, text, _)) = r {
         let angle = text

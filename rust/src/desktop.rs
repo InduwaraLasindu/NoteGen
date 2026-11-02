@@ -656,17 +656,21 @@ impl Desktop {
         }
         Ok(())
     }
-    pub fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) {
+    pub fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) -> bool {
         if let Err(e) = self.flush_review() {
             self.notice = e.to_string();
-            return;
+            return false;
         }
         match Project::read(path).and_then(|p| Review::load(p, 0, ctx)) {
             Ok(r) => {
                 self.review = Some(r);
                 self.review_open = true;
+                true
             }
-            Err(e) => self.notice = e.to_string(),
+            Err(e) => {
+                self.notice = e.to_string();
+                false
+            }
         }
     }
     pub fn advanced_open(&mut self) {
@@ -771,6 +775,7 @@ impl Desktop {
                         self.running_queue=true;
                         self.start_next(&ctx);
                     }
+                    if ui.add_enabled(ready,egui::Button::new("One-page trial")).on_hover_text("Convert the first selected page of the next pending input. Inspect its quality, time and review result before running the queue.").clicked(){self.one_page_trial(&ctx);}
                     if self.active.is_some(){
                         let paused=self.paused();
                         if ui.button(if paused{
@@ -953,6 +958,10 @@ impl Desktop {
                         " · initial estimate"
                     }
                 ));
+                if let Some(estimate)=&self.estimate && let Some(window)=estimate.window(now)
+                    && let Some(window)=window.scaled(seconds/current.remaining.unwrap_or(seconds).max(0.000_001)) {
+                    ui.small(format!("Planning window {}–{}",progress::duration(window.earliest_seconds),progress::duration(window.latest_seconds))).on_hover_text(format!("{}\nThis is an estimated planning range, not a calibrated confidence interval. Additional retries can extend it.",window.reasons.join("\n")));
+                }
             } else if self.worker.is_some() {
                 ui.small("Estimating…");
             }
@@ -1661,6 +1670,7 @@ impl Desktop {
         let mut open = self.review_open;
         let mut next = None;
         let mut export = false;
+        let mut reorder = None;
         egui::Window::new("Review & correct").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).resizable(true).show(ctx,|ui|{
             if self.worker.is_some(){ui.disable();}
             ui.horizontal(|ui|{
@@ -1757,8 +1767,15 @@ impl Desktop {
                                 ui.small(format!("Reader confidence {:.0}%",c*100.));
                             }
                             changed|=ui.checkbox(&mut b.uncertain,"Uncertain").changed();
+                            if r.selected>0 && ui.small_button("Move earlier").clicked(){reorder=Some((r.selected,r.selected-1));}
+                            if ui.small_button("Move later").clicked(){reorder=Some((r.selected,r.selected+1));}
                         }
                         );
+                        egui::CollapsingHeader::new("Source bounds and block type").show(ui,|ui|{
+                            egui::ComboBox::from_id_salt("block-kind").selected_text(&b.kind).show_ui(ui,|ui|{for kind in ["text","heading","list","code","caption","reference","equation","table","figure"]{changed|=ui.selectable_value(&mut b.kind,kind.into(),kind).changed();}});
+                            if b.bbox.is_none() && ui.button("Assign source bounds").clicked(){b.bbox=Some(BoxRect::full());changed=true;}
+                            if let Some(bounds)=&mut b.bbox {ui.small("Normalized coordinates. Save validates that left < right and top < bottom.");changed|=ui.add(egui::Slider::new(&mut bounds.left,0.0..=1.0).text("Left")).changed();changed|=ui.add(egui::Slider::new(&mut bounds.top,0.0..=1.0).text("Top")).changed();changed|=ui.add(egui::Slider::new(&mut bounds.right,0.0..=1.0).text("Right")).changed();changed|=ui.add(egui::Slider::new(&mut bounds.bottom,0.0..=1.0).text("Bottom")).changed();}
+                        });
                         if b.kind=="table"{
                             ui.small("Cells are editable. Use Page JSON for merged cells, headers and structural changes.");
                             egui::Grid::new("cells").striped(true).show(ui,|ui|{
@@ -1770,6 +1787,12 @@ impl Desktop {
                                 }
                             }
                             );
+                            ui.horizontal_wrapped(|ui|{
+                                if b.rows.len()<100 && ui.button("Add row").clicked(){let cols=b.rows.first().map_or(1,Vec::len);b.rows.push(vec![String::new();cols]);changed=true;}
+                                if b.rows.first().is_none_or(|r|r.len()<40) && ui.button("Add column").clicked(){if b.rows.is_empty(){b.rows.push(vec![String::new()]);}else{for row in &mut b.rows{row.push(String::new());}}changed=true;}
+                                if !b.merges.is_empty() && ui.button("Split merged cells").clicked(){b.merges.clear();changed=true;}
+                                changed|=ui.add(egui::DragValue::new(&mut b.header_rows).range(0..=b.rows.len()).prefix("Header rows ")).changed();
+                            });
                         }
                         else if b.kind=="figure"{
                             ui.label("Visible evidence");
@@ -1860,6 +1883,14 @@ impl Desktop {
             ui.small("Drafts preserve your edits across resume. Mark reviewed only after comparing with the source. Exports use a new filename.");
         }
         );
+        if let Some((a, b)) = reorder
+            && b < r.page.content.blocks.len()
+        {
+            r.page.content.blocks.swap(a, b);
+            r.selected = b;
+            r.dirty = true;
+            r.page.reviewed = false;
+        }
         if let Some(i) = next {
             match Review::load(r.project.clone(), i, ctx) {
                 Ok(v) => r = v,

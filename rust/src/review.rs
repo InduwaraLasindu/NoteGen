@@ -33,11 +33,19 @@ struct Change {
     after: Page,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct FileChange {
+    name: String,
+    before: Option<Value>,
+    after: Option<Value>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Revision {
     id: u64,
     label: String,
     created: String,
     changes: Vec<Change>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    files: Vec<FileChange>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct History {
@@ -54,6 +62,32 @@ struct Pending {
     before_history: String,
     history: History,
     changes: Vec<Change>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    files: Vec<FileChange>,
+}
+fn file_value(p: &Project, name: &str) -> Result<Option<Value>> {
+    anyhow::ensure!(
+        name == "guidance.json",
+        fail("Unsupported review attachment")
+    );
+    let path = p.root.join(name);
+    if path.is_file() {
+        Ok(Some(read_json(&path, 2_000_000)?))
+    } else {
+        Ok(None)
+    }
+}
+fn validate_files(files: &[FileChange]) -> Result<()> {
+    anyhow::ensure!(files.len() <= 1, fail("Too many review attachments"));
+    for f in files {
+        anyhow::ensure!(
+            f.name == "guidance.json"
+                && serde_json::to_vec(&f.before)?.len() <= 2_000_000
+                && serde_json::to_vec(&f.after)?.len() <= 2_000_000,
+            fail("Invalid or oversized review attachment")
+        );
+    }
+    Ok(())
 }
 
 fn history_path(p: &Project) -> PathBuf {
@@ -143,7 +177,7 @@ fn validate_history(p: &Project, h: &History) -> Result<()> {
                 && ids.insert(r.id)
                 && !r.label.trim().is_empty()
                 && r.label.len() <= 200
-                && !r.changes.is_empty()
+                && (!r.changes.is_empty() || !r.files.is_empty())
                 && r.changes.len() <= p.manifest.pages.len(),
             fail("Invalid review revision")
         );
@@ -156,6 +190,7 @@ fn validate_history(p: &Project, h: &History) -> Result<()> {
                 fail("Duplicate or mismatched revision pages")
             );
         }
+        validate_files(&r.files)?;
     }
     Ok(())
 }
@@ -184,9 +219,29 @@ fn recover_locked(p: &Project) -> Result<()> {
             fail("A page changed outside the pending review; recovery preserved for inspection")
         );
     }
+    validate_files(&pending.files)?;
+    for f in &pending.files {
+        let current = file_value(p, &f.name)?;
+        anyhow::ensure!(
+            fingerprint(&current)? == fingerprint(&f.before)?
+                || fingerprint(&current)? == fingerprint(&f.after)?,
+            fail("Context changed outside the pending review; recovery preserved for inspection")
+        );
+    }
     // A durable journal is written before any overlay. Replaying is idempotent.
     for c in &pending.changes {
         atomic_json(&overlay(p, c.after.page), &c.after)?;
+    }
+    for f in &pending.files {
+        let path = p.root.join(&f.name);
+        match &f.after {
+            Some(value) => atomic_json(&path, value)?,
+            None => {
+                if path.is_file() {
+                    fs::remove_file(&path)?;
+                }
+            }
+        }
     }
     atomic_json(&history_path(p), &pending.history)?;
     fs::remove_file(pending_path(p))?;
@@ -197,7 +252,13 @@ pub fn recover(p: &Project) -> Result<()> {
     let _guard = lock(p)?;
     recover_locked(p)
 }
-fn transact(p: &Project, old: &History, next: History, changes: Vec<Change>) -> Result<Vec<Page>> {
+fn transact(
+    p: &Project,
+    old: &History,
+    next: History,
+    changes: Vec<Change>,
+    files: Vec<FileChange>,
+) -> Result<Vec<Page>> {
     validate_history(p, &next)?;
     for c in &changes {
         page_valid(p, &c.before)?;
@@ -207,12 +268,20 @@ fn transact(p: &Project, old: &History, next: History, changes: Vec<Change>) -> 
             fail("Review is stale; reload the page before applying this change")
         );
     }
+    validate_files(&files)?;
+    for f in &files {
+        anyhow::ensure!(
+            fingerprint(&file_value(p, &f.name)?)? == fingerprint(&f.before)?,
+            fail("Context is stale; reload before saving")
+        );
+    }
     let pending = Pending {
         schema: 1,
         project: fingerprint(&p.manifest)?,
         before_history: fingerprint(old)?,
         history: next,
         changes,
+        files,
     };
     anyhow::ensure!(
         serde_json::to_vec(&pending)?.len() as u64 <= HISTORY_LIMIT,
@@ -223,11 +292,22 @@ fn transact(p: &Project, old: &History, next: History, changes: Vec<Change>) -> 
     Ok(pending.changes.into_iter().map(|c| c.after).collect())
 }
 fn commit_locked(p: &Project, changes: Vec<Change>, label: &str) -> Result<u64> {
+    commit_locked_files(p, changes, vec![], label)
+}
+fn commit_locked_files(
+    p: &Project,
+    changes: Vec<Change>,
+    files: Vec<FileChange>,
+    label: &str,
+) -> Result<u64> {
     anyhow::ensure!(
         !label.trim().is_empty() && label.len() <= 200,
         fail("Revision name must contain 1–200 bytes")
     );
-    anyhow::ensure!(!changes.is_empty(), fail("No changed pages to save"));
+    anyhow::ensure!(
+        !changes.is_empty() || !files.is_empty(),
+        fail("No changes to save")
+    );
     let old = read_history(p)?;
     for c in &changes {
         let known = old.revisions[..old.cursor]
@@ -256,6 +336,33 @@ fn commit_locked(p: &Project, changes: Vec<Change>, label: &str) -> Result<u64> 
             );
         }
     }
+    for f in &files {
+        let known = old.revisions[..old.cursor]
+            .iter()
+            .rev()
+            .find_map(|r| {
+                r.files
+                    .iter()
+                    .find(|change| change.name == f.name)
+                    .map(|change| &change.after)
+            })
+            .or_else(|| {
+                old.revisions.iter().find_map(|r| {
+                    r.files
+                        .iter()
+                        .find(|change| change.name == f.name)
+                        .map(|change| &change.before)
+                })
+            });
+        if let Some(known) = known {
+            anyhow::ensure!(
+                fingerprint(known)? == fingerprint(&f.before)?,
+                fail(
+                    "Context changed outside review history; preserve a project copy before starting new history"
+                )
+            );
+        }
+    }
     let mut next = old.clone();
     next.revisions.truncate(next.cursor);
     anyhow::ensure!(
@@ -272,9 +379,10 @@ fn commit_locked(p: &Project, changes: Vec<Change>, label: &str) -> Result<u64> 
         label: label.trim().into(),
         created: chrono::Utc::now().to_rfc3339(),
         changes: changes.clone(),
+        files: files.clone(),
     });
     next.cursor = next.revisions.len();
-    transact(p, &old, next, changes)?;
+    transact(p, &old, next, changes, files)?;
     Ok(id)
 }
 /// Commit a complete page edit only if its expected source state is still current.
@@ -300,6 +408,61 @@ pub fn commit_pages(p: &Project, pages: &[(Page, Page)], label: &str) -> Result<
         });
     }
     commit_locked(p, changes, label)
+}
+/// Commit corrected pages and their clarification context in the same recoverable revision.
+pub fn commit_guidance(
+    p: &Project,
+    pages: &[(Page, Page)],
+    expected: &crate::assistance::Guidance,
+    guidance: &crate::assistance::Guidance,
+    label: &str,
+) -> Result<u64> {
+    let _guard = lock(p)?;
+    recover_locked(p)?;
+    anyhow::ensure!(
+        guidance.notes.len() <= 1000
+            && guidance.notes.iter().all(|n| n.len() <= 8000)
+            && guidance.answers.len() <= 1000
+            && guidance.answers.iter().all(|a| a.id.len() <= 200
+                && a.replacement.len() <= 120000
+                && a.context.len() <= 4000),
+        fail("Clarification memory limits exceeded")
+    );
+    let mut changes = vec![];
+    let mut seen = BTreeSet::new();
+    for (before, replacement) in pages {
+        anyhow::ensure!(
+            before.page == replacement.page && seen.insert(before.page),
+            fail("Invalid or duplicate clarification page")
+        );
+        let mut after = replacement.clone();
+        after.edited = true;
+        changes.push(Change {
+            before: before.clone(),
+            after,
+        });
+    }
+    let before = file_value(p, "guidance.json")?;
+    let current: crate::assistance::Guidance = before
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    anyhow::ensure!(
+        fingerprint(&current)? == fingerprint(expected)?,
+        fail("Project context changed while editing; reload the context before saving")
+    );
+    let after = Some(serde_json::to_value(guidance)?);
+    let files = if fingerprint(&before)? == fingerprint(&after)? {
+        vec![]
+    } else {
+        vec![FileChange {
+            name: "guidance.json".into(),
+            before,
+            after,
+        }]
+    };
+    commit_locked_files(p, changes, files, label)
 }
 pub fn timeline(p: &Project) -> Result<Timeline> {
     let _guard = lock(p)?;
@@ -330,6 +493,7 @@ fn move_cursor(p: &Project, old: &History, target: usize) -> Result<Vec<Page>> {
         return Ok(vec![]);
     }
     let mut selected: BTreeMap<usize, Change> = BTreeMap::new();
+    let mut files: BTreeMap<String, FileChange> = BTreeMap::new();
     let steps: Vec<&Revision> = if target < old.cursor {
         old.revisions[target..old.cursor].iter().rev().collect()
     } else {
@@ -352,10 +516,33 @@ fn move_cursor(p: &Project, old: &History, target: usize) -> Result<Vec<Page>> {
             );
             entry.after = to.clone();
         }
+        for f in &revision.files {
+            let (from, to) = if target < old.cursor {
+                (&f.after, &f.before)
+            } else {
+                (&f.before, &f.after)
+            };
+            let entry = files.entry(f.name.clone()).or_insert_with(|| FileChange {
+                name: f.name.clone(),
+                before: from.clone(),
+                after: from.clone(),
+            });
+            anyhow::ensure!(
+                fingerprint(&entry.after)? == fingerprint(from)?,
+                fail("Context revision chain does not match; original history preserved")
+            );
+            entry.after = to.clone();
+        }
     }
     let mut next = old.clone();
     next.cursor = target;
-    transact(p, old, next, selected.into_values().collect())
+    transact(
+        p,
+        old,
+        next,
+        selected.into_values().collect(),
+        files.into_values().collect(),
+    )
 }
 pub fn undo(p: &Project) -> Result<Vec<Page>> {
     let _guard = lock(p)?;

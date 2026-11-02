@@ -113,39 +113,55 @@ fn checkpoint_uri(project: &Project, page: &Page) -> Result<String> {
         project.page_path(page.page)
     })
 }
-fn evidence_index(page: &Page, checkpoint: &str) -> HashMap<String, Vec<Evidence>> {
+fn evidence_index(page: &Page, checkpoint: &str) -> Result<HashMap<String, Vec<Evidence>>> {
     let mut found: HashMap<String, Vec<Evidence>> = HashMap::new();
     for (ci, candidate) in page.candidates.iter().enumerate() {
+        anyhow::ensure!(
+            candidate.model_id.len() <= 100
+                && candidate.family.len() <= 100
+                && candidate.view.len() <= 100,
+            Fault::new(
+                "NG400",
+                "Reader evidence metadata exceeds the export size limit"
+            )
+        );
+        candidate.content.validate()?;
         for (bi, block) in candidate.content.blocks.iter().enumerate() {
             let base = format!("/candidates/{ci}/content/blocks/{bi}");
             let value = block.plain();
-            if !value.is_empty() {
-                found.entry(value).or_default().push(Evidence {
-                    model_id: candidate.model_id.clone(),
-                    family: candidate.family.clone(),
-                    view: candidate.view.clone(),
-                    checkpoint_uri: checkpoint.into(),
-                    json_pointer: base.clone(),
-                    relation: "exact_recorded_block_value".into(),
-                });
+            if !value.is_empty() && found.len() < 100_000 {
+                let matches = found.entry(value).or_default();
+                if matches.len() < 4 {
+                    matches.push(Evidence {
+                        model_id: candidate.model_id.clone(),
+                        family: candidate.family.clone(),
+                        view: candidate.view.clone(),
+                        checkpoint_uri: checkpoint.into(),
+                        json_pointer: base.clone(),
+                        relation: "exact_recorded_block_value".into(),
+                    });
+                }
             }
             for (r, row) in block.rows.iter().enumerate() {
                 for (col, cell) in row.iter().enumerate() {
-                    if !cell.is_empty() {
-                        found.entry(cell.clone()).or_default().push(Evidence {
-                            model_id: candidate.model_id.clone(),
-                            family: candidate.family.clone(),
-                            view: candidate.view.clone(),
-                            checkpoint_uri: checkpoint.into(),
-                            json_pointer: format!("{base}/rows/{r}/{col}"),
-                            relation: "exact_recorded_cell_value".into(),
-                        });
+                    if !cell.is_empty() && found.len() < 100_000 {
+                        let matches = found.entry(cell.clone()).or_default();
+                        if matches.len() < 4 {
+                            matches.push(Evidence {
+                                model_id: candidate.model_id.clone(),
+                                family: candidate.family.clone(),
+                                view: candidate.view.clone(),
+                                checkpoint_uri: checkpoint.into(),
+                                json_pointer: format!("{base}/rows/{r}/{col}"),
+                                relation: "exact_recorded_cell_value".into(),
+                            });
+                        }
                     }
                 }
             }
         }
     }
-    found
+    Ok(found)
 }
 pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
     c.check()?;
@@ -153,14 +169,16 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
         schema: 1,
         input_sha256: project.manifest.input_sha256.clone(),
         project_fingerprint: project.manifest.fingerprint.clone(),
-        evidence_note: "Source coordinates refer to the saved scan, not an inferred cell grid. Exact reader-value matches are candidates, not proof of correctness; repeated values may match multiple regions. Missing evidence means no exact candidate match was recorded. Confidence is uncalibrated. Source links depend on the local project remaining available.".into(),
+        evidence_note: "Source coordinates refer to the saved scan, not an inferred cell grid. Exact reader-value matches are candidates, not proof of correctness; repeated values may match multiple regions. At most four exact matches per value and 100,000 distinct evidence values per page are retained. Missing evidence means no exact match was retained. Confidence is uncalibrated. Source links depend on the local project remaining available.".into(),
         pages: vec![],
     };
+    let mut total_cells = 0usize;
+    let mut total_blocks = 0usize;
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
         let checkpoint = checkpoint_uri(project, &page)?;
-        let evidence = evidence_index(&page, &checkpoint);
+        let evidence = evidence_index(&page, &checkpoint)?;
         let mut p = PageTrace {
             page: page.page,
             source_uri: source_uri(project, &page, &BoxRect::full())?,
@@ -172,6 +190,15 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
         p.warnings.extend(page.content.warnings.clone());
         for (bi, b) in page.content.blocks.iter().enumerate() {
             c.check()?;
+            total_blocks += 1;
+            total_cells += b.rows.iter().map(Vec::len).sum::<usize>();
+            anyhow::ensure!(
+                total_blocks <= 50_000 && total_cells <= 100_000,
+                Fault::new(
+                    "NG400",
+                    "Traceability export exceeds its bounded block/cell budget; split the project into smaller exports"
+                )
+            );
             let id = format!("page-{}-block-{}", page.page, bi + 1);
             let region = b.bbox.clone().unwrap_or_else(BoxRect::full);
             let uri = source_uri(project, &page, &region)?;

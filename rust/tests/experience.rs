@@ -39,14 +39,16 @@ fn compiled_runtime_pins_are_valid_for_the_selected_release() {
 }
 #[test]
 fn app_update_requires_newer_stable_release_and_its_exact_installer() {
-    let mut data = json!({"tag_name":"v0.5.0","draft":false,"prerelease":false,"assets":[{"id":123,"name":"NoteGen-Setup-0.5.0.exe","size":123456,"digest":format!("sha256:{}","b".repeat(64)),"browser_download_url":"https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.5.0/NoteGen-Setup-0.5.0.exe"}]});
+    let mut data = json!({"tag_name":"v0.6.0","draft":false,"prerelease":false,"assets":[{"id":123,"name":"NoteGen-Setup-0.6.0.exe","size":123456,"digest":format!("sha256:{}","b".repeat(64)),"browser_download_url":"https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.6.0/NoteGen-Setup-0.6.0.exe"}]});
     assert_eq!(
         maintenance::parse_app(&data).unwrap().unwrap().asset_id,
         123
     );
     data["tag_name"] = json!("v0.3.0");
     assert!(maintenance::parse_app(&data).unwrap().is_none());
-    data["tag_name"] = json!("v0.5.0");
+    data["tag_name"] = json!(format!("v{}", env!("CARGO_PKG_VERSION")));
+    assert!(maintenance::parse_app(&data).unwrap().is_none());
+    data["tag_name"] = json!("v0.6.0");
     data["prerelease"] = json!(true);
     assert!(maintenance::parse_app(&data).unwrap().is_none());
     data["prerelease"] = json!(false);

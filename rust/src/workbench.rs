@@ -72,7 +72,7 @@ impl Workbench {
 }
 
 impl Review {
-    fn save(&mut self, approved: bool) -> Result<()> {
+    pub(super) fn save(&mut self, approved: bool) -> Result<()> {
         let mut page = self.page.clone();
         page.edited = true;
         page.reviewed = approved;
@@ -119,7 +119,72 @@ impl Review {
 }
 
 impl Desktop {
-    fn history_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
+    pub(super) fn one_page_trial(&mut self, ctx: &egui::Context) {
+        if self.worker.is_some() {
+            return;
+        }
+        let Some(index) = self.state.next() else {
+            return;
+        };
+        if let Err(e) = self.flush_review() {
+            self.notice = e.to_string();
+            return;
+        }
+        let input = self.state.queue[index].input.clone();
+        let folder = if self.state.output_dir.trim().is_empty() {
+            input.parent().unwrap_or(Path::new(".")).to_path_buf()
+        } else {
+            PathBuf::from(&self.state.output_dir)
+        };
+        let trial_name = PathBuf::from(format!(
+            "{}-trial.pdf",
+            input.file_stem().unwrap_or_default().to_string_lossy()
+        ));
+        let output = output_name(&trial_name, &folder);
+        let mut settings = self.state.settings.clone();
+        settings.assistance.ask_questions = false;
+        let tx = self.tx.clone();
+        let repaint = ctx.clone();
+        self.control = Control::default();
+        let c = self.control.clone();
+        self.started = Some(Instant::now());
+        self.estimate = Some(Estimate::new(self.clock.elapsed().as_secs_f64()));
+        self.running_queue = false;
+        self.batch = None;
+        self.batch_index = None;
+        self.stage = "Preparing a one-page trial".into();
+        self.worker = Some(thread::spawn(move || {
+            let events = tx.clone();
+            let ctx = repaint.clone();
+            let log = Activity {
+                path: None,
+                callback: Some(Arc::new(move |e| {
+                    let _ = events.send(Message::Event(e));
+                    ctx.request_repaint();
+                })),
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let total = crate::inputs::selected_page_count(&input, &settings.pdfium, "")?;
+                let pages = pages_range(&settings.page_range, total)?;
+                settings.page_range = pages
+                    .first()
+                    .ok_or_else(|| Fault::new("NG100", "Select a trial page"))?
+                    .to_string();
+                pipeline::convert(&input, &output, &settings, &c, &log)
+            }));
+            let msg = match result {
+                Ok(Ok(done)) => Message::Complete(Box::new(done)),
+                Ok(Err(e)) => failure(e),
+                Err(_) => Message::Failed(
+                    "NG500".into(),
+                    "Trial stopped unexpectedly; completed checkpoints are preserved.".into(),
+                ),
+            };
+            let _ = tx.send(msg);
+            repaint.request_repaint();
+        }));
+    }
+    pub(super) fn history_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let can_use = !r.dirty && self.worker.is_none();
             if ui
@@ -171,7 +236,7 @@ impl Desktop {
             }
         });
     }
-    fn issue_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
+    pub(super) fn issue_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(format!("Review queue · {} suggestions",r.issues.len())).show(ui,|ui| {
             ui.small("Totals, number conflicts and uncertain regions are ranked by impact. Suggestions never rewrite a value.");
             let mut chosen=None;
@@ -193,7 +258,7 @@ impl Desktop {
         self.workbench.open = true;
         self.workbench.tab = tab.min(3);
     }
-    fn workbench_ui(&mut self, ctx: &egui::Context) {
+    pub(super) fn workbench_ui(&mut self, ctx: &egui::Context) {
         self.workbench.poll();
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) {
             self.workbench.palette = true;
@@ -242,6 +307,7 @@ impl Desktop {
         let mut w = std::mem::take(&mut self.workbench);
         let mut open = true;
         let mut jump = None;
+        let mut reload_review = false;
         egui::Window::new("Project workbench").open(&mut open).default_size([850.,680.]).resizable(true).show(ctx,|ui| {
             ui.horizontal_wrapped(|ui| {for (i,label) in ["Projects & search","Export & rules","Recovery & references","Privacy & readability"].iter().enumerate(){ui.selectable_value(&mut w.tab,i,*label);}});
             ui.separator();
@@ -273,7 +339,7 @@ impl Desktop {
                             ui.separator();ui.strong("Reversible replacement rule");ui.label("Preview literal replacements in all project pages. Reader evidence stays preserved; apply creates one undoable revision. CLI rules also support page selection and block exclusions.");
                             ui.horizontal(|ui|{ui.label("Find");ui.text_edit_singleline(&mut w.find);ui.label("Replace");ui.text_edit_singleline(&mut w.replace);});
                             if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Preview rule")).clicked(){let rule=crate::review::Rule{find:w.find.clone(),replace:w.replace.clone(),pages:r.project.manifest.pages.clone(),exclude_blocks:vec![]};match crate::review::preview_rule(&r.project,&rule){Ok(preview)=>w.rule=Some(preview),Err(e)=>w.report=e.to_string()}}
-                            if let Some(preview)=&w.rule {for m in preview.matches.iter().take(40){ui.label(format!("Page {} block {}: {:?} → {:?}",m.page,m.block+1,m.before,m.after));}if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Apply this preview")).clicked(){match crate::review::apply_rule(&r.project,preview,"Confirmed replacement rule"){Ok(id)=>{w.report=format!("Saved revision {id}. Undo is available in Review.");w.rule=None;},Err(e)=>w.report=e.to_string()}}}
+                            if let Some(preview)=&w.rule {for m in preview.matches.iter().take(40){ui.label(format!("Page {} block {}: {:?} → {:?}",m.page,m.block+1,m.before,m.after));}if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Apply this preview")).clicked(){match crate::review::apply_rule(&r.project,preview,"Confirmed replacement rule"){Ok(id)=>{w.report=format!("Saved revision {id}. Undo is available in Review.");w.rule=None;reload_review=true;},Err(e)=>w.report=e.to_string()}}}
                         } else {ui.label("Open a project or finish a conversion first.");}
                     }
                     2=>{
@@ -311,9 +377,15 @@ impl Desktop {
         });
         w.open = open;
         self.workbench = w;
+        if reload_review
+            && let Some(r) = &mut self.review
+            && let Err(e) = r.reload()
+        {
+            self.notice = e.to_string();
+        }
         if let Some((path, target)) = jump {
-            self.open_review(path, ctx);
-            if let Some((page, block)) = target
+            if self.open_review(path, ctx)
+                && let Some((page, block)) = target
                 && let Some(r) = &mut self.review
                 && let Some(index) = r.project.manifest.pages.iter().position(|n| *n == page)
             {

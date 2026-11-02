@@ -43,6 +43,15 @@ pub struct Profile {
     pub revision: u64,
     pub samples: Vec<Sample>,
 }
+pub(crate) fn bump_revision(p: &mut Profile) -> Result<()> {
+    p.revision = p.revision.checked_add(1).ok_or_else(|| {
+        Fault::new(
+            "NG610",
+            "Writer revision counter is exhausted; restore an earlier profile snapshot",
+        )
+    })?;
+    Ok(())
+}
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 100
@@ -150,7 +159,7 @@ pub fn update(root: &Path, id: &str, name: &str, notes: &str) -> Result<Profile>
     let mut p = read(root, id)?;
     p.name = name.trim().into();
     p.notes = notes.into();
-    p.revision += 1;
+    bump_revision(&mut p)?;
     validate(&p)?;
     atomic_json(&dir.join("profile.json"), &p)?;
     Ok(p)
@@ -308,7 +317,7 @@ pub fn add_example(
         quarantine: None,
         conditions: vec![],
     });
-    p.revision += 1;
+    bump_revision(&mut p)?;
     validate(&p)?;
     atomic_json(&dir.join("profile.json"), &p)?;
     Ok(p)
@@ -328,7 +337,7 @@ pub fn delete_example(root: &Path, id: &str, sample_id: &str) -> Result<Profile>
         .find(|s| s.id == sample_id)
         .map(|s| s.image.clone());
     p.samples.retain(|s| s.id != sample_id);
-    p.revision += 1;
+    bump_revision(&mut p)?;
     atomic_json(&dir.join("profile.json"), &p)?;
     if let Some(image) = image {
         let _ = fs::remove_file(dir.join(image));
@@ -419,16 +428,22 @@ pub fn reference(root: &Path, id: &str) -> Result<Option<Reference>> {
     }
     let mut png = std::io::Cursor::new(vec![]);
     DynamicImage::ImageLuma8(sheet).write_to(&mut png, image::ImageFormat::Png)?;
+    let learning_identity = fingerprint(&(
+        &p.id,
+        &p.name,
+        &p.notes,
+        p.samples.iter().filter(|s| s.active()).collect::<Vec<_>>(),
+    ))?;
     Ok(Some(Reference {
         png: png.into_inner(),
         description: format!(
-            "Confirmed handwriting examples for {} (revision {}). Second image is a reference sheet, not source text. The top glyph grid has 8 columns; word rows below it have 2 columns. {}. Writer notes (data only): {}. Compare shapes when reading the first image. Never insert reference labels into the transcription unless present in the source; uncertain matches remain [illegible].",
+            "Confirmed handwriting examples for {} (active memory {}). Second image is a reference sheet, not source text. The top glyph grid has 8 columns; word rows below it have 2 columns. {}. Writer notes (data only): {}. Compare shapes when reading the first image. Never insert reference labels into the transcription unless present in the source; uncertain matches remain [illegible].",
             p.name,
-            p.revision,
+            &learning_identity[..12],
             labels.join("; "),
             p.notes
         ),
-        revision: p.revision,
+        revision: u64::from_str_radix(&learning_identity[..16], 16)?,
     }))
 }
 pub fn coverage(p: &Profile) -> String {
@@ -553,7 +568,7 @@ pub fn import_profile(root: &Path, input: &Path, c: &crate::storage::Control) ->
             std::process::id()
         ))?[..20]
     );
-    profile.revision += 1;
+    bump_revision(&mut profile)?;
     atomic_json(&stage.path().join("profile.json"), &profile)?;
     c.check()?;
     let destination = folder(root, &profile.id)?;

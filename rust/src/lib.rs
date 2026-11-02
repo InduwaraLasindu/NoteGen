@@ -23,6 +23,7 @@ pub mod review;
 pub mod roundtrip;
 pub mod runtime;
 pub mod scan;
+pub mod scan_tools;
 pub mod settings_help;
 pub mod setup;
 pub mod storage;

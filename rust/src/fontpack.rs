@@ -462,7 +462,8 @@ pub fn export(root: &Path, id: &str, output: &Path, o: &FontOptions, c: &Control
             && (32..=224).contains(&o.threshold),
         Fault::new("NG620", "Invalid font family, spacing or threshold")
     );
-    let p = writers::read(root, id)?;
+    let mut p = writers::read(root, id)?;
+    p.samples.retain(|sample| sample.active());
     let chars = p
         .samples
         .iter()

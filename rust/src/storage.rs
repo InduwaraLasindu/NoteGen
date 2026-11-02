@@ -173,13 +173,31 @@ pub fn fingerprint<T: Serialize>(value: &T) -> Result<String> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
 }
 pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let parent = path.parent().unwrap_or(Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let mut f = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer_pretty(&mut f, value)?;
     f.flush()?;
     f.as_file().sync_all()?;
     f.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+/// Create a new JSON artifact without a race that could replace an existing file.
+pub fn protected_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut file, value)?;
+    file.flush()?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path)
+        .map_err(|_| Fault::new("NG401", "Output exists or its folder is unavailable"))?;
     Ok(())
 }
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {

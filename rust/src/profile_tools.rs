@@ -120,7 +120,7 @@ fn edit_sample(
         .find(|s| s.id == sample_id)
         .ok_or_else(|| Fault::new("NG610", "Handwriting example not found"))?;
     change(sample)?;
-    p.revision += 1;
+    writers::bump_revision(&mut p)?;
     writers::validate(&p)?;
     atomic_json(&dir.join("profile.json"), &p)?;
     Ok(p)
@@ -246,6 +246,13 @@ pub fn snapshot(root: &Path, id: &str, name: &str, c: &Control) -> Result<Snapsh
     let stage = tempfile::tempdir_in(&versions)?;
     let archive = stage.path().join("profile.zip");
     writers::export_profile(root, id, &archive, c)?;
+    anyhow::ensure!(
+        archive.metadata()?.len() <= 100_000_000,
+        Fault::new(
+            "NG610",
+            "Profile version exceeds the 100 MB portable import limit; use a smaller selected profile"
+        )
+    );
     let digest = fingerprint(&profile)?;
     let version = Snapshot {
         schema: 1,
@@ -483,7 +490,7 @@ pub fn share_preview(
         files.push(format!("samples/{}", sample.image));
     }
     let mut included = vec![
-        "writer and sample IDs".into(),
+        "writer and sample IDs, schema and revision".into(),
         "confirmed labels and glyph flags".into(),
         "selected handwriting images".into(),
         "user-confirmed capture conditions".into(),
@@ -498,11 +505,25 @@ pub fn share_preview(
             included.push(name.into());
         }
     }
-    Ok(SharePreview {
+    let preview = SharePreview {
         writer_id: id.into(),revision:p.revision,files,labels:p.samples.iter().map(|s|s.label.clone()).collect(),selected_samples:p.samples.len(),image_bytes:bytes,included_metadata:included,
         warning:"This local ZIP contains selected handwriting, labels and the listed metadata. No upload is performed. Inspect this preview before creating or manually sharing it.".into(),
         confirmation_token:fingerprint(&(&p,selection,hashes))?,
-    })
+    };
+    let metadata = serde_json::to_vec(&p)?;
+    let bound = bytes
+        + metadata.len() as u64
+        + serde_json::to_vec(&preview)?.len() as u64
+        + preview.warning.len() as u64
+        + preview.files.len() as u64 * 256;
+    anyhow::ensure!(
+        metadata.len() <= 8_000_000 && bound <= 100_000_000,
+        Fault::new(
+            "NG610",
+            "Selected profile exceeds the portable import limit; select fewer examples"
+        )
+    );
+    Ok(preview)
 }
 pub fn export_selected(
     root: &Path,

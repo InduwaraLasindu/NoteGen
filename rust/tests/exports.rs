@@ -310,3 +310,31 @@ fn spreadsheet_preserves_merged_cell_values_and_rejects_oversized_excel_text_ato
     assert!(exports::export(&p, &target, Format::Spreadsheet, &Control::default()).is_err());
     assert!(!target.exists());
 }
+
+#[test]
+fn spreadsheet_preserves_literal_ooxml_escapes_and_xml_forbidden_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let mut page = p.load(1).unwrap();
+    page.content.blocks[1].rows[1][1] = "_x0041_\u{0}".into();
+    p.save(&page).unwrap();
+    let target = dir.path().join("escapes.xlsx");
+    exports::export(&p, &target, Format::Spreadsheet, &Control::default()).unwrap();
+    let mut zip = zip::ZipArchive::new(fs::File::open(target).unwrap()).unwrap();
+    let sheet = entry(&mut zip, "xl/worksheets/sheet2.xml");
+    assert!(sheet.contains("_x005F_x0041__x0000_"));
+    roxmltree::Document::parse(&sheet).unwrap();
+}
+
+#[test]
+fn traceability_bounds_repeated_reader_matches_without_claiming_accuracy() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let mut page = p.load(1).unwrap();
+    page.content.blocks[0].text = "repeat".into();
+    page.candidates[0].content.blocks = (0..12).map(|_| Block::text("repeat")).collect();
+    p.save(&page).unwrap();
+    let trace = exports::traceability(&p, &Control::default()).unwrap();
+    assert_eq!(trace.pages[0].blocks[0].evidence.len(), 4);
+    assert!(trace.evidence_note.contains("At most four exact matches"));
+}

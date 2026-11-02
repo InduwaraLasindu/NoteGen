@@ -4,7 +4,7 @@ use crate::{
     types::*,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -237,6 +237,9 @@ pub fn apply(project: &Project, qs: &[Question], answers: &[Answer]) -> Result<u
         Fault::new("NG630", "Too many clarification answers")
     );
     let mut guidance = load_guidance(project)?;
+    let expected_guidance = guidance.clone();
+    let old_guidance = fingerprint(&guidance)?;
+    let mut pages: BTreeMap<usize, (Page, Page)> = BTreeMap::new();
     let mut changed = 0;
     for a in answers {
         anyhow::ensure!(
@@ -250,19 +253,34 @@ pub fn apply(project: &Project, qs: &[Question], answers: &[Answer]) -> Result<u
         if a.skip {
             continue;
         }
-        let mut p = project.load(q.page)?;
-        let block = p
+        anyhow::ensure!(
+            project.manifest.pages.contains(&q.page),
+            Fault::new("NG630", "Clarification page is outside this project")
+        );
+        if !pages.contains_key(&q.page) {
+            let before = project.load(q.page)?;
+            pages.insert(q.page, (before.clone(), before));
+        }
+        let (before, p) = pages
+            .get_mut(&q.page)
+            .ok_or_else(|| Fault::new("NG630", "Clarification page disappeared"))?;
+        let original = before
             .content
             .blocks
-            .get_mut(q.block)
+            .get(q.block)
             .ok_or_else(|| Fault::new("NG630", "Source block changed"))?;
         anyhow::ensure!(
-            fingerprint(block)? == q.block_digest,
+            fingerprint(original)? == q.block_digest,
             Fault::new(
                 "NG630",
                 "Source block changed while answering; reopen Review"
             )
         );
+        let block = p
+            .content
+            .blocks
+            .get_mut(q.block)
+            .ok_or_else(|| Fault::new("NG630", "Source block changed"))?;
         if !a.replacement.trim().is_empty() {
             match q.field.as_str() {
                 "meaning" => {
@@ -289,22 +307,35 @@ pub fn apply(project: &Project, qs: &[Question], answers: &[Answer]) -> Result<u
             block.uncertain = block.plain().contains("[illegible]");
             p.edited = true;
             p.reviewed = false;
-            project.save(&p)?;
             changed += 1;
             if a.learn
                 && let Some(writer) = project.manifest.settings.writer.id.as_deref()
             {
-                let image = crate::writers::open_image(&q.image, 40_000_000)?;
-                crate::writers::add_example(
-                    &project.manifest.settings.writer.root,
-                    writer,
-                    &image,
-                    q.region.clone().unwrap_or(BoxRect::full()),
-                    &a.replacement,
-                    a.glyph,
-                    &format!("{} page {}", project.root.display(), q.page),
+                crate::writers::read(&project.manifest.settings.writer.root, writer)?;
+                let path = crate::word::safe_image(&project.root, &before.image)?;
+                anyhow::ensure!(
+                    q.image.canonicalize()? == path,
+                    Fault::new("NG630", "Teaching image no longer matches the source page")
+                );
+                let image = crate::writers::open_image(&path, 40_000_000)?;
+                let region = q
+                    .region
+                    .as_ref()
+                    .ok_or_else(|| Fault::new("NG630", "Teaching requires a source region"))?;
+                let (x, y, r, b) = region.pixels(image.width(), image.height());
+                crate::writers::normalize(
+                    &image.crop_imm(x, y, r - x, b - y),
+                    if a.glyph { 64 } else { 320 },
+                    80,
                 )?;
             }
+            anyhow::ensure!(
+                !a.learn || project.manifest.settings.writer.id.is_some(),
+                Fault::new(
+                    "NG630",
+                    "Choose a writer profile before remembering a handwriting example"
+                )
+            );
         }
         if !a.context.trim().is_empty() {
             guidance.notes.push(format!(
@@ -321,7 +352,50 @@ pub fn apply(project: &Project, qs: &[Question], answers: &[Answer]) -> Result<u
         guidance.notes.len() <= 1000 && guidance.answers.len() <= 1000,
         Fault::new("NG630", "Project clarification memory is full")
     );
-    atomic_json(&project.root.join("guidance.json"), &guidance)?;
+    anyhow::ensure!(
+        serde_json::to_vec(&guidance)?.len() <= 2_000_000,
+        Fault::new("NG630", "Project clarification memory exceeds 2 MB")
+    );
+    let pages = pages
+        .into_values()
+        .filter(|(before, after)| fingerprint(before).ok() != fingerprint(after).ok())
+        .collect::<Vec<_>>();
+    if !pages.is_empty() || fingerprint(&guidance)? != old_guidance {
+        let revision = crate::review::commit_guidance(
+            project,
+            &pages,
+            &expected_guidance,
+            &guidance,
+            "Confirmed clarification and context",
+        )?;
+        for a in answers
+            .iter()
+            .filter(|a| !a.skip && a.learn && !a.replacement.trim().is_empty())
+        {
+            let q = qs
+                .iter()
+                .find(|q| q.id == a.id)
+                .ok_or_else(|| Fault::new("NG630", "Unknown clarification question"))?;
+            if let Some(writer) = project.manifest.settings.writer.id.as_deref() {
+                let result = (|| -> Result<()> {
+                    let path =
+                        crate::word::safe_image(&project.root, &format!("page-{:05}.png", q.page))?;
+                    let image = crate::writers::open_image(&path, 40_000_000)?;
+                    crate::writers::add_example(
+                        &project.manifest.settings.writer.root,
+                        writer,
+                        &image,
+                        q.region.clone().unwrap_or(BoxRect::full()),
+                        &a.replacement,
+                        a.glyph,
+                        &format!("{} page {}", project.root.display(), q.page),
+                    )?;
+                    Ok(())
+                })();
+                result.map_err(|e|Fault::new("NG630",format!("Corrections and context were saved in revision {revision}, but handwriting teaching failed: {e}")))?;
+            }
+        }
+    }
     Ok(changed)
 }
 pub fn save_questions(project: &Project, questions: &[Question]) -> Result<()> {
@@ -404,9 +478,11 @@ pub fn add_context(project: &Project, note: &str) -> Result<()> {
         Fault::new("NG630", "Context must contain 1–4000 bytes")
     );
     let mut g = load_guidance(project)?;
+    let expected = g.clone();
     anyhow::ensure!(g.notes.len() < 1000, "Context memory is full");
     g.notes.push(note.into());
-    atomic_json(&project.root.join("guidance.json"), &g)
+    crate::review::commit_guidance(project, &[], &expected, &g, "Added project context")?;
+    Ok(())
 }
 pub fn clear_pending(project: &Project) -> Result<()> {
     let path = project.root.join("questions.json");

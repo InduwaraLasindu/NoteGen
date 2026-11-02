@@ -134,13 +134,21 @@ fn numbers(s: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
-fn cells(content: &PageContent) -> Vec<String> {
-    content
+fn cells(content: &PageContent) -> std::collections::BTreeMap<(usize, usize, usize), String> {
+    let mut result = std::collections::BTreeMap::new();
+    for (table, b) in content
         .blocks
         .iter()
         .filter(|b| b.kind == "table")
-        .flat_map(|b| b.rows.iter().flat_map(|r| r.iter().cloned()))
-        .collect()
+        .enumerate()
+    {
+        for (row, values) in b.rows.iter().enumerate() {
+            for (column, value) in values.iter().enumerate() {
+                result.insert((table, row, column), value.clone());
+            }
+        }
+    }
+    result
 }
 fn add<T: PartialEq>(m: &mut Metric, a: &[T], b: &[T]) -> Result<()> {
     m.errors += distance(a, b)?;
@@ -213,11 +221,17 @@ pub fn score(corpus: &Corpus, predictions: &[Prediction], split: &str) -> Result
             &b.split_whitespace().collect::<Vec<_>>(),
         )?;
         add(&mut score.exact_numbers, &numbers(&a), &numbers(&b))?;
-        add(
-            &mut score.table_cells,
-            &cells(&s.reference),
-            &cells(&p.content),
-        )?;
+        let a = cells(&s.reference);
+        let b = cells(&p.content);
+        let keys: BTreeSet<_> = a.keys().chain(b.keys()).collect();
+        score.table_cells.errors += keys
+            .iter()
+            .filter(|key| a.get(**key) != b.get(**key))
+            .count();
+        score.table_cells.reference_units += a.len();
+        score.table_cells.predicted_units += b.len();
+        score.table_cells.error_rate = (score.table_cells.reference_units > 0)
+            .then(|| score.table_cells.errors as f64 / score.table_cells.reference_units as f64);
     }
     Ok(score)
 }
@@ -238,7 +252,9 @@ pub fn calibrate(corpus: &Corpus, predictions: &[Prediction]) -> Result<Vec<Cali
     for (s, p) in pairs {
         let bin = &mut bins[((p.uncertainty * 10.).floor() as usize).min(9)];
         bin.samples += 1;
-        bin.erroneous_samples += usize::from(s.reference.plain() != p.content.plain());
+        bin.erroneous_samples += usize::from(
+            s.reference.plain() != p.content.plain() || cells(&s.reference) != cells(&p.content),
+        );
     }
     for b in &mut bins {
         if b.samples == 0 {
