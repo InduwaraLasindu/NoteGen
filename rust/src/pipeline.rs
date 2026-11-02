@@ -11,8 +11,292 @@ use crate::{
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Instant,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
+/// Preparation overlap is opt-in because native decoder/OCR allocations are estimates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationMode {
+    #[default]
+    Sequential,
+    BoundedOverlap,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PreparationAdmission {
+    pub requested_mode: PreparationMode,
+    pub enabled: bool,
+    pub ocr_threads: usize,
+    pub required_mib: u64,
+    pub available_mib: u64,
+    pub reason: String,
+}
+/// Conservative application admission, not an OS memory quota or native-allocation guarantee.
+pub fn preparation_admission(
+    mode: PreparationMode,
+    pages: usize,
+    s: &Settings,
+    hw: &hardware::Hardware,
+) -> PreparationAdmission {
+    let cores = if s.cpu_threads == 0 {
+        hw.physical_cores.max(1)
+    } else {
+        s.cpu_threads
+    }
+    .min(hw.logical_cores.max(1))
+    .min(512);
+    // Three source images (rendering, queued, consuming), decode/rotation/deskew,
+    // grayscale/OCR/encoder buffers, plus allowance for native OCR and metadata.
+    let required_mib = (u64::from(s.max_pixels) * 64).div_ceil(1_048_576) + 512;
+    let available_mib = hw
+        .free_ram_mib
+        .min((hw.ram_mib as f64 * s.ram_fraction) as u64)
+        .saturating_sub(s.reserve_ram_mib);
+    let reason = if mode == PreparationMode::Sequential {
+        "Sequential preparation selected; overlap requires explicit opt-in."
+    } else if pages < 2 {
+        "Sequential fallback: fewer than two selected pages."
+    } else if cores < 2 {
+        "Sequential fallback: the configured CPU budget cannot reserve a render core."
+    } else if available_mib < required_mib {
+        "Sequential fallback: measured free RAM after reservation is below the conservative preparation estimate."
+    } else {
+        "Bounded preparation admitted: caller-thread rendering, one queued page and one OCR consumer; AI readers start after preparation joins. Memory admission is an estimate, not a hard quota."
+    };
+    let enabled = mode == PreparationMode::BoundedOverlap
+        && pages >= 2
+        && cores >= 2
+        && available_mib >= required_mib;
+    PreparationAdmission {
+        requested_mode: mode,
+        enabled,
+        // Printed OCR/preprocessing does not need hundreds of parked Rayon workers.
+        ocr_threads: if enabled { cores - 1 } else { cores }.min(8),
+        required_mib,
+        available_mib,
+        reason: reason.into(),
+    }
+}
+
+#[derive(Debug)]
+struct PreparationStopped;
+impl std::fmt::Display for PreparationStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Preparation consumer stopped")
+    }
+}
+impl std::error::Error for PreparationStopped {}
+struct PreparationFinished<'a>(&'a AtomicBool);
+impl Drop for PreparationFinished<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+/// The producer always runs on the caller thread. Every helper is scoped and joined.
+fn bounded_preparation<T: Send, R>(
+    c: &Control,
+    producer: impl FnOnce(&Control, &mut dyn FnMut(T) -> Result<()>) -> Result<R>,
+    mut consumer: impl FnMut(T, &Control) -> Result<()> + Send,
+) -> Result<R> {
+    c.check()?;
+    let abort = AtomicBool::new(false);
+    let finished = AtomicBool::new(false);
+    let consumer_done = AtomicBool::new(false);
+    let linked = Control {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        paused: c.paused.clone(),
+        clarify: None,
+    };
+    thread::scope(|scope| {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let bridge = scope.spawn(|| {
+            while !finished.load(Ordering::Acquire) {
+                if c.cancelled.load(Ordering::Relaxed)
+                    || abort.load(Ordering::Acquire)
+                    || consumer_done.load(Ordering::Acquire)
+                {
+                    linked.cancelled.store(true, Ordering::Relaxed);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let worker_control = &linked;
+        let worker_done = &consumer_done;
+        let worker = scope.spawn(move || -> Result<()> {
+            let _finished = PreparationFinished(worker_done);
+            loop {
+                worker_control.check()?;
+                match rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(item) => consumer(item, worker_control)?,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+            }
+        });
+        let produced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            producer(&linked, &mut |mut item| loop {
+                linked.check()?;
+                match tx.try_send(item) {
+                    Ok(()) => return Ok(()),
+                    Err(mpsc::TrySendError::Full(value)) => {
+                        item = value;
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        return Err(PreparationStopped.into());
+                    }
+                }
+            })
+        }))
+        .unwrap_or_else(|_| {
+            Err(Fault::new("NG500", "Source preparation producer stopped unexpectedly").into())
+        });
+        if produced.is_err() {
+            abort.store(true, Ordering::Release);
+        }
+        drop(tx);
+        let consumed = worker.join().unwrap_or_else(|_| {
+            Err(Fault::new("NG500", "Source preparation consumer stopped unexpectedly").into())
+        });
+        finished.store(true, Ordering::Release);
+        let _ = bridge.join();
+        if c.cancelled.load(Ordering::Relaxed) {
+            c.check()?;
+        }
+        match (produced, consumed) {
+            (Err(producer), Err(consumer))
+                if producer.is::<PreparationStopped>()
+                    || producer
+                        .downcast_ref::<Fault>()
+                        .is_some_and(|f| f.code == "NG900") =>
+            {
+                Err(consumer)
+            }
+            (Err(producer), _) => Err(producer),
+            (Ok(_), Err(consumer)) => Err(consumer),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    })
+}
+struct PagePreparation<'a> {
+    root: &'a Path,
+    settings: &'a Settings,
+    log: &'a Activity,
+    total: usize,
+    has_readers: bool,
+}
+impl PagePreparation<'_> {
+    fn run(&self, n: usize, ordinal: usize, im: image::DynamicImage, c: &Control) -> Result<bool> {
+        let root = self.root;
+        let s = self.settings;
+        let log = self.log;
+        let pages = self.total;
+        let image = root.join(format!("page-{n:05}.png"));
+        let checkpoint = root.join(format!("page-{n:05}.json"));
+        log.work(
+            Work::new(Phase::Render, ordinal - 1, pages, 1500, true),
+            "Preparing source pages",
+        );
+        if image.exists()
+            && read_json::<Page>(&checkpoint, 32_000_000)
+                .is_ok_and(|p| p.page == n && p.validate().is_ok())
+        {
+            log.emit(
+                "cached",
+                "Found rendered page checkpoint",
+                n,
+                ordinal,
+                0,
+                "",
+            );
+            log.work(
+                Work::new(Phase::Render, ordinal, pages, 1500, false),
+                "Reused rendered checkpoint",
+            );
+            return Ok(false);
+        }
+        c.check()?;
+        log.emit(
+            "render",
+            "Preparing source scan and printed OCR",
+            n,
+            ordinal - 1,
+            0,
+            "",
+        );
+        let preflight = crate::preflight::analyze(&im);
+        let im = scan::deskew(scan::orient(im, s, c)?, s.deskew, s.max_pixels);
+        let content = match scan::printed(&im, s, c) {
+            Ok(p) => p,
+            Err(e) => {
+                if e.downcast_ref::<Fault>().is_some_and(|f| f.code == "NG900") {
+                    return Err(e);
+                }
+                if !self.has_readers {
+                    return Err(e);
+                }
+                log.emit(
+                    "ocr",
+                    "Printed OCR unavailable; using local AI readers",
+                    n,
+                    0,
+                    0,
+                    "NG110",
+                );
+                PageContent {
+                    warnings: vec!["Printed OCR unavailable.".into()],
+                    ..Default::default()
+                }
+            }
+        };
+        scan::save_scan(&image, &im)?;
+        let warning = scan::blur_warning(&im);
+        let candidate = Candidate {
+            region: None,
+            model_id: "tesseract".into(),
+            family: "tesseract".into(),
+            view: "full".into(),
+            reliability: if s.handwriting { 0.25 } else { 0.65 },
+            content: content.clone(),
+        };
+        let mut p = Page {
+            page: n,
+            image: image.file_name().unwrap().to_string_lossy().into(),
+            content,
+            candidates: vec![candidate],
+            agreement: if s.preset == Preset::Fast { 1. } else { 0. },
+            ..Default::default()
+        };
+        if warning {
+            p.content
+                .warnings
+                .push("Blur/low detail detected. Verify small text against the source.".into());
+        }
+        for observation in preflight.observations {
+            p.content.warnings.push(format!(
+                "{} {}",
+                observation.message, observation.suggestion
+            ));
+        }
+        p.content
+            .warnings
+            .extend(crate::preflight::numeric_observations(&p.content));
+        p.source_warnings = p.content.warnings.clone();
+        atomic_json(&checkpoint, &p)?;
+        log.work(
+            Work::new(Phase::Render, ordinal, pages, 1500, false),
+            "Source page prepared",
+        );
+        log.emit("ocr", "Printed OCR checkpoint saved", n, ordinal, 0, "");
+        Ok(true)
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Completed {
     pub project: Project,
@@ -21,6 +305,7 @@ pub struct Completed {
     pub review: usize,
     pub seconds: f64,
     pub plan: Plan,
+    pub preparation: PreparationAdmission,
 }
 pub fn convert(
     source: &Path,
@@ -28,6 +313,16 @@ pub fn convert(
     s: &Settings,
     c: &Control,
     activity: &Activity,
+) -> Result<Completed> {
+    convert_with_preparation(source, output, s, c, activity, PreparationMode::Sequential)
+}
+pub fn convert_with_preparation(
+    source: &Path,
+    output: &Path,
+    s: &Settings,
+    c: &Control,
+    activity: &Activity,
+    preparation_mode: PreparationMode,
 ) -> Result<Completed> {
     let begun = Instant::now();
     s.validate()?;
@@ -213,126 +508,64 @@ pub fn convert(
         path: Some(root.join("activity.jsonl")),
         callback: activity.callback.clone(),
     };
-    let mut selected = vec![];
+    let admission = preparation_admission(preparation_mode, pages, s, &hardware::detect());
+    atomic_json(&root.join("preparation-report.json"), &admission)?;
+    log.emit(
+        "prepare",
+        format!("{} OCR worker budget: {} threads. Estimated buffers/native allowance: {} MiB; measured admission budget after user reserve: {} MiB.", admission.reason, admission.ocr_threads, admission.required_mib, admission.available_mib),
+        0, 0, pages, "",
+    );
+    let mut preparation_settings = s.clone();
+    preparation_settings.cpu_threads = admission.ocr_threads;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(admission.ocr_threads)
+        .build()?;
+    let preparation = PagePreparation {
+        root: &root,
+        settings: &preparation_settings,
+        log: &log,
+        total: pages,
+        has_readers: !plan.models.is_empty(),
+    };
     let mut rendered = vec![];
-    // PDFium stays in this one worker. Stage results live on disk instead of a document-sized RAM graph.
-    crate::inputs::render(
-        source,
-        &s.pdfium,
-        &s.page_range,
-        plan.dpi,
-        s.max_pixels,
-        c,
-        |n, im| {
-            let image = root.join(format!("page-{n:05}.png"));
-            let checkpoint = root.join(format!("page-{n:05}.json"));
-            selected.push(n);
-            log.work(
-                Work::new(Phase::Render, selected.len() - 1, pages, 1500, true),
-                "Preparing source pages",
-            );
-            if image.exists()
-                && read_json::<Page>(&checkpoint, 32_000_000)
-                    .is_ok_and(|p| p.page == n && p.validate().is_ok())
-            {
-                log.emit(
-                    "cached",
-                    "Found rendered page checkpoint",
-                    n,
-                    selected.len(),
-                    0,
-                    "",
-                );
-                log.work(
-                    Work::new(Phase::Render, selected.len(), pages, 1500, false),
-                    "Reused rendered checkpoint",
-                );
-                return Ok(());
-            }
-            c.check()?;
-            log.emit(
-                "render",
-                "Preparing source scan and printed OCR",
-                n,
-                selected.len() - 1,
-                0,
-                "",
-            );
-            let preflight = crate::preflight::analyze(&im);
-            let im = scan::deskew(scan::orient(im, s, c)?, s.deskew, s.max_pixels);
-            let content = match scan::printed(&im, s, c) {
-                Ok(p) => p,
-                Err(e) => {
-                    if e.downcast_ref::<Fault>().is_some_and(|f| f.code == "NG900") {
-                        return Err(e);
-                    }
-                    if plan.models.is_empty() {
-                        return Err(e);
-                    }
-                    log.emit(
-                        "ocr",
-                        "Printed OCR unavailable; using local AI readers",
-                        n,
-                        0,
-                        0,
-                        "NG110",
-                    );
-                    PageContent {
-                        warnings: vec!["Printed OCR unavailable.".into()],
-                        ..Default::default()
-                    }
-                }
-            };
-            scan::save_scan(&image, &im)?;
-            let warning = scan::blur_warning(&im);
-            let candidate = Candidate {
-                region: None,
-                model_id: "tesseract".into(),
-                family: "tesseract".into(),
-                view: "full".into(),
-                reliability: if s.handwriting { 0.25 } else { 0.65 },
-                content: content.clone(),
-            };
-            let mut p = Page {
-                page: n,
-                image: image.file_name().unwrap().to_string_lossy().into(),
-                content,
-                candidates: vec![candidate],
-                agreement: if s.preset == Preset::Fast { 1. } else { 0. },
-                ..Default::default()
-            };
-            if warning {
-                p.content
-                    .warnings
-                    .push("Blur/low detail detected. Verify small text against the source.".into());
-            }
-            for observation in preflight.observations {
-                p.content.warnings.push(format!(
-                    "{} {}",
-                    observation.message, observation.suggestion
-                ));
-            }
-            p.content
-                .warnings
-                .extend(crate::preflight::numeric_observations(&p.content));
-            p.source_warnings = p.content.warnings.clone();
-            atomic_json(&checkpoint, &p)?;
+    let mut prepared = 0;
+    let mut consume = |(n, im), control: &Control| {
+        prepared += 1;
+        let changed = pool.install(|| preparation.run(n, prepared, im, control))?;
+        if changed {
             rendered.push(n);
-            log.work(
-                Work::new(Phase::Render, selected.len(), pages, 1500, false),
-                "Source page prepared",
-            );
-            log.emit(
-                "ocr",
-                "Printed OCR checkpoint saved",
-                n,
-                selected.len(),
-                0,
-                "",
-            );
-            Ok(())
-        },
-    )?;
+        }
+        Ok(())
+    };
+    // PDFium remains on this caller thread; only one page's OCR/preprocessing runs at a time.
+    let selected = if admission.enabled {
+        bounded_preparation(
+            c,
+            |control, send| {
+                crate::inputs::render(
+                    source,
+                    &s.pdfium,
+                    &s.page_range,
+                    plan.dpi,
+                    s.max_pixels,
+                    control,
+                    |n, im| send((n, im)),
+                )
+            },
+            consume,
+        )?
+    } else {
+        crate::inputs::render(
+            source,
+            &s.pdfium,
+            &s.page_range,
+            plan.dpi,
+            s.max_pixels,
+            c,
+            |n, im| consume((n, im), c),
+        )?
+    };
+    drop(pool);
     let manifest = Manifest {
         schema: 2,
         input_sha256: input,
@@ -884,6 +1117,7 @@ pub fn convert(
         "{} page render checkpoints reused",
         selected.len() - rendered.len()
     ));
+    plan.notes.push(admission.reason.clone());
     Ok(Completed {
         project,
         output: output.into(),
@@ -891,6 +1125,7 @@ pub fn convert(
         review,
         seconds: begun.elapsed().as_secs_f64(),
         plan,
+        preparation: admission,
     })
 }
 
@@ -1344,4 +1579,195 @@ pub fn reread_region(
         &after,
         &format!("Region re-read: {}", model.id),
     )
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn await_cancel(control: &Control) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !control.cancelled.load(Ordering::Relaxed) {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "Cancellation bridge did not wake the consumer"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
+    struct Tracked {
+        number: usize,
+        live: Arc<AtomicUsize>,
+    }
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    #[test]
+    fn bounded_preparation_retains_at_most_three_items_and_preserves_order() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let high = Arc::new(AtomicUsize::new(0));
+        let created = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut seen = vec![];
+        thread::scope(|scope| {
+            let counted = created.clone();
+            let release = scope.spawn(move || {
+                started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                let limit = Instant::now() + Duration::from_secs(3);
+                while counted.load(Ordering::SeqCst) < 3 {
+                    assert!(
+                        Instant::now() < limit,
+                        "Producer never filled the bounded queue"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert_eq!(counted.load(Ordering::SeqCst), 3);
+                release_tx.send(()).unwrap();
+            });
+            let seen = &mut seen;
+            bounded_preparation(
+                &Control::default(),
+                |_, send| {
+                    for number in 0..20 {
+                        let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                        high.fetch_max(now, Ordering::SeqCst);
+                        created.fetch_add(1, Ordering::SeqCst);
+                        send(Tracked {
+                            number,
+                            live: live.clone(),
+                        })?;
+                    }
+                    Ok(())
+                },
+                move |item: Tracked, _| {
+                    if item.number == 0 {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                    }
+                    seen.push(item.number);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            release.join().unwrap();
+        });
+        assert_eq!(seen, (0..20).collect::<Vec<_>>());
+        assert_eq!(high.load(Ordering::SeqCst), 3);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn consumer_failure_unblocks_a_paused_producer_without_cancelling_parent() {
+        let control = Control::default();
+        let error = bounded_preparation(
+            &control,
+            |linked, send| {
+                for number in 0..100 {
+                    linked.check()?;
+                    send(number)?;
+                }
+                Ok(())
+            },
+            |_: usize, _| {
+                control.paused.store(true, Ordering::Relaxed);
+                Err(Fault::new("NG110", "Synthetic OCR failure").into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG110");
+        assert!(!control.cancelled.load(Ordering::Relaxed));
+        assert!(control.paused.load(Ordering::Relaxed));
+        control.paused.store(false, Ordering::Relaxed);
+    }
+    #[test]
+    fn producer_failure_interrupts_current_consumer_and_keeps_original_error() {
+        let control = Control::default();
+        let (started_tx, started_rx) = mpsc::channel();
+        let mut ended = false;
+        let error = bounded_preparation(
+            &control,
+            |_, send| -> Result<()> {
+                send(1usize)?;
+                started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                Err(Fault::new("NG100", "Synthetic renderer failure").into())
+            },
+            |_, linked| {
+                started_tx.send(()).unwrap();
+                await_cancel(linked)?;
+                ended = true;
+                linked.check()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG100");
+        assert!(ended);
+        assert!(!control.cancelled.load(Ordering::Relaxed));
+    }
+    #[test]
+    fn parent_cancellation_reaches_both_stages_and_joins_before_return() {
+        let control = Control::default();
+        let mut consumed = 0;
+        let mut consumer_observed_cancel = false;
+        let error = bounded_preparation(
+            &control,
+            |linked, send| {
+                for number in 0..100 {
+                    linked.check()?;
+                    send(number)?;
+                }
+                Ok(())
+            },
+            |_: usize, linked| {
+                consumed += 1;
+                control.cancelled.store(true, Ordering::Relaxed);
+                await_cancel(linked)?;
+                consumer_observed_cancel = true;
+                linked.check()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG900");
+        assert_eq!(consumed, 1);
+        assert!(consumer_observed_cancel);
+    }
+    #[test]
+    fn either_stage_panic_is_reported_and_no_worker_is_detached() {
+        for producer_panics in [false, true] {
+            let control = Control::default();
+            let (started_tx, started_rx) = mpsc::channel();
+            let mut consumer_ended = false;
+            let error = bounded_preparation(
+                &control,
+                |_, send| -> Result<()> {
+                    send(0usize)?;
+                    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                    if producer_panics {
+                        panic!("Synthetic producer panic");
+                    }
+                    for number in 1..100 {
+                        send(number)?;
+                    }
+                    Ok(())
+                },
+                |_, linked| {
+                    started_tx.send(()).unwrap();
+                    if !producer_panics {
+                        panic!("Synthetic consumer panic");
+                    }
+                    await_cancel(linked)?;
+                    consumer_ended = true;
+                    linked.check()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG500");
+            assert!(!control.cancelled.load(Ordering::Relaxed));
+            assert_eq!(consumer_ended, producer_panics);
+        }
+    }
 }

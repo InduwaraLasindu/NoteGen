@@ -188,7 +188,7 @@ pub fn enhance(im: &DynamicImage) -> GrayImage {
         })
         .position(|v| v >= count - count / 100)
         .unwrap_or(255) as u8;
-    if high > low + 10 {
+    if high.saturating_sub(low) > 10 {
         g.as_mut().par_iter_mut().for_each(|p| {
             *p = ((p.saturating_sub(low) as u32 * 255) / (high - low) as u32).min(255) as u8
         });
@@ -423,7 +423,9 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
 }
 pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageContent> {
     let dir = tempfile::tempdir()?;
-    let mut gray = if s.cpu_threads == 0 {
+    let within_budget_pool =
+        rayon::current_thread_index().is_some() && rayon::current_num_threads() <= s.cpu_threads;
+    let mut gray = if s.cpu_threads == 0 || within_budget_pool {
         enhance(im)
     } else {
         rayon::ThreadPoolBuilder::new()

@@ -72,7 +72,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 66 | Bounded warm-reader reuse | Planned | Implementation remains. |
 | 67 | ETA confidence ranges | Implemented | Planning window from stage timing variability, sparse-data reasons and queue extrapolation; not calibrated confidence. |
 | 68 | Time-budget planning | Implemented | Ordered time-budget forecasts with measured/estimated/unknown durations explicit. |
-| 69 | Overlapped preparation | Planned | Implementation remains. |
+| 69 | Overlapped preparation | Implemented | Explicit CLI opt-in overlaps caller-thread rendering with one OCR consumer and one queued page; conservative CPU/RAM admission, sequential fallback, joined cancellation, AI starts afterwards. |
 | 70 | Fine-grained reconversion | Partial | Selected page/context/region rereads preserve unaffected output; automatic dependency-based invalidation remains. |
 | 71 | Exact installer preflight | Partial | Selected bytes, verified reuse, remaining downloads, retained rollback and disk estimates; runtime expansion is a conservative upper bound. |
 | 72 | Model capability cards | Partial | Capability cards expose task protocols, sources, revisions and estimates; missing license/language measurements are explicitly unknown. |
@@ -86,7 +86,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 80 | Private-update credentials | Implemented | Fixed-publisher Windows Credential Manager entry, masked UI, zeroizing secret, scoped retrieval and no secret serialization. |
 | 81 | Privacy dashboard | Partial | Privacy panel reports configured connections, update/lookup state and data locations; not OS connection monitoring. |
 | 82 | Encrypted workspaces | Planned | Implementation remains. |
-| 83 | Confidential session mode | Planned | Implementation remains. |
+| 83 | Confidential session mode | Partial | Dedicated retention-managed CLI sessions, local-reader-only conversion, disabled lookup/questions/examples, verified external export and token-bound selected cleanup/recovery; native/OS temporary data and caches remain unmanaged. |
 | 84 | Share-ready redaction | Partial | Opaque image-copy redaction of explicit regions; recognized text/project metadata redaction remains. |
 | 85 | Inspectable diagnostic bundles | Implemented | Inspectable selected diagnostics; content excluded by default, safe allowlist summaries and token-bound export. |
 | 86 | Plain-language troubleshooting | Implemented | Plain-language error checks and recovery actions in diagnostics plus existing NG remedies. |

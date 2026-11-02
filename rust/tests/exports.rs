@@ -102,6 +102,22 @@ fn markdown_keeps_content_sources_and_review_without_executable_markup() {
     assert!(text.contains("source%20space%20%7Bnotes%7D"));
     assert!(text.contains("#xywh=percent,10.0000,20.0000,80.0000,40.0000"));
     assert!(text.contains("page-level location"));
+    assert!(text.contains("page-level location only: no measured source box"));
+    assert!(text.contains("#xywh=percent,0.0000,0.0000,100.0000,100.0000"));
+}
+#[test]
+fn markdown_preserves_prose_hyphens_but_escapes_indented_list_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let mut page = p.load(1).unwrap();
+    page.content.blocks[2].text = "   - source-linked annotation".into();
+    p.save(&page).unwrap();
+    let target = dir.path().join("hyphens.md");
+    exports::export(&p, &target, Format::Markdown, &Control::default()).unwrap();
+    let text = fs::read_to_string(target).unwrap();
+    assert!(text.contains("   \\- source-linked annotation"));
+    assert!(!text.contains("source\\-linked"));
+    assert!(text.contains("page-level location only: no measured source box"));
 }
 #[test]
 fn html_is_semantic_unicode_and_escaped() {

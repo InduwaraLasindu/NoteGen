@@ -276,8 +276,11 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
 
 fn markdown(text: &str) -> String {
     let mut out = String::new();
+    let mut prose_start = true;
     for ch in text.chars() {
-        if "\\`*_{}[]<>()#+-.!|~".contains(ch) {
+        // A hyphen inside a source label is ordinary prose. Escape a leading
+        // hyphen (including after indentation) so document data cannot form a list.
+        if "\\`*_{}[]<>()#+.!|~".contains(ch) || ch == '-' && prose_start {
             out.push('\\');
         }
         match ch {
@@ -285,6 +288,9 @@ fn markdown(text: &str) -> String {
             '\n' => out.push_str("<br>"),
             '\r' => {}
             _ => out.push(ch),
+        }
+        if !matches!(ch, ' ' | '\t' | '\r') {
+            prose_start = false;
         }
     }
     out
@@ -360,7 +366,7 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                 "page {n}, block {}{}{}",
                 index + 1,
                 if b.bbox.is_none() {
-                    "; page-level location"
+                    "; page-level location only: no measured source box"
                 } else {
                     ""
                 },

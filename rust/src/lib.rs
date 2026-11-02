@@ -36,6 +36,7 @@ pub mod runtime;
 pub mod scan;
 pub mod scan_tools;
 pub mod searchable_pdf;
+pub mod sessions;
 pub mod settings_help;
 pub mod setup;
 pub mod storage;

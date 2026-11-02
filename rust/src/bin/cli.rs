@@ -127,6 +127,9 @@ enum Action {
         handwriting: bool,
         #[arg(long)]
         pages: Option<String>,
+        /// Opt in to bounded rendering/OCR overlap when CPU and free RAM permit.
+        #[arg(long)]
+        overlap_preparation: bool,
     },
     Export {
         project: PathBuf,
@@ -146,7 +149,7 @@ enum Action {
     },
 }
 fn main() {
-    if let Err(e) = run() {
+    if let Err(e) = run_on_worker() {
         eprintln!("{e:#}");
         if let Some(f) = e.downcast_ref::<Fault>() {
             eprintln!("Fix: {}", f.remedy());
@@ -154,10 +157,28 @@ fn main() {
         std::process::exit(1);
     }
 }
+fn run_on_worker() -> Result<()> {
+    // The finite clap command tree has substantial derived-parser temporaries in
+    // debug builds. Windows' 1 MiB executable stack is smaller than Linux's usual
+    // 8 MiB; use one explicitly bounded stack for parsing and every CLI action.
+    // Keep this entry point small, including failures to create the worker.
+    let worker = std::thread::Builder::new()
+        .name("notegen-cli".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run)
+        .map_err(|e| Fault::new("NG500", format!("Cannot start the CLI worker: {e}")))?;
+    worker.join().unwrap_or_else(|_| {
+        Err(Fault::new(
+            "NG500",
+            "The CLI worker stopped unexpectedly; completed checkpoints are preserved",
+        )
+        .into())
+    })
+}
 fn run() -> Result<()> {
     let args = Args::parse();
     let mut s = if let Some(p) = args.settings {
-        serde_json::from_reader(fs::File::open(p)?)?
+        read_json(&p, 1_000_000)?
     } else {
         Settings::default()
     };
@@ -165,6 +186,9 @@ fn run() -> Result<()> {
     let c = Control::default();
     if let Some(path) = args.cancel_file {
         let cancel = c.cancelled.clone();
+        // An installer may supply an already-created cancellation marker. Honor
+        // it before dispatch rather than racing the watcher's first poll.
+        cancel.store(path.exists(), std::sync::atomic::Ordering::Relaxed);
         std::thread::spawn(move || {
             loop {
                 if path.exists() {
@@ -397,6 +421,7 @@ fn run() -> Result<()> {
             preset,
             handwriting,
             pages,
+            overlap_preparation,
         } => {
             if let Some(p) = preset {
                 s.preset = match p.as_str() {
@@ -417,7 +442,12 @@ fn run() -> Result<()> {
             if let Some(p) = pages {
                 s.page_range = p;
             }
-            let r = pipeline::convert(&pdf, &output, &s, &c, &log)?;
+            let mode = if overlap_preparation {
+                pipeline::PreparationMode::BoundedOverlap
+            } else {
+                pipeline::PreparationMode::Sequential
+            };
+            let r = pipeline::convert_with_preparation(&pdf, &output, &s, &c, &log, mode)?;
             println!(
                 "Saved: {}\nProject: {}\nPages: {}\nReview: {}\nSeconds: {:.2}",
                 r.output.display(),

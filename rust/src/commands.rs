@@ -26,6 +26,38 @@ impl SupportRequest {
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Create a new retention-managed session. Files are kept until explicit cleanup.
+    SessionCreate {
+        parent: PathBuf,
+    },
+    SessionRun {
+        session: PathBuf,
+        input: PathBuf,
+        #[arg(long,value_parser=["fast","balanced","accuracy","maximum"])]
+        preset: Option<String>,
+    },
+    SessionExport {
+        session: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Export tracked recovery artifacts as ZIP instead of completed Word output.
+        #[arg(long)]
+        recovery: bool,
+    },
+    SessionInspect {
+        session: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    SessionRecover {
+        session: PathBuf,
+    },
+    /// Discard only explicitly selected unchanged files from a fresh saved preview.
+    SessionDiscard {
+        session: PathBuf,
+        preview: PathBuf,
+        selections: PathBuf,
+    },
     HardwareTrial {
         project: PathBuf,
         options: PathBuf,
@@ -473,6 +505,70 @@ fn format(value: &str) -> Result<exports::Format> {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::SessionCreate { parent } => {
+            let session = notegen::sessions::Session::create(&parent, c)?;
+            print(
+                serde_json::json!({"root":session.root,"note":notegen::sessions::RETENTION_LIMITS}),
+            )
+        }
+        Action::SessionRun {
+            session,
+            input,
+            preset,
+        } => {
+            let session = notegen::sessions::Session::read(&session)?;
+            let mut settings = s.clone();
+            if let Some(preset) = preset {
+                settings.preset = serde_json::from_value(serde_json::Value::String(preset))?;
+            }
+            let report =
+                notegen::sessions::run(&session, &input, &settings, c, &Activity::default())?;
+            let success = report.success;
+            let cancelled = report.cancelled;
+            print(report)?;
+            anyhow::ensure!(
+                success,
+                Fault::new(
+                    if cancelled { "NG900" } else { "NG680" },
+                    "Session conversion stopped. Retained artifacts are available for inspection and recovery."
+                )
+            );
+            Ok(())
+        }
+        Action::SessionExport {
+            session,
+            output,
+            recovery,
+        } => {
+            let session = notegen::sessions::Session::read(&session)?;
+            if recovery {
+                print(notegen::sessions::export_recovery(&session, &output, c)?)
+            } else {
+                print(notegen::sessions::export(&session, &output, c)?)
+            }
+        }
+        Action::SessionInspect { session, output } => {
+            let report =
+                notegen::sessions::inspect(&notegen::sessions::Session::read(&session)?, c)?;
+            if let Some(path) = output {
+                protected_json(&path, &report)?;
+            }
+            print(report)
+        }
+        Action::SessionRecover { session } => print(notegen::sessions::recover(
+            &notegen::sessions::Session::read(&session)?,
+            c,
+        )?),
+        Action::SessionDiscard {
+            session,
+            preview,
+            selections,
+        } => print(notegen::sessions::discard(
+            &notegen::sessions::Session::read(&session)?,
+            &read_json(&preview, 32_000_000)?,
+            &read_json::<Vec<PathBuf>>(&selections, 16_000_000)?,
+            c,
+        )?),
         Action::HardwareTrial {
             project,
             options,

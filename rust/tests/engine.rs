@@ -38,6 +38,9 @@ fn project(root: &Path, pages: Vec<usize>) -> Project {
     .unwrap()
 }
 fn pdf(path: &Path, im: &RgbImage) {
+    pdf_with_pages(path, im, 1);
+}
+fn pdf_with_pages(path: &Path, im: &RgbImage, page_count: usize) {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = vec![0];
     let w = im.width();
@@ -47,7 +50,16 @@ fn pdf(path: &Path, im: &RgbImage) {
         w as f32 * 72. / 150.,
         h as f32 * 72. / 150.
     );
-    let objects=vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",w as f32*72./150.,h as f32*72./150.).into_bytes(),[format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",im.as_raw().len()).into_bytes(),im.as_raw().clone(),b"\nendstream".to_vec()].concat(),format!("<< /Length {} >>\nstream\n{}\nendstream",contents.len(),contents).into_bytes()];
+    assert!((1..=4).contains(&page_count));
+    let kids = std::iter::once(3)
+        .chain((0..page_count - 1).map(|i| i + 6))
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut objects=vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),format!("<< /Type /Pages /Count {page_count} /Kids [{kids}] >>").into_bytes(),format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",w as f32*72./150.,h as f32*72./150.).into_bytes(),[format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",im.as_raw().len()).into_bytes(),im.as_raw().clone(),b"\nendstream".to_vec()].concat(),format!("<< /Length {} >>\nstream\n{}\nendstream",contents.len(),contents).into_bytes()];
+    for _ in 1..page_count {
+        objects.push(objects[2].clone());
+    }
     for (i, obj) in objects.into_iter().enumerate() {
         offsets.push(out.len());
         out.extend(format!("{} 0 obj\n", i + 1).as_bytes());
@@ -649,6 +661,25 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
             .plain()
             .contains("1500")
     );
+    let mut invalid: Page =
+        notegen::storage::read_json(&repaired.project.page_path(1), 32_000_000).unwrap();
+    invalid.agreement = 1.5;
+    notegen::storage::atomic_json(&repaired.project.page_path(1), &invalid).unwrap();
+    let validated = notegen::pipeline::convert(
+        &source,
+        &t.path().join("notes5.docx"),
+        &s,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    let cache: Page =
+        notegen::storage::read_json(&validated.project.page_path(1), 32_000_000).unwrap();
+    cache.validate().unwrap();
+    assert_eq!(
+        validated.project.load(1).unwrap().content.plain(),
+        "Human correction 1500"
+    );
 }
 #[test]
 #[ignore = "requires downloaded local model and native runtime; invoke explicitly"]
@@ -1171,4 +1202,292 @@ fn recovery_never_increases_manual_resource_limits() {
     );
     assert_eq!(retry.gpu_layers, 0);
     assert_eq!(BoxRect::full().pixels(0, 0), (0, 0, 0, 0));
+}
+
+#[test]
+fn preparation_overlap_requires_opt_in_cpu_and_reserved_memory_headroom() {
+    use notegen::pipeline::{PreparationMode, preparation_admission};
+    let mut settings = Settings {
+        cpu_threads: 4,
+        max_pixels: 1_000_000,
+        reserve_ram_mib: 1024,
+        ram_fraction: 0.8,
+        ..Default::default()
+    };
+    let mut hardware = notegen::hardware::Hardware {
+        logical_cores: 8,
+        physical_cores: 4,
+        ram_mib: 16000,
+        free_ram_mib: 8000,
+        ..Default::default()
+    };
+    let admitted = preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware);
+    assert!(admitted.enabled);
+    assert_eq!(admitted.ocr_threads, 3);
+    assert!(!preparation_admission(PreparationMode::Sequential, 2, &settings, &hardware).enabled);
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 1, &settings, &hardware).enabled
+    );
+    hardware.free_ram_mib = admitted.required_mib + settings.reserve_ram_mib;
+    assert!(
+        preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    hardware.free_ram_mib -= 1;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    hardware.free_ram_mib = 8000;
+    settings.cpu_threads = 1;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    settings.cpu_threads = 0;
+    hardware.physical_cores = 1;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    hardware.physical_cores = 4;
+    hardware.ram_mib = 1024;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+}
+
+#[test]
+fn native_two_page_overlap_matches_sequential_ocr_and_preserves_review_on_resume() {
+    use notegen::pipeline::{PreparationMode, convert_with_preparation};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-pages.pdf");
+    pdf_with_pages(&source, &fixture(), 2);
+    let sequential_dir = directory.path().join("sequential");
+    let overlap_dir = directory.path().join("overlap");
+    fs::create_dir_all(&sequential_dir).unwrap();
+    fs::create_dir_all(&overlap_dir).unwrap();
+    let settings = Settings {
+        preset: Preset::Fast,
+        pdfium: pdfium(),
+        cpu_threads: 2,
+        auto_rotate: false,
+        deskew: false,
+        dpi: 150,
+        max_pixels: 1_200_000,
+        reserve_ram_mib: 0,
+        ram_fraction: 0.98,
+        ..Default::default()
+    };
+    let sequential = convert_with_preparation(
+        &source,
+        &sequential_dir.join("output.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+        PreparationMode::Sequential,
+    )
+    .unwrap();
+    let overlap = convert_with_preparation(
+        &source,
+        &overlap_dir.join("output.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+        PreparationMode::BoundedOverlap,
+    )
+    .unwrap();
+    assert!(
+        overlap.preparation.enabled,
+        "Native overlap gate needs at least two CPU cores and {} MiB available RAM; {}",
+        overlap.preparation.required_mib, overlap.preparation.reason
+    );
+    assert_eq!(sequential.project.manifest.pages, vec![1, 2]);
+    assert_eq!(overlap.project.manifest.pages, vec![1, 2]);
+    for number in [1, 2] {
+        let first = sequential.project.load(number).unwrap();
+        let second = overlap.project.load(number).unwrap();
+        assert_eq!(
+            serde_json::to_value(first.content).unwrap(),
+            serde_json::to_value(second.content).unwrap()
+        );
+        assert_eq!(
+            hash_file(&sequential.project.image(number), &Control::default()).unwrap(),
+            hash_file(&overlap.project.image(number), &Control::default()).unwrap()
+        );
+        assert!(
+            overlap
+                .project
+                .load(number)
+                .unwrap()
+                .content
+                .plain()
+                .contains("1250")
+        );
+    }
+    let before = overlap.project.load(1).unwrap();
+    let mut approved = before.clone();
+    approved.content.blocks = vec![Block::text("Human reviewed value 1500")];
+    approved.reviewed = true;
+    notegen::review::commit(&overlap.project, &before, &approved, "Human correction").unwrap();
+    let original = fs::read(overlap.project.page_path(1)).unwrap();
+    let resumed = convert_with_preparation(
+        &source,
+        &overlap_dir.join("resumed.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+        PreparationMode::BoundedOverlap,
+    )
+    .unwrap();
+    assert_eq!(resumed.project.root, overlap.project.root);
+    assert_eq!(fs::read(resumed.project.page_path(1)).unwrap(), original);
+    assert_eq!(
+        resumed.project.load(1).unwrap().content.plain(),
+        "Human reviewed value 1500"
+    );
+    assert!(resumed.project.load(1).unwrap().reviewed);
+    let report: serde_json::Value =
+        read_json(&resumed.project.root.join("preparation-report.json"), 16384).unwrap();
+    assert_eq!(report["requested_mode"], "bounded_overlap");
+    assert_eq!(report["enabled"], true);
+}
+
+#[test]
+fn cli_large_command_tree_help_version_and_usage_exit_codes() {
+    let directory = tempfile::tempdir().unwrap();
+    let cases: &[(&[&str], &str)] = &[
+        (&["--help"], "tools"),
+        (&["tools", "--help"], "session-create"),
+        (&["tools", "region-read", "--help"], "<REQUEST>"),
+        (&["convert", "--help"], "--overlap-preparation"),
+    ];
+    for (arguments, expected) in cases {
+        let output = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+            .args(*arguments)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(expected),
+            "{arguments:?}: missing {expected}"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let version = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .arg("--version")
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        version.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        format!("notegen-cli {}", env!("CARGO_PKG_VERSION"))
+    );
+    let invalid = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .arg("not-a-real-command")
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        invalid.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("unrecognized subcommand"));
+}
+
+#[test]
+fn cli_defaults_and_nested_tool_dispatch_complete_on_the_bounded_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let defaults = directory.path().join("defaults.json");
+    let output = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .args(["defaults", "-o"])
+        .arg(&defaults)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settings: Settings = read_json(&defaults, 1_000_000).unwrap();
+    settings.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(&settings).unwrap(),
+        serde_json::to_value(Settings::default()).unwrap()
+    );
+    let source = directory.path().join("source.png");
+    RgbImage::from_pixel(20, 40, Rgb([255, 255, 255]))
+        .save(&source)
+        .unwrap();
+    let result = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .args(["--settings"])
+        .arg(&defaults)
+        .args(["tools", "preflight"])
+        .arg(&source)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["width"], 20);
+    assert_eq!(report["height"], 40);
+    assert!(report["observations"].is_array());
+}
+
+#[test]
+fn cli_preexisting_cancel_marker_preserves_cancellation_code_and_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.png");
+    RgbImage::from_pixel(20, 40, Rgb([255, 255, 255]))
+        .save(&source)
+        .unwrap();
+    let original = fs::read(&source).unwrap();
+    let cancel = directory.path().join("cancel");
+    fs::write(&cancel, b"cancel").unwrap();
+    let target = directory.path().join("cancelled.docx");
+    let result = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .arg("--cancel-file")
+        .arg(&cancel)
+        .arg("convert")
+        .arg(&source)
+        .args(["--preset", "fast", "-o"])
+        .arg(&target)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("NG900"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!target.exists());
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert!(cancel.exists());
 }

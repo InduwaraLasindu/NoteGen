@@ -60,7 +60,7 @@ regex = "1"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 roxmltree = "0.21"
 scraper = "0.24"
-pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "image_025", "thread_safe"] }
+pdfium-render = { version = "=0.9.5", default-features = false, features = ["pdfium_latest", "image_025", "thread_safe"] }
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.37", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu", "x11", "wayland", "persistence", "system_fonts", "links", "clipboard"] }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
@@ -143,6 +143,10 @@ path = "rust/tests/resources.rs"
 [[test]]
 name = "layers"
 path = "rust/tests/layers.rs"
+
+[[test]]
+name = "sessions"
+path = "rust/tests/sessions.rs"
 
 [[test]]
 name = "roundtrip"

@@ -232,7 +232,7 @@ fn simultaneous_word_and_project_changes_are_explicit_conflicts() {
             p,
             &input,
             &preview,
-            &[field.tag.clone()],
+            std::slice::from_ref(&field.tag),
             "Conflict",
             &Control::default()
         )
@@ -547,7 +547,7 @@ fn source_figure_observation_and_interpretation_can_be_corrected_separately() {
     rewrite(&exported, &edited, |part, bytes| {
         if part == "word/document.xml" {
             replace_control(
-                &String::from_utf8(bytes.to_vec()).unwrap(),
+                std::str::from_utf8(bytes).unwrap(),
                 "ng:p1:b2:interpretation",
                 "Confirmed cell diagram",
             )

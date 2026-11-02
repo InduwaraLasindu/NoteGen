@@ -302,9 +302,20 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     };
     let f = fixture();
     let p = &f.project;
-    image::RgbImage::from_pixel(200, 200, image::Rgb([255, 255, 255]))
-        .save(p.image(1))
-        .unwrap();
+    let mut source = image::RgbImage::from_pixel(200, 200, image::Rgb([0, 0, 255]));
+    for y in 50..100 {
+        for x in 50..150 {
+            source.put_pixel(
+                x,
+                y,
+                image::Rgb(if x < 100 { [255, 0, 0] } else { [0, 255, 0] }),
+            );
+        }
+    }
+    source.save(p.image(1)).unwrap();
+    let original_checkpoint = fs::read(p.page_path(1)).unwrap();
+    let unused_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    unused_listener.set_nonblocking(true).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -371,6 +382,11 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     reader.endpoint = Some(endpoint);
     reader.alias = "region-reader".into();
     reader.prompt = "structured".into();
+    let mut unused_reader = reader.clone();
+    unused_reader.id = "unused-reader".into();
+    unused_reader.alias = "unused-reader".into();
+    unused_reader.endpoint = Some(format!("http://{}", unused_listener.local_addr().unwrap()));
+    notegen::models::save_custom(&settings.models_dir, unused_reader, &Control::default()).unwrap();
     notegen::models::save_custom(&settings.models_dir, reader, &Control::default()).unwrap();
     let request = pipeline::RegionRequest {
         page: 1,
@@ -378,7 +394,7 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
             left: 0.25,
             top: 0.25,
             right: 0.75,
-            bottom: 0.75,
+            bottom: 0.5,
         },
         reader: "region-reader".into(),
         image_edge: 512,
@@ -394,6 +410,10 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     )
     .unwrap();
     let raw = server.join().unwrap();
+    assert_eq!(
+        unused_listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
     assert_eq!(raw["model"], "region-reader");
     let url = raw["messages"][0]["content"][0]["image_url"]["url"]
         .as_str()
@@ -401,13 +421,41 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(url.strip_prefix("data:image/png;base64,").unwrap())
         .unwrap();
-    let image = image::load_from_memory(&bytes).unwrap();
-    assert_eq!((image.width(), image.height()), (100, 100));
-    assert!(raw.to_string().contains("User crop topic"));
+    let image = image::load_from_memory(&bytes).unwrap().to_rgb8();
+    // image_edge is a target longest edge: runtime::read resizes the 100×50 crop
+    // to 512×256, preserving its aspect ratio and only the selected source pixels.
+    assert_eq!((image.width(), image.height()), (512, 256));
+    assert_eq!(image.get_pixel(64, 64).0, [255, 0, 0]);
+    assert_eq!(image.get_pixel(448, 192).0, [0, 255, 0]);
+    assert!(
+        image.pixels().all(|pixel| pixel[2] == 0),
+        "Source outside the requested region reached the reader"
+    );
+    let content = raw["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content
+            .iter()
+            .filter(|item| item["type"] == "image_url")
+            .count(),
+        1
+    );
+    let prompt = content
+        .iter()
+        .filter_map(|item| item["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(prompt.contains("User crop topic"));
+    assert!(prompt.contains("Region task: handwriting"));
     let page = p.load(1).unwrap();
     assert_eq!(page.content.blocks[0].text, "Unclear 105");
     assert_eq!(page.candidates.len(), 1);
-    assert_eq!(page.candidates[0].region, Some(request.region));
+    assert_eq!(page.candidates[0].model_id, "region-reader");
+    assert_eq!(page.candidates[0].region, Some(request.region.clone()));
+    assert_eq!(
+        page.candidates[0].content.blocks[0].bbox,
+        Some(request.region)
+    );
+    assert_eq!(fs::read(p.page_path(1)).unwrap(), original_checkpoint);
     review::undo(p).unwrap();
     assert!(p.load(1).unwrap().candidates.is_empty());
 }

@@ -47,6 +47,8 @@ notegen-cli tools font-proof WRITER_ID -o proof.html
 
 Use `--settings` before the command for a saved configuration. `tools score` reports character, word, exact-number and table-cell errors separately. `tools calibrate` reads only the calibration split and reports empirical bins with sample counts and intervals. No natural-handwriting corpus or universal accuracy score is bundled.
 
+`convert ... --overlap-preparation` opts into bounded rendering/printed-OCR overlap. It requires multiple pages, at least two configured CPU cores and sufficient measured free RAM after reservations; otherwise conversion stays sequential. There is one OCR consumer and one queued page. AI begins after preparation workers join. Admission is a conservative estimate rather than an OS memory quota; the project's `preparation-report.json` records the decision.
+
 The numeric check flags impossible ISO/slash dates, ambiguous date order, repeated signs and unusual separator patterns. It assumes no decimal locale and does not rewrite values. The consistency check links unit and labelled-identifier variants across pages. Intentional code, version numbers and distinct identifiers can explain a suggestion; compare the source.
 
 Profile sharing requires an inspected selection preview token. Quarantined examples retain a reason and can be restored; they are excluded from active recognition and generated glyphs. Font proof sheets include missing-glyph warnings. They do not imply complete cursive shaping or additional-script support.
@@ -101,6 +103,21 @@ notegen-cli --cancel-file stop-watch tools watch watch.json watch-state.json out
 ```
 
 Files must remain stable across polls. Only successful conversions receive an import receipt; failed files retain checkpoints and use bounded retry backoff. `new_revision` permits separate identical-content imports. `--once` processes only files already stable during that poll.
+
+## Retention-managed sessions
+
+For temporary work, use a dedicated new session under an existing parent folder. Keep is the default. Session conversion disables public lookup, clarification callbacks, writer examples and automatic update checks, and rejects endpoint readers.
+
+```shell
+notegen-cli tools session-create C:/PrivateWork
+notegen-cli tools session-run SESSION_ROOT scan.pdf --preset fast
+notegen-cli tools session-export SESSION_ROOT -o C:/Exports/notes.docx
+notegen-cli tools session-inspect SESSION_ROOT -o retention-preview.json
+```
+
+Inspect the preview and put only the relative file paths you choose into a JSON array such as `selections.json`. `session-discard SESSION_ROOT retention-preview.json selections.json` requires the exact fresh preview and a verified external export. It removes only selected unchanged tracked files. Marker/state/locks, unknown or modified files, and empty folders remain; the cleanup report lists what was kept. `session-recover` handles interrupted staged cleanup. Failed/interrupted work remains untracked for manual inspection; `session-export --recovery` exports tracked artifacts to a new ZIP.
+
+This controls NoteGen's recorded session artifacts. Native OCR/process temporary files, OS caches, pagefile and crash dumps are outside its control. It provides neither encryption nor secure erasure. Retained metadata includes paths, hashes and export receipts.
 
 ## Offline transfer, resources and diagnostics
 

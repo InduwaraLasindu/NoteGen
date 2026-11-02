@@ -55,6 +55,9 @@ impl Fault {
             "NG650" => {
                 "Check model metadata, available disk space and the publisher revision. The active version is preserved."
             }
+            "NG680" => {
+                "Inspect the marked session and keep its artifacts. Export completed output or a recovery ZIP before selecting any cleanup; recover an interrupted cleanup first."
+            }
             "NG900" => "Completed work is saved. Resume the same input and settings.",
             _ => "Open the local activity log for the stage and error code.",
         }

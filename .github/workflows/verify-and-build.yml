@@ -70,6 +70,25 @@ jobs:
         env:
           RUST_TEST_THREADS: '1'
         run: cargo test --locked --all-features --all-targets --no-fail-fast -j 2
+      - name: Diagnose native Windows PDF failures serially
+        id: pdf_serial
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.first_tests.outcome == 'failure' }}
+        shell: pwsh
+        run: cargo test --locked --all-features --test searchable_pdf -j 2 -- --test-threads=1 --nocapture
+      - name: Isolate a failing native PDF case in a fresh process
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.pdf_serial.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cases=@(cargo test --locked --all-features --test searchable_pdf -j 2 -- --list | Where-Object {$_ -match ': test$'} | ForEach-Object {$_ -replace ': test$',''})
+          if($LASTEXITCODE -ne 0 -or $cases.Count -eq 0){throw 'Could not enumerate native PDF tests'}
+          $failed=@()
+          foreach($case in $cases){
+            Write-Host "[Native PDF isolation] $case"
+            cargo test --locked --all-features --test searchable_pdf -j 2 -- $case --exact --test-threads=1 --nocapture
+            if($LASTEXITCODE -ne 0){$failed+=$case}
+          }
+          if($failed.Count){throw "Native PDF cases failed: $($failed -join ', ')"}
       - name: Native Windows TrueType installation and rendering
         if: runner.os == 'Windows'
         shell: pwsh
@@ -160,7 +179,8 @@ jobs:
           path: build/font-evidence/*
           retention-days: 30
       - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
-        if: success() && steps.rust-cache.outputs.cache-hit != 'true'
+        # Keep compiled dependencies for the next regression run. Failed checks still fail the job.
+        if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry

@@ -383,8 +383,10 @@ fn templates_roundtrip_policy_and_protect_existing_outputs() {
 fn template_schema_settings_and_name_are_validated() {
     let f = fixture(1);
     let output = f.root.join("bad.json");
-    let mut s = Settings::default();
-    s.dpi = 1;
+    let s = Settings {
+        dpi: 1,
+        ..Default::default()
+    };
     assert!(projects::save_template(&output, "Bad settings", &s).is_err());
     assert!(!output.exists());
     assert!(projects::save_template(&output, "", &Settings::default()).is_err());
