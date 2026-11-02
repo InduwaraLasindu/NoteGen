@@ -10,6 +10,16 @@ pub struct Preview {
     pub region: Option<BoxRect>,
     pub reader: String,
     pub draft: Option<String>,
+    #[serde(default)]
+    pub clear: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    SourceChanged,
+    SourceRetained,
+    Draft,
+    Cleared,
+    Ignored,
 }
 impl Preview {
     pub fn source(image: PathBuf, page: usize, reader: &str, region: Option<BoxRect>) -> Self {
@@ -19,6 +29,7 @@ impl Preview {
             reader: reader.into(),
             region,
             draft: Some(String::new()),
+            clear: false,
         }
     }
     pub fn draft(page: usize, text: &str) -> Self {
@@ -27,6 +38,43 @@ impl Preview {
             draft: Some(visible_draft(text)),
             ..Self::default()
         }
+    }
+    pub fn clear() -> Self {
+        Self {
+            clear: true,
+            ..Self::default()
+        }
+    }
+    /// Accept draft text only while its source page is still displayed. Clearing
+    /// a view prevents queued drafts from bringing that page back without a source.
+    pub fn apply(&mut self, update: Self) -> Change {
+        // Accept the old empty-path reset as well as explicit reset events.
+        if update.clear
+            || update
+                .image
+                .as_ref()
+                .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            *self = Self::clear();
+            return Change::Cleared;
+        }
+        if update.image.is_some() {
+            let changed = self.image != update.image;
+            *self = update;
+            return if changed {
+                Change::SourceChanged
+            } else {
+                Change::SourceRetained
+            };
+        }
+        if self.image.is_some()
+            && self.page == update.page
+            && let Some(text) = update.draft
+        {
+            self.draft = Some(text);
+            return Change::Draft;
+        }
+        Change::Ignored
     }
 }
 /// Some external servers put reasoning tags in content. Hide complete and incomplete

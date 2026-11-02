@@ -11,13 +11,33 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
+
+struct TemporaryPreview<'a> {
+    log: &'a Activity,
+    shown: bool,
+}
+impl<'a> TemporaryPreview<'a> {
+    fn new(log: &'a Activity) -> Self {
+        Self { log, shown: false }
+    }
+    fn show(&mut self, source: crate::telemetry::Preview) {
+        self.shown = true;
+        self.log.preview(source);
+    }
+}
+impl Drop for TemporaryPreview<'_> {
+    fn drop(&mut self) {
+        if self.shown {
+            self.log.preview(crate::telemetry::Preview::clear());
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Trial {
@@ -164,6 +184,9 @@ pub fn run(s: &Settings, c: &Control, log: &Activity) -> Result<Report> {
     models.sort_by_key(|m| (m.role != "ocr", m.weights_mib));
     let image = sample()?;
     let work = tempfile::tempdir()?;
+    // Declared after the temporary directory so its preview is cleared first,
+    // including cancellation and error exits.
+    let mut preview = TemporaryPreview::new(log);
     let source = work.path().join("hardware-check.png");
     image.save(&source)?;
     let ocr = crate::scan::run(
@@ -201,7 +224,7 @@ pub fn run(s: &Settings, c: &Control, log: &Activity) -> Result<Report> {
             settings.preset = Preset::Accuracy;
             settings.image_tokens = 768;
             if s.experience.live_preview {
-                log.preview(crate::telemetry::Preview::source(
+                preview.show(crate::telemetry::Preview::source(
                     source.clone(),
                     0,
                     &m.name,
@@ -309,10 +332,47 @@ pub fn run(s: &Settings, c: &Control, log: &Activity) -> Result<Report> {
         ),
         "Hardware test complete; review the proposed settings",
     );
-    // Remove an ephemeral source from the live view before the temporary folder is removed.
-    log.preview(crate::telemetry::Preview {
-        image: Some(PathBuf::new()),
-        ..Default::default()
-    });
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn temporary_preview_clears_on_early_exit_and_leaves_unshown_views_alone() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let log = Activity {
+            path: None,
+            callback: Some(Arc::new(move |e| {
+                if let Some(p) = e.preview {
+                    seen.lock().unwrap().push(p);
+                }
+            })),
+        };
+        {
+            let _unused = TemporaryPreview::new(&log);
+        }
+        assert!(events.lock().unwrap().is_empty());
+        let cancelled = (|| -> Result<()> {
+            let mut preview = TemporaryPreview::new(&log);
+            preview.show(crate::telemetry::Preview::source(
+                "synthetic.png".into(),
+                0,
+                "probe",
+                None,
+            ));
+            let control = Control::default();
+            control.cancelled.store(true, Ordering::Relaxed);
+            control.check()?;
+            Ok(())
+        })();
+        assert!(cancelled.is_err());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].image.is_some());
+        assert!(events[1].clear);
+    }
 }

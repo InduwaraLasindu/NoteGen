@@ -16,25 +16,36 @@ pub(super) struct Experience {
     live: telemetry::Preview,
     texture: Option<egui::TextureHandle>,
 }
+
 impl Experience {
+    fn clear_preview(&mut self) {
+        self.live = telemetry::Preview::clear();
+        self.texture = None;
+    }
     pub fn preview(&mut self, p: telemetry::Preview, ctx: &egui::Context) {
-        if let Some(path) = &p.image {
-            if self.live.image.as_ref() != Some(path) {
-                self.texture = crate::writers::open_image(path, 40_000_000).ok().map(|im| {
-                    let rgba = im.thumbnail(1200, 1200).to_rgba8();
-                    ctx.load_texture(
-                        "live-source",
-                        egui::ColorImage::from_rgba_unmultiplied(
-                            [rgba.width() as usize, rgba.height() as usize],
-                            rgba.as_raw(),
-                        ),
-                        egui::TextureOptions::LINEAR,
-                    )
-                });
-            }
-            self.live = p;
-        } else if let Some(text) = p.draft {
-            self.live.draft = Some(text);
+        let change = self.live.apply(p);
+        if change == telemetry::Change::Cleared {
+            self.clear_preview();
+        } else if change == telemetry::Change::SourceChanged
+            || change == telemetry::Change::SourceRetained && self.texture.is_none()
+        {
+            let path = self
+                .live
+                .image
+                .as_ref()
+                .expect("source update has an image");
+            self.texture = crate::writers::open_image(path, 40_000_000).ok().map(|im| {
+                let limit = ctx.input(|i| i.max_texture_side).clamp(1, 1200) as u32;
+                let rgba = im.thumbnail(limit, limit).to_rgba8();
+                ctx.load_texture(
+                    "live-source",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [rgba.width() as usize, rgba.height() as usize],
+                        rgba.as_raw(),
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
         }
     }
 }
@@ -109,9 +120,11 @@ impl Desktop {
         {
             self.settings_open(1);
         }
-        if !self.state.settings.experience.live_preview
-            || self.active.is_none() && self.experience.live.image.is_none()
-        {
+        if !self.state.settings.experience.live_preview {
+            self.experience.clear_preview();
+            return;
+        }
+        if self.active.is_none() && self.experience.live.image.is_none() {
             return;
         }
         let label = if self.experience.live.reader.is_empty() {
@@ -126,6 +139,10 @@ impl Desktop {
             .id_salt("live-ai-view")
             .default_open(true)
             .show(ui, |ui| {
+                if self.experience.live.clear {
+                    ui.weak("Live view cleared. It resumes at the next source page or reader.");
+                    return;
+                }
                 ui.small("Source region and generated draft. Drafts may change before review.");
                 if self.experience.texture.is_none() {
                     ui.weak("A source page appears here when an AI reader starts.");
@@ -172,8 +189,7 @@ impl Desktop {
                         });
                 });
                 if ui.small_button("Clear live view").clicked() {
-                    self.experience.live = Default::default();
-                    self.experience.texture = None;
+                    self.experience.clear_preview();
                 }
             });
     }
@@ -440,5 +456,37 @@ impl Desktop {
         {
             self.state.settings.cpu_threads = self.experience.previous_threads.take().unwrap_or(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn clearing_or_disabling_preview_releases_the_source_texture() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.png");
+        image::DynamicImage::new_rgb8(32, 48).save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Desktop::new(Workspace::default());
+        app.experience.preview(
+            telemetry::Preview::source(path.clone(), 1, "reader", None),
+            &ctx,
+        );
+        assert!(app.experience.texture.is_some());
+        app.experience.preview(telemetry::Preview::clear(), &ctx);
+        assert!(app.experience.texture.is_none());
+        assert!(app.experience.live.image.is_none());
+        app.experience
+            .preview(telemetry::Preview::source(path, 1, "reader", None), &ctx);
+        app.state.settings.experience.live_preview = false;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.live_preview_ui(ui));
+        output.textures_delta.clear();
+        assert!(app.experience.texture.is_none());
+        assert!(app.experience.live.image.is_none());
+        app.experience
+            .preview(telemetry::Preview::draft(1, "late text"), &ctx);
+        assert!(app.experience.live.draft.is_none());
     }
 }
