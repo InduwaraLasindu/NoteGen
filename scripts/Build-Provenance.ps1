@@ -78,7 +78,7 @@ try {
         build_tools = @{ rustc = $rustVersion; cargo = $cargoVersion }
         inputs = $pins
         subjects = $subjects
-        claims = @('Records all-feature locked dependency inventory, including target-specific packages, and actual binary SHA256 hashes.', 'This file is unsigned; use the separate GitHub artifact attestation to verify CI identity.', 'Byte-for-byte reproducibility is not asserted.')
+        claims = @('Records all-feature locked dependency inventory, including target-specific packages, and actual binary SHA256 hashes.', 'This file is unsigned. Check the source run and downloaded artifact digest recorded in the installer manifest; no independent build attestation is asserted.', 'Byte-for-byte reproducibility is not asserted.')
     }
     # Metadata's local manifest paths, environment variables, usernames and document data are deliberately omitted.
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null

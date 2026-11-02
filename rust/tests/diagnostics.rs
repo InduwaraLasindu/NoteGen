@@ -280,7 +280,7 @@ fn repair_settings(root: &std::path::Path) -> Settings {
 fn repair_preview_distinguishes_missing_corrupt_and_unreadable_pinned_assets() {
     let root = tempfile::tempdir().unwrap();
     let s = repair_settings(root.path());
-    let ids = vec!["lighton3-1b".into()];
+    let ids: Vec<String> = vec!["lighton3-1b".into()];
     let (_, pin) = setup::pinned(&ids[0]).unwrap();
     let version = s
         .models_dir
@@ -328,7 +328,7 @@ fn repair_preview_distinguishes_missing_corrupt_and_unreadable_pinned_assets() {
 fn repair_rejects_cancelled_stale_or_tampered_previews_before_any_download_or_registration_write() {
     let root = tempfile::tempdir().unwrap();
     let s = repair_settings(root.path());
-    let ids = vec!["lighton3-1b".into()];
+    let ids: Vec<String> = vec!["lighton3-1b".into()];
     fs::create_dir_all(&s.models_dir).unwrap();
     let registration = s.models_dir.join("lighton3-1b.notegen.json");
     fs::write(&registration, "REGISTRATION_PRESERVED").unwrap();
@@ -397,7 +397,7 @@ fn repair_requires_supported_unique_pins_and_respects_storage_failures() {
         )
         .is_err()
     );
-    let ids = vec!["lighton3-1b".into()];
+    let ids: Vec<String> = vec!["lighton3-1b".into()];
     let (_, pin) = setup::pinned(&ids[0]).unwrap();
     let path = s
         .models_dir

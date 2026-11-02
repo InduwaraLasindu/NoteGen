@@ -106,8 +106,10 @@ fn invalid_table_answer_and_oversized_guidance_do_not_partially_apply() {
     assert!(a::apply(p, &qs, &answers(&qs)).is_err());
     assert_eq!(p.load(1).unwrap().content.plain(), "Unclear 105");
     assert!(review::timeline(p).unwrap().revisions.is_empty());
-    let mut guidance = a::Guidance::default();
-    guidance.notes = vec!["x".repeat(4000); 1000];
+    let guidance = a::Guidance {
+        notes: vec!["x".repeat(4000); 1000],
+        ..Default::default()
+    };
     notegen::storage::atomic_json(&p.root.join("guidance.json"), &guidance).unwrap();
     assert!(a::apply(p, &qs, &answers(&qs)).is_err());
     assert_eq!(p.load(1).unwrap().content.plain(), "Unclear 105");

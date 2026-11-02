@@ -1,7 +1,8 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.4.1',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='')
+param([Parameter(Mandatory)][string]$Installer,[string]$Version='0.4.1',[string]$Evidence='build/installer-evidence',[string]$PreviousInstaller='',[string]$PreviousVersion='0.4.1')
 $ErrorActionPreference='Stop'
+if($Version -notmatch '^\d+\.\d+\.\d+$' -or $PreviousVersion -notmatch '^\d+\.\d+\.\d+$'){throw 'Installer versions must use major.minor.patch.'}
 $Installer=(Resolve-Path $Installer).Path
 New-Item -ItemType Directory -Force $Evidence | Out-Null
 $Evidence=(Resolve-Path $Evidence).Path
@@ -53,19 +54,19 @@ try {
  if($PreviousInstaller){
   $newInstaller=$Installer
   $Installer=(Resolve-Path $PreviousInstaller).Path
-  Install-NoteGen 'previous-0.4-install'
+  Install-NoteGen 'previous-version-install'
  Write-Host "[QA] Previous installation: CLI version"
-  $previousVersion=& (Join-Path $installDir 'notegen-cli.exe') --version
-  if($LASTEXITCODE -ne 0 -or $previousVersion -notmatch '0\.4\.0'){throw 'Previous installer did not contain NoteGen 0.4.0.'}
-  Test-Desktop 'previous 0.4 installation'
+  $reportedPrevious=& (Join-Path $installDir 'notegen-cli.exe') --version
+  if($LASTEXITCODE -ne 0 -or ([string]$reportedPrevious).Trim() -ne "notegen-cli $PreviousVersion"){throw "Previous installer did not contain NoteGen $PreviousVersion."}
+  Test-Desktop "previous $PreviousVersion installation"
   New-Item -ItemType Directory -Force (Join-Path $installDir 'user-data') | Out-Null
-  $legacyMarker=Join-Path $installDir 'user-data/legacy-0.4-document.txt'
-  [IO.File]::WriteAllText($legacyMarker,'EXISTING 0.4 DATA MUST SURVIVE')
+  $legacyMarker=Join-Path $installDir 'user-data/legacy-document.txt'
+  [IO.File]::WriteAllText($legacyMarker,'EXISTING USER DATA MUST SURVIVE')
   $Installer=$newInstaller
  }
  Install-NoteGen 'install'
- if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING 0.4 DATA MUST SURVIVE'){throw 'Version 0.4.0 to 0.4.1 upgrade changed user data.'}
- if($PreviousInstaller){$results.Add('Real 0.4.0 to 0.4.1 upgrade preserved existing user data and updated the executable')}
+ if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING USER DATA MUST SURVIVE'){throw "Version $PreviousVersion to $Version upgrade changed user data."}
+ if($PreviousInstaller){$results.Add("Real $PreviousVersion to $Version upgrade preserved existing user data and updated the executable")}
 
  foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/tesseract/tesseract.exe','runtime/llama-server.exe','vcruntime140.dll','runtime/vcruntime140.dll','scripts/Configure-AI.ps1','unins000.exe')) {
   if(-not(Test-Path (Join-Path $installDir $f))){throw "Installed dependency missing: $f"}
@@ -87,7 +88,7 @@ try {
  try {
  Write-Host "[QA] Installed CLI and native dependencies"
   $reported=& ./notegen-cli.exe --version
-  if($LASTEXITCODE -ne 0 -or $reported -notmatch [regex]::Escape($Version)){throw 'Installed executable version does not match the release.'}
+  if($LASTEXITCODE -ne 0 -or ([string]$reported).Trim() -ne "notegen-cli $Version"){throw 'Installed executable version does not match the release.'}
   & ./notegen-cli.exe self-test -o (Join-Path $Evidence 'installed-word.docx')
   if($LASTEXITCODE -ne 0){throw 'Installed CLI Word export failed.'}
   & ./runtime/tesseract/tesseract.exe --version
@@ -208,5 +209,10 @@ try {
  Write-Host ($results -join "`n")
 } finally {
  # Cleanup is restricted to this disposable CI installation, never a user's real install.
- if($installDir -and (Test-Path $installDir)){Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue}
+ if($installDir -and (Test-Path -LiteralPath $installDir)){
+  $qaParent=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Programs')).TrimEnd('\')+'\'
+  $resolved=(Resolve-Path -LiteralPath $installDir).Path
+  if(-not $resolved.StartsWith($qaParent,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notmatch '^NoteGen installer QA [a-f0-9]{32}$'){throw 'Refusing cleanup outside the disposable installer QA directory.'}
+  Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+ }
 }
