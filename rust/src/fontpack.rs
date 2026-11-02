@@ -1,4 +1,4 @@
-//! Small, deterministic TrueType exporter for explicitly labelled English glyphs.
+//! Deterministic Unicode TrueType fonts using only explicitly confirmed ink shapes.
 use crate::{storage::Control, types::*, writers};
 use image::{DynamicImage, GrayImage, Luma};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,289 @@ impl Default for FontOptions {
 struct Glyph {
     contours: Vec<Vec<(i16, i16)>>,
     advance: u16,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShapeCoverage {
+    pub label: String,
+    pub shape: writers::FontShape,
+    pub glyph_id: u16,
+    pub feature: String,
+    pub sample_ids: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FontCoverage {
+    pub schema: u32,
+    pub default_glyphs: String,
+    pub component_placeholders: String,
+    pub shapes: Vec<ShapeCoverage>,
+    pub note: String,
+}
+struct FontPlan {
+    mappings: BTreeMap<char, u16>,
+    coverage: FontCoverage,
+}
+fn plan(profile: &writers::Profile) -> Result<FontPlan> {
+    let defaults = profile
+        .samples
+        .iter()
+        .filter(|s| s.active() && s.default_glyph())
+        .filter_map(|s| s.label.chars().next())
+        .collect::<BTreeSet<_>>();
+    let mut groups = BTreeMap::<(String, writers::FontShape), Vec<String>>::new();
+    let mut scalars = defaults.clone();
+    for sample in profile.samples.iter().filter(|s| s.active()) {
+        if let Some(shape) = &sample.font_shape {
+            scalars.extend(sample.label.chars());
+            groups
+                .entry((sample.label.clone(), shape.clone()))
+                .or_default()
+                .push(sample.id.clone());
+        }
+    }
+    anyhow::ensure!(
+        scalars.len() <= 4096 && groups.len() <= 512,
+        Fault::new(
+            "NG620",
+            "Font exceeds 4,096 mapped scalars or 512 confirmed shaping rules; split the profile"
+        )
+    );
+    let mappings = scalars
+        .iter()
+        .enumerate()
+        .map(|(i, ch)| (*ch, i as u16 + 2))
+        .collect();
+    let mut shapes = vec![];
+    for ((label, shape), mut samples) in groups {
+        samples.sort();
+        samples.truncate(32);
+        let feature = match shape {
+            writers::FontShape::Ligature => "liga",
+            writers::FontShape::Cluster => "ccmp",
+            writers::FontShape::Alternate { .. } => "salt",
+        };
+        shapes.push(ShapeCoverage {
+            label,
+            shape,
+            glyph_id: (scalars.len() + shapes.len() + 2) as u16,
+            feature: feature.into(),
+            sample_ids: samples,
+        });
+    }
+    Ok(FontPlan { mappings, coverage: FontCoverage { schema: 1,
+        default_glyphs: defaults.iter().collect(),
+        component_placeholders: scalars.difference(&defaults).collect(), shapes,
+        note: "Only confirmed default glyphs and explicitly labelled complete shapes contain handwriting. Unconfirmed printable sequence components render visible placeholder boxes when no substitution applies; Unicode joining/variation controls follow the shaping engine. Ligatures use liga; complete clusters use ccmp; alternates use salt=index or ss01–ss16. Contextual joining, mark positioning and missing forms are never inferred. Complex-script visual acceptance remains separate.".into() } })
+}
+pub fn coverage(root: &Path, id: &str) -> Result<FontCoverage> {
+    Ok(plan(&writers::read(root, id)?)?.coverage)
+}
+fn fallback_glyph() -> Glyph {
+    Glyph {
+        contours: vec![
+            vec![(50, 0), (50, 700), (450, 700), (450, 0)],
+            vec![(100, 50), (400, 50), (400, 650), (100, 650)],
+        ],
+        advance: 500,
+    }
+}
+fn push_glyph(glyphs: &mut Vec<Glyph>, glyph: Glyph, points: &mut usize) -> Result<()> {
+    *points += glyph.contours.iter().map(Vec::len).sum::<usize>();
+    anyhow::ensure!(
+        *points <= 2_000_000,
+        Fault::new(
+            "NG620",
+            "Font exceeds its two-million outline-point budget; split the profile or simplify the source ink"
+        )
+    );
+    glyphs.push(glyph);
+    Ok(())
+}
+fn offset(v: &mut [u8], at: usize, value: usize) -> Result<()> {
+    let value = u16::try_from(value)
+        .map_err(|_| Fault::new("NG620", "OpenType layout offset exceeds its bounded table"))?;
+    v[at..at + 2].copy_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+fn coverage_table(ids: &[u16]) -> Vec<u8> {
+    let mut out = vec![];
+    u16b(&mut out, 1);
+    u16b(&mut out, ids.len() as u16);
+    for id in ids {
+        u16b(&mut out, *id);
+    }
+    out
+}
+fn lookup(kind: u16, subtable: Vec<u8>) -> Vec<u8> {
+    let mut out = vec![];
+    for n in [kind, 0, 1, 8] {
+        u16b(&mut out, n);
+    }
+    out.extend(subtable);
+    out
+}
+fn ligature_lookup(mut rules: Vec<(Vec<u16>, u16)>) -> Result<Vec<u8>> {
+    rules.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
+    let mut groups = BTreeMap::<u16, Vec<(Vec<u16>, u16)>>::new();
+    for (input, output) in rules {
+        groups.entry(input[0]).or_default().push((input, output));
+    }
+    let mut out = vec![];
+    for n in [1, 0, groups.len() as u16] {
+        u16b(&mut out, n);
+    }
+    out.resize(6 + groups.len() * 2, 0);
+    for (i, entries) in groups.values().enumerate() {
+        let start = out.len();
+        offset(&mut out, 6 + i * 2, start)?;
+        u16b(&mut out, entries.len() as u16);
+        out.resize(out.len() + entries.len() * 2, 0);
+        for (j, (input, glyph)) in entries.iter().enumerate() {
+            let relative = out.len() - start;
+            offset(&mut out, start + 2 + j * 2, relative)?;
+            u16b(&mut out, *glyph);
+            u16b(&mut out, input.len() as u16);
+            for component in &input[1..] {
+                u16b(&mut out, *component);
+            }
+        }
+    }
+    let at = out.len();
+    offset(&mut out, 2, at)?;
+    out.extend(coverage_table(&groups.keys().copied().collect::<Vec<_>>()));
+    Ok(lookup(4, out))
+}
+fn alternate_lookup(groups: &BTreeMap<u16, BTreeMap<u8, u16>>) -> Result<Vec<u8>> {
+    let mut out = vec![];
+    for n in [1, 0, groups.len() as u16] {
+        u16b(&mut out, n);
+    }
+    out.resize(6 + groups.len() * 2, 0);
+    for (i, (base, entries)) in groups.iter().enumerate() {
+        let at = out.len();
+        offset(&mut out, 6 + i * 2, at)?;
+        let last = *entries.keys().last().expect("nonempty alternate set");
+        u16b(&mut out, u16::from(last));
+        for index in 1..=last {
+            u16b(&mut out, *entries.get(&index).unwrap_or(base));
+        }
+    }
+    let at = out.len();
+    offset(&mut out, 2, at)?;
+    out.extend(coverage_table(&groups.keys().copied().collect::<Vec<_>>()));
+    Ok(lookup(3, out))
+}
+fn single_lookup(groups: &BTreeMap<u16, u16>) -> Result<Vec<u8>> {
+    let mut out = vec![];
+    for n in [2, 0, groups.len() as u16] {
+        u16b(&mut out, n);
+    }
+    for glyph in groups.values() {
+        u16b(&mut out, *glyph);
+    }
+    let at = out.len();
+    offset(&mut out, 2, at)?;
+    out.extend(coverage_table(&groups.keys().copied().collect::<Vec<_>>()));
+    Ok(lookup(1, out))
+}
+fn gsub(plan: &FontPlan) -> Result<Option<Vec<u8>>> {
+    if plan.coverage.shapes.is_empty() {
+        return Ok(None);
+    }
+    let mut ligatures = vec![];
+    let mut clusters = vec![];
+    let mut alternates = BTreeMap::<u16, BTreeMap<u8, u16>>::new();
+    for rule in &plan.coverage.shapes {
+        let input = rule
+            .label
+            .chars()
+            .map(|ch| plan.mappings[&ch])
+            .collect::<Vec<_>>();
+        match rule.shape {
+            writers::FontShape::Ligature => ligatures.push((input, rule.glyph_id)),
+            writers::FontShape::Cluster => clusters.push((input, rule.glyph_id)),
+            writers::FontShape::Alternate { index } => {
+                alternates
+                    .entry(input[0])
+                    .or_default()
+                    .insert(index, rule.glyph_id);
+            }
+        }
+    }
+    let mut lookups = vec![];
+    let mut features = BTreeMap::<[u8; 4], u16>::new();
+    for (tag, rules) in [(*b"ccmp", clusters), (*b"liga", ligatures)] {
+        if !rules.is_empty() {
+            features.insert(tag, lookups.len() as u16);
+            lookups.push(ligature_lookup(rules)?);
+        }
+    }
+    if !alternates.is_empty() {
+        features.insert(*b"salt", lookups.len() as u16);
+        lookups.push(alternate_lookup(&alternates)?);
+        for index in 1..=16 {
+            let singles = alternates
+                .iter()
+                .filter_map(|(base, alts)| alts.get(&index).map(|alt| (*base, *alt)))
+                .collect::<BTreeMap<_, _>>();
+            if !singles.is_empty() {
+                let tag = format!("ss{index:02}")
+                    .as_bytes()
+                    .try_into()
+                    .expect("four-byte stylistic tag");
+                features.insert(tag, lookups.len() as u16);
+                lookups.push(single_lookup(&singles)?);
+            }
+        }
+    }
+    let scripts = [
+        *b"DFLT", *b"arab", *b"cyrl", *b"deva", *b"grek", *b"hebr", *b"latn", *b"sinh", *b"tam2",
+        *b"taml",
+    ];
+    let mut script_list = vec![];
+    u16b(&mut script_list, scripts.len() as u16);
+    script_list.resize(2 + scripts.len() * 6, 0);
+    for (i, tag) in scripts.iter().enumerate() {
+        script_list[2 + i * 6..6 + i * 6].copy_from_slice(tag);
+        let at = script_list.len();
+        offset(&mut script_list, 6 + i * 6, at)?;
+        for n in [4, 0, 0, 0xffff, features.len() as u16] {
+            u16b(&mut script_list, n);
+        }
+        for n in 0..features.len() {
+            u16b(&mut script_list, n as u16);
+        }
+    }
+    let mut feature_list = vec![];
+    u16b(&mut feature_list, features.len() as u16);
+    feature_list.resize(2 + features.len() * 6, 0);
+    for (i, (tag, lookup)) in features.iter().enumerate() {
+        feature_list[2 + i * 6..6 + i * 6].copy_from_slice(tag);
+        let at = feature_list.len();
+        offset(&mut feature_list, 6 + i * 6, at)?;
+        for n in [0, 1, *lookup] {
+            u16b(&mut feature_list, n);
+        }
+    }
+    let mut lookup_list = vec![];
+    u16b(&mut lookup_list, lookups.len() as u16);
+    lookup_list.resize(2 + lookups.len() * 2, 0);
+    for (i, data) in lookups.into_iter().enumerate() {
+        let at = lookup_list.len();
+        offset(&mut lookup_list, 2 + i * 2, at)?;
+        lookup_list.extend(data);
+    }
+    let mut out = vec![0; 10];
+    out[1] = 1;
+    let at = out.len();
+    offset(&mut out, 4, at)?;
+    out.extend(script_list);
+    let at = out.len();
+    offset(&mut out, 6, at)?;
+    out.extend(feature_list);
+    let at = out.len();
+    offset(&mut out, 8, at)?;
+    out.extend(lookup_list);
+    Ok(Some(out))
 }
 fn u16b(v: &mut Vec<u8>, n: u16) {
     v.extend(n.to_be_bytes());
@@ -256,22 +539,16 @@ fn name_table(family: &str) -> Vec<u8> {
     v.extend(strings);
     v
 }
-fn ttf(glyphs: &[(char, Glyph)], family: &str) -> Vec<u8> {
+fn ttf(glyphs: &[Glyph], plan: &FontPlan, family: &str) -> Result<Vec<u8>> {
     let mut tables: BTreeMap<[u8; 4], Vec<u8>> = BTreeMap::new();
-    let fallback = Glyph {
-        contours: vec![
-            vec![(50, 0), (50, 700), (450, 700), (450, 0)],
-            vec![(100, 50), (400, 50), (400, 650), (100, 650)],
-        ],
-        advance: 500,
-    };
+    let fallback = fallback_glyph();
     let blank = Glyph {
         contours: vec![],
         advance: 300,
     };
     let all = std::iter::once(&fallback)
         .chain(std::iter::once(&blank))
-        .chain(glyphs.iter().map(|(_, g)| g))
+        .chain(glyphs.iter())
         .collect::<Vec<_>>();
     let mut glyf = vec![];
     let mut loca = vec![];
@@ -340,10 +617,10 @@ fn ttf(glyphs: &[(char, Glyph)], family: &str) -> Vec<u8> {
     tables.insert(*b"maxp", maxp);
     let mut mappings = vec![(32u16, 1u16)];
     mappings.extend(
-        glyphs
+        plan.mappings
             .iter()
-            .enumerate()
-            .map(|(i, (c, _))| (*c as u16, i as u16 + 2)),
+            .filter(|(ch, _)| **ch < '\u{ffff}')
+            .map(|(ch, id)| (*ch as u16, *id)),
     );
     mappings.push((0xffff, 0));
     let n = mappings.len() as u16;
@@ -373,13 +650,34 @@ fn ttf(glyphs: &[(char, Glyph)], family: &str) -> Vec<u8> {
     for _ in &mappings {
         u16b(&mut sub, 0);
     }
-    let mut cmap = vec![];
-    for n in [0, 1, 3, 1] {
-        u16b(&mut cmap, n);
+    let mut full_mappings = BTreeMap::from([(' ', 1u16)]);
+    full_mappings.extend(plan.mappings.iter().map(|(ch, id)| (*ch, *id)));
+    let mut full = vec![];
+    u16b(&mut full, 12);
+    u16b(&mut full, 0);
+    u32b(&mut full, (16 + full_mappings.len() * 12) as u32);
+    u32b(&mut full, 0);
+    u32b(&mut full, full_mappings.len() as u32);
+    for (ch, id) in &full_mappings {
+        u32b(&mut full, *ch as u32);
+        u32b(&mut full, *ch as u32);
+        u32b(&mut full, u32::from(*id));
     }
-    u32b(&mut cmap, 12);
+    let mut cmap = vec![];
+    u16b(&mut cmap, 0);
+    u16b(&mut cmap, 4);
+    for (platform, encoding, is_full) in [(0, 3, false), (0, 4, true), (3, 1, false), (3, 10, true)]
+    {
+        u16b(&mut cmap, platform);
+        u16b(&mut cmap, encoding);
+        u32b(&mut cmap, if is_full { 36 + sub.len() as u32 } else { 36 });
+    }
     cmap.extend(sub);
+    cmap.extend(full);
     tables.insert(*b"cmap", cmap);
+    if let Some(gsub) = gsub(plan)? {
+        tables.insert(*b"GSUB", gsub);
+    }
     tables.insert(*b"name", name_table(family));
     let mut post = vec![];
     u32b(&mut post, 0x30000);
@@ -398,14 +696,34 @@ fn ttf(glyphs: &[(char, Glyph)], family: &str) -> Vec<u8> {
         i16b(&mut os, n);
     }
     os.extend([0; 10]);
-    u32b(&mut os, 1);
-    for _ in 0..3 {
-        u32b(&mut os, 0);
+    // Reuse the locked parser's complete OpenType range map instead of claiming
+    // Basic Latin only for a Sinhala/Tamil/Unicode font. cmap remains authoritative.
+    let mut unicode_ranges = 0u128;
+    for bit in 0..128 {
+        let mask = 1u128 << bit;
+        if full_mappings
+            .keys()
+            .any(|ch| ttf_parser::os2::UnicodeRanges(mask).contains_char(*ch))
+        {
+            unicode_ranges |= mask;
+        }
+    }
+    if full_mappings.keys().any(|ch| *ch as u32 > 0xffff) {
+        unicode_ranges |= 1 << 57;
+    }
+    for word in 0..4 {
+        u32b(&mut os, (unicode_ranges >> (word * 32)) as u32);
     }
     os.extend(b"NTGN");
     u16b(&mut os, 0x40);
     u16b(&mut os, 32);
-    u16b(&mut os, glyphs.last().map_or(32, |(c, _)| *c as u16));
+    u16b(
+        &mut os,
+        full_mappings
+            .keys()
+            .last()
+            .map_or(32, |ch| (*ch as u32).min(0xffff) as u16),
+    );
     for n in [850, -250, 100] {
         i16b(&mut os, n);
     }
@@ -447,7 +765,7 @@ fn ttf(glyphs: &[(char, Glyph)], family: &str) -> Vec<u8> {
     }
     let adjustment = 0xb1b0afbau32.wrapping_sub(checksum(&output));
     output[head_offset + 8..head_offset + 12].copy_from_slice(&adjustment.to_be_bytes());
-    output
+    Ok(output)
 }
 pub fn export(root: &Path, id: &str, output: &Path, o: &FontOptions, c: &Control) -> Result<usize> {
     anyhow::ensure!(
@@ -464,29 +782,64 @@ pub fn export(root: &Path, id: &str, output: &Path, o: &FontOptions, c: &Control
     );
     let mut p = writers::read(root, id)?;
     p.samples.retain(|sample| sample.active());
-    let chars = p
-        .samples
-        .iter()
-        .filter(|s| s.glyph && s.active())
-        .filter_map(|s| s.label.chars().next())
-        .filter(char::is_ascii_graphic)
-        .collect::<BTreeSet<_>>();
+    let plan = plan(&p)?;
     anyhow::ensure!(
-        !chars.is_empty(),
+        !plan.mappings.is_empty(),
         Fault::new(
             "NG620",
-            "Label individual letters in Review → Teach handwriting before exporting a font"
+            "Confirm individual glyphs or explicit font shapes before exporting a font"
         )
     );
     let mut glyphs = vec![];
+    let mut points = 0;
     let mut images = vec![];
-    for ch in chars {
+    for (ch, gid) in &plan.mappings {
         c.check()?;
-        let im = writers::average_glyph(root, &p, ch)?;
-        glyphs.push((ch, glyph(&im, ch, o)?));
-        images.push((ch, im));
+        if plan.coverage.default_glyphs.contains(*ch) {
+            let im = writers::average_glyph(root, &p, *ch)?;
+            push_glyph(&mut glyphs, glyph(&im, *ch, o)?, &mut points)?;
+            images.push((format!("U{:04X}", *ch as u32), *gid, im));
+        } else {
+            push_glyph(&mut glyphs, fallback_glyph(), &mut points)?;
+        }
     }
-    let bytes = ttf(&glyphs, &o.family);
+    for rule in &plan.coverage.shapes {
+        c.check()?;
+        let width = if matches!(rule.shape, writers::FontShape::Alternate { .. }) {
+            64
+        } else {
+            320
+        };
+        let mut sums = vec![0u32; width * 80];
+        for id in &rule.sample_ids {
+            let image = writers::open_image(&root.join(&p.id).join(format!("{id}.png")), 400_000)?
+                .to_luma8();
+            anyhow::ensure!(
+                image.dimensions() == (width as u32, 80),
+                Fault::new("NG620", "Invalid stored font shape dimensions")
+            );
+            for (i, pixel) in image.pixels().enumerate() {
+                sums[i] += 255 - u32::from(pixel[0]);
+            }
+        }
+        let image = GrayImage::from_fn(width as u32, 80, |x, y| {
+            Luma([
+                (255 - sums[y as usize * width + x as usize] / rule.sample_ids.len() as u32) as u8,
+            ])
+        });
+        push_glyph(
+            &mut glyphs,
+            glyph(
+                &image,
+                rule.label.chars().next().expect("validated label"),
+                o,
+            )?,
+            &mut points,
+        )?;
+        images.push((format!("glyph-{}", rule.glyph_id), rule.glyph_id, image));
+    }
+    let bytes = ttf(&glyphs, &plan, &o.family)?;
+    let count = plan.coverage.default_glyphs.chars().count() + plan.coverage.shapes.len();
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -501,24 +854,32 @@ pub fn export(root: &Path, id: &str, output: &Path, o: &FontOptions, c: &Control
         zip.write_all(&bytes)?;
         zip.start_file("profile.json", options)?;
         zip.write_all(&serde_json::to_vec_pretty(&p)?)?;
+        zip.start_file("font-coverage.json", options)?;
+        zip.write_all(&serde_json::to_vec_pretty(&plan.coverage)?)?;
         let missing = ('A'..='Z')
             .chain('a'..='z')
             .chain('0'..='9')
-            .filter(|c| !glyphs.iter().any(|(g, _)| c == g))
+            .filter(|c| !plan.coverage.default_glyphs.contains(*c))
             .collect::<String>();
         zip.start_file("README.txt", options)?;
         write!(
             zip,
-            "{} — NoteGen handwriting font\n{} confirmed glyphs; averaged up to 32 examples each.\nMissing letters/numbers: {}\nOnly explicitly labelled glyphs are mapped. Install Handwriting.ttf in Windows Settings > Fonts.\nThis is a personal print-style outline font; cursive joining and kerning are not inferred.\nYour profile and source examples are private. Share this pack only if you intend to share your handwriting.\n",
-            o.family,
-            glyphs.len(),
-            missing
+            "{} — NoteGen handwriting font\n{} confirmed glyphs/shapes; averaged up to 32 examples of each explicitly named form.\nMissing standalone letters/numbers: {}\nInstall Handwriting.ttf in Windows Settings > Fonts. See font-coverage.json for exact Unicode coverage, visible component placeholders, confirmed liga/ccmp rules and salt/ss01–ss16 alternatives.\nContextual joining, mark positioning, missing forms and kerning are not inferred. Complex-script visual acceptance is separate.\nYour profile and source examples are private. Share this pack only if you intend to share your handwriting.\n",
+            o.family, count, missing
         )?;
         let mut preview =
             GrayImage::from_pixel(640, (images.len() as u32).div_ceil(10) * 96, Luma([245]));
-        for (i, (ch, im)) in images.iter().enumerate() {
-            image::imageops::replace(&mut preview, im, (i % 10 * 64) as i64, (i / 10 * 96) as i64);
-            let g = &glyphs[i].1;
+        for (i, (name, gid, im)) in images.iter().enumerate() {
+            let thumbnail = DynamicImage::ImageLuma8(im.clone())
+                .thumbnail(64, 80)
+                .to_luma8();
+            image::imageops::replace(
+                &mut preview,
+                &thumbnail,
+                (i % 10 * 64) as i64,
+                (i / 10 * 96) as i64,
+            );
+            let g = &glyphs[usize::from(*gid) - 2];
             let path = g
                 .contours
                 .iter()
@@ -533,7 +894,7 @@ pub fn export(root: &Path, id: &str, output: &Path, o: &FontOptions, c: &Control
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            zip.start_file(format!("svg/U{:04X}.svg", *ch as u32), options)?;
+            zip.start_file(format!("svg/{name}.svg"), options)?;
             write!(
                 zip,
                 "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} 1100\"><path d=\"{}\"/></svg>",
@@ -556,5 +917,5 @@ pub fn export(root: &Path, id: &str, output: &Path, o: &FontOptions, c: &Control
     }
     temp.as_file().sync_all()?;
     temp.persist_noclobber(output).map_err(|e| e.error)?;
-    Ok(glyphs.len())
+    Ok(count)
 }

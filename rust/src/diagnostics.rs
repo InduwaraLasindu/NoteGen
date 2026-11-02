@@ -760,7 +760,7 @@ impl Drop for CapturedRepair {
         let _ = self.restore();
     }
 }
-fn publish_repair(
+pub(crate) fn publish_repair(
     staged: tempfile::TempPath,
     target: &Path,
     expected: &RepairFile,
@@ -830,10 +830,7 @@ pub fn repair_selected(
         let staging = tempfile::Builder::new()
             .prefix(".notegen-repair-")
             .tempdir_in(parent)?;
-        let staged = tempfile::Builder::new()
-            .prefix("verified-")
-            .tempfile_in(staging.path())?
-            .into_temp_path();
+        let staged = tempfile::TempPath::try_from_path(staging.path().join("verified-asset"))?;
         models::download(
             &asset.download.url,
             &staged,

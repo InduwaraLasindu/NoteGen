@@ -313,8 +313,142 @@ async fn download_async(
     c: &Control,
     log: &Activity,
 ) -> Result<()> {
-    c.check()?;
-    if path.is_file() && path.metadata()?.len() == a.bytes && hash_file(path, c)? == a.sha256 {
+    c.check_cancelled()?;
+    let mut transfer = c
+        .downloads
+        .as_ref()
+        .map(|manager| manager.begin(url, path, a))
+        .transpose()?;
+    let result = download_body_async(client, url, path, a, c, log, transfer.as_ref()).await;
+    if let Some(transfer) = &mut transfer {
+        transfer.finish(&result)?;
+    }
+    result
+}
+fn download_ready(c: &Control, transfer: Option<&crate::downloads::Transfer>) -> Result<bool> {
+    c.check_cancelled()?;
+    if c.paused.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(transfer) = transfer {
+            transfer.suspend()?;
+        }
+        return Ok(false);
+    }
+    Ok(transfer
+        .map(|transfer| transfer.gate())
+        .transpose()?
+        .is_none_or(|gate| gate == crate::downloads::Gate::Ready))
+}
+/// A short receive-rate delay can retain the current connection. Every other
+/// wait returns immediately so the response is dropped before waiting/reopening.
+async fn download_receive_ready(
+    c: &Control,
+    transfer: Option<&crate::downloads::Transfer>,
+) -> Result<bool> {
+    let started = std::time::Instant::now();
+    loop {
+        download_cancelled(c, transfer)?;
+        if c.paused.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(transfer) = transfer {
+                transfer.suspend()?;
+            }
+            return Ok(false);
+        }
+        let Some(transfer) = transfer else {
+            return Ok(true);
+        };
+        match transfer.gate()? {
+            crate::downloads::Gate::Ready => return Ok(true),
+            crate::downloads::Gate::Wait(crate::downloads::Status::WaitingRate) => {
+                let wait = transfer.rate_wait_ms()?;
+                if started
+                    .elapsed()
+                    .as_millis()
+                    .saturating_add(u128::from(wait))
+                    > 250
+                {
+                    return Ok(false);
+                }
+                tokio::time::sleep(Duration::from_millis(wait.clamp(1, 20))).await;
+            }
+            crate::downloads::Gate::Wait(_) => return Ok(false),
+        }
+    }
+}
+fn download_cancelled(c: &Control, transfer: Option<&crate::downloads::Transfer>) -> Result<()> {
+    c.check_cancelled()?;
+    if let Some(transfer) = transfer {
+        transfer.check_cancelled()?;
+    }
+    Ok(())
+}
+async fn download_unpaused(
+    c: &Control,
+    transfer: Option<&crate::downloads::Transfer>,
+) -> Result<()> {
+    loop {
+        download_cancelled(c, transfer)?;
+        if !c.paused.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        if let Some(transfer) = transfer {
+            transfer.suspend()?;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+async fn download_hash(
+    path: &Path,
+    expected_bytes: u64,
+    c: &Control,
+    transfer: Option<&crate::downloads::Transfer>,
+) -> Result<String> {
+    use sha2::Digest;
+    let mut file = fs::File::open(path)?;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut read = 0u64;
+    loop {
+        download_unpaused(c, transfer).await?;
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        read = read
+            .checked_add(count as u64)
+            .ok_or_else(|| Fault::new("NG650", "Download verification size overflow"))?;
+        anyhow::ensure!(
+            read <= expected_bytes,
+            Fault::new("NG650", "Asset grew beyond pinned size during verification")
+        );
+        digest.update(&buffer[..count]);
+    }
+    download_cancelled(c, transfer)?;
+    Ok(hex::encode(digest.finalize()))
+}
+fn publish_download(part: &Path, path: &Path) -> Result<()> {
+    crate::watch::no_links(path)?;
+    let mut retained = tempfile::TempPath::try_from_path(part.to_path_buf())?;
+    // A collision or failed publish must retain the resumable verified .part.
+    retained.disable_cleanup(true);
+    retained.persist_noclobber(path).map_err(|e| e.error)?;
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+async fn download_body_async(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    a: &Asset,
+    c: &Control,
+    log: &Activity,
+    transfer: Option<&crate::downloads::Transfer>,
+) -> Result<()> {
+    download_unpaused(c, transfer).await?;
+    crate::watch::no_links(path)?;
+    if path.is_file()
+        && path.metadata()?.len() == a.bytes
+        && download_hash(path, a.bytes, c, transfer).await? == a.sha256
+    {
         log.emit(
             "download",
             format!("{} · verified cached file", a.file),
@@ -325,132 +459,199 @@ async fn download_async(
         );
         return Ok(());
     }
+    anyhow::ensure!(
+        !path.exists(),
+        Fault::new(
+            "NG650",
+            "Existing asset differs from pinned bytes; preserve it and choose a new staging destination"
+        )
+    );
     let part = path.with_file_name(format!(
         "{}.part",
         path.file_name().unwrap().to_string_lossy()
     ));
     fs::create_dir_all(path.parent().unwrap())?;
-    let offset = part.metadata().map_or(0, |m| m.len());
-    if offset > a.bytes {
-        fs::remove_file(&part)?;
-    }
-    let offset = part.metadata().map_or(0, |m| m.len());
-    if offset == a.bytes {
-        if hash_file(&part, c)? == a.sha256 {
-            if a.file.ends_with(".gguf") {
-                crate::runtime::verify_gguf(&part)?;
+    crate::watch::no_links(&part)?;
+    'reconnect: loop {
+        while !download_ready(c, transfer)? {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let offset = part.metadata().map_or(0, |m| m.len());
+        if offset > a.bytes {
+            fs::remove_file(&part)?;
+        }
+        let offset = part.metadata().map_or(0, |m| m.len());
+        if offset == a.bytes {
+            if download_hash(&part, a.bytes, c, transfer).await? == a.sha256 {
+                if a.file.ends_with(".gguf") {
+                    crate::runtime::verify_gguf(&part)?;
+                }
+                download_cancelled(c, transfer)?;
+                publish_download(&part, path)?;
+                return Ok(());
             }
-            fs::rename(part, path)?;
-            return Ok(());
+            fs::remove_file(&part)?;
         }
-        fs::remove_file(&part)?;
-    }
-    let offset = part.metadata().map_or(0, |m| m.len());
-    c.check()?;
-    let mut request = client.get(url);
-    if crate::credentials::publisher_url(url) {
-        request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
-        if let Some(token) = publisher_update_token(url)? {
-            request = request.bearer_auth(token.expose_secret());
+        let offset = part.metadata().map_or(0, |m| m.len());
+        c.check_cancelled()?;
+        let mut request = client.get(url);
+        if crate::credentials::publisher_url(url) {
+            request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
+            if let Some(token) = publisher_update_token(url)? {
+                request = request.bearer_auth(token.expose_secret());
+            }
         }
-    }
-    if offset > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-    }
-    let sending = request.send();
-    tokio::pin!(sending);
-    let mut response = loop {
-        tokio::select! {r=&mut sending=>break r?.error_for_status()?,_=tokio::time::sleep(Duration::from_millis(100))=>c.check()?}
-    };
-    let append = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-    if append {
-        anyhow::ensure!(
-            content_range(
-                response
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or(""),
-                offset,
-                a.bytes
-            ),
-            Fault::new("NG650", "Invalid resumed model range")
-        );
-    }
-    anyhow::ensure!(
-        append || response.status() == reqwest::StatusCode::OK,
-        Fault::new("NG650", "Unexpected model download status")
-    );
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(!append)
-        .append(append)
-        .open(&part)?;
-    let mut done = if append { offset } else { 0 };
-    let mut last = std::time::Instant::now() - Duration::from_secs(2);
-    loop {
-        c.check()?;
-        let receiving = response.chunk();
-        tokio::pin!(receiving);
-        let chunk = loop {
-            tokio::select! {r=&mut receiving=>break r?,_=tokio::time::sleep(Duration::from_millis(100))=>c.check()?}
+        if offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        let sending = request.send();
+        tokio::pin!(sending);
+        let mut response = loop {
+            tokio::select! {r=&mut sending=>break r?.error_for_status()?,_=tokio::time::sleep(Duration::from_millis(100))=>{if !download_ready(c,transfer)? {continue 'reconnect;}}}
         };
-        let Some(chunk) = chunk else {
-            break;
-        };
-        done += chunk.len() as u64;
-        anyhow::ensure!(
-            done <= a.bytes,
-            Fault::new("NG650", "Downloaded model exceeds publisher size")
-        );
-        file.write_all(&chunk)?;
-        if last.elapsed() >= Duration::from_millis(250) {
-            log.emit(
-                "download",
-                format!(
-                    "{} · {:.1} / {:.1} MiB",
-                    a.file,
-                    done as f64 / 1048576.,
-                    a.bytes as f64 / 1048576.
+        let append = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        if append {
+            anyhow::ensure!(
+                content_range(
+                    response
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or(""),
+                    offset,
+                    a.bytes
                 ),
-                0,
-                done as usize,
-                a.bytes as usize,
-                "",
+                Fault::new("NG650", "Invalid resumed model range")
             );
-            last = std::time::Instant::now();
         }
+        anyhow::ensure!(
+            append || response.status() == reqwest::StatusCode::OK,
+            Fault::new("NG650", "Unexpected model download status")
+        );
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(!append)
+            .append(append)
+            .open(&part)?;
+        let mut done = if append { offset } else { 0 };
+        let mut last = std::time::Instant::now() - Duration::from_secs(2);
+        loop {
+            if !download_receive_ready(c, transfer).await? {
+                file.sync_all()?;
+                continue 'reconnect;
+            }
+            let receiving = response.chunk();
+            tokio::pin!(receiving);
+            let chunk = loop {
+                tokio::select! {r=&mut receiving=>break r?,_=tokio::time::sleep(Duration::from_millis(100))=>{if !download_receive_ready(c,transfer).await? {file.sync_all()?;continue 'reconnect;}}}
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            anyhow::ensure!(
+                chunk.len() <= crate::downloads::MAX_RECEIVE_CHUNK,
+                Fault::new("NG650", "Network chunk exceeds bounded download size")
+            );
+            done = done
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| Fault::new("NG650", "Download size overflow"))?;
+            anyhow::ensure!(
+                done <= a.bytes,
+                Fault::new("NG650", "Downloaded model exceeds publisher size")
+            );
+            file.write_all(&chunk)?;
+            if let Some(transfer) = transfer {
+                transfer.received(chunk.len(), done)?;
+            }
+            if last.elapsed() >= Duration::from_millis(250) {
+                log.emit(
+                    "download",
+                    format!(
+                        "{} · {:.1} / {:.1} MiB",
+                        a.file,
+                        done as f64 / 1048576.,
+                        a.bytes as f64 / 1048576.
+                    ),
+                    0,
+                    done as usize,
+                    a.bytes as usize,
+                    "",
+                );
+                last = std::time::Instant::now();
+            }
+            if done == a.bytes {
+                break;
+            }
+        }
+        drop(response);
+        log.emit(
+            "download",
+            format!("{} · download complete; verifying SHA256", a.file),
+            0,
+            done as usize,
+            a.bytes as usize,
+            "",
+        );
+        file.sync_all()?;
+        drop(file);
+        anyhow::ensure!(
+            done == a.bytes,
+            Fault::new(
+                "NG650",
+                "Incomplete model download; the partial file can be resumed"
+            )
+        );
+        if download_hash(&part, a.bytes, c, transfer).await? != a.sha256 {
+            fs::remove_file(part)?;
+            return Err(Fault::new(
+                "NG650",
+                "Model checksum mismatch; active reader was preserved",
+            )
+            .into());
+        }
+        if a.file.ends_with(".gguf") {
+            crate::runtime::verify_gguf(&part)?;
+        }
+        download_cancelled(c, transfer)?;
+        publish_download(&part, path)?;
+        return Ok(());
     }
-    log.emit(
-        "download",
-        format!("{} · download complete; verifying SHA256", a.file),
-        0,
-        done as usize,
-        a.bytes as usize,
-        "",
-    );
-    file.sync_all()?;
-    drop(file);
+}
+pub(crate) fn validate_download_url(url: &str) -> Result<()> {
+    let u = reqwest::Url::parse(url)?;
+    let language = url
+        .strip_prefix("https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/")
+        .is_some_and(|path| {
+            path.split_once('/').is_some_and(|(revision, file)| {
+                revision == "87416418657359cb625c412a48b6e1d6d41c29bd"
+                    && [
+                        "eng.traineddata",
+                        "sin.traineddata",
+                        "tam.traineddata",
+                        "ara.traineddata",
+                        "heb.traineddata",
+                        "osd.traineddata",
+                        "LICENSE",
+                    ]
+                    .contains(&file)
+            })
+        });
     anyhow::ensure!(
-        done == a.bytes,
-        Fault::new(
-            "NG650",
-            "Incomplete model download; the partial file can be resumed"
-        )
+        u.scheme() == "https"
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.query().is_none()
+            && u.fragment().is_none()
+            && (matches!(u.host_str(), Some("huggingface.co" | "github.com"))
+                || url
+                    .strip_prefix(
+                        "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/"
+                    )
+                    .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+                || language),
+        Fault::new("NG650", "Invalid stable publisher download URL")
     );
-    if hash_file(&part, c)? != a.sha256 {
-        fs::remove_file(part)?;
-        return Err(Fault::new(
-            "NG650",
-            "Model checksum mismatch; active reader was preserved",
-        )
-        .into());
-    }
-    if a.file.ends_with(".gguf") {
-        crate::runtime::verify_gguf(&part)?;
-    }
-    fs::rename(part, path)?;
     Ok(())
 }
 pub(crate) fn download(
@@ -466,7 +667,11 @@ pub(crate) fn download(
     rt.block_on(async {
         let client = reqwest::Client::builder()
             .https_only(true)
-            .user_agent(concat!("NoteGen/",env!("CARGO_PKG_VERSION")," asset downloader"))
+            .user_agent(concat!(
+                "NoteGen/",
+                env!("CARGO_PKG_VERSION"),
+                " asset downloader"
+            ))
             .read_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(7200))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -478,6 +683,7 @@ pub(crate) fn download(
                         || h == "github.com"
                         || h == "release-assets.githubusercontent.com"
                         || h == "objects.githubusercontent.com"
+                        || h == "raw.githubusercontent.com"
                         || h.ends_with(".huggingface.co")
                         || h.ends_with(".hf.co")
                         || h.ends_with(".amazonaws.com"))
@@ -488,12 +694,7 @@ pub(crate) fn download(
                 }
             }))
             .build()?;
-        let u = reqwest::Url::parse(url)?;
-        anyhow::ensure!(
-            u.scheme() == "https" && (matches!(u.host_str(), Some("huggingface.co" | "github.com"))
-                || url.strip_prefix("https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/").is_some_and(|id| !id.is_empty() && id.bytes().all(|b|b.is_ascii_digit()))),
-            Fault::new("NG650", "Invalid publisher download URL")
-        );
+        validate_download_url(url)?;
         download_async(&client, url, path, a, c, log).await
     })
 }
@@ -841,6 +1042,363 @@ mod tests {
             .is_err()
         );
         assert!(!path.exists());
+    }
+    struct ManagedTestEnvironment {
+        utc_millis: std::sync::atomic::AtomicI64,
+        started: std::time::Instant,
+    }
+    impl crate::downloads::Environment for ManagedTestEnvironment {
+        fn utc_now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::from_timestamp_millis(
+                self.utc_millis.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .unwrap()
+        }
+        fn monotonic_ms(&self) -> u64 {
+            self.started.elapsed().as_millis() as u64
+        }
+        fn network_cost(&self) -> crate::downloads::NetworkCost {
+            crate::downloads::NetworkCost::Unknown
+        }
+    }
+    fn managed_response_closes_and_resumes(mode: &str) {
+        use crate::downloads::{Manager, Policy, Status, UtcWindow};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicI64, Ordering},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed.gguf");
+        let part = path.with_extension("gguf.part");
+        let bytes = b"GGUFmanaged-resumable-download".to_vec();
+        let asset = Asset {
+            file: "managed.gguf".into(),
+            bytes: bytes.len() as u64,
+            sha256: hex::encode(sha2::Sha256::digest(&bytes)),
+        };
+        let open = chrono::DateTime::parse_from_rfc3339("2026-11-02T10:05:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let closed = chrono::DateTime::parse_from_rfc3339("2026-11-02T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let env = Arc::new(ManagedTestEnvironment {
+            utc_millis: AtomicI64::new(open),
+            started: std::time::Instant::now(),
+        });
+        let manager =
+            Manager::open_with_environment(&dir.path().join("queue"), env.clone()).unwrap();
+        if mode == "window" {
+            manager
+                .set_policy(Policy {
+                    utc_windows: vec![UtcWindow {
+                        weekdays: vec![0],
+                        start_minute: 600,
+                        end_minute: 660,
+                    }],
+                    ..Default::default()
+                })
+                .unwrap();
+        } else if mode == "rate" {
+            manager
+                .set_policy(Policy {
+                    bytes_per_second: 1,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let publisher = "https://huggingface.co/notegen/tests/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/managed.gguf";
+        let mut transfer = manager.begin(publisher, &path, &asset).unwrap();
+        let id = manager.list().unwrap()[0].id.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let mode = mode.to_string();
+        let server_mode = mode.clone();
+        let server_manager = manager.clone();
+        let server_env = env.clone();
+        let server_part = part.clone();
+        let server_bytes = bytes.clone();
+        let server = thread::spawn(move || {
+            fn accept(listener: &TcpListener) -> std::net::TcpStream {
+                let start = std::time::Instant::now();
+                loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => return socket,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                start.elapsed() < Duration::from_secs(8),
+                                "No resumed HTTP request"
+                            );
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+            }
+            fn request(socket: &mut std::net::TcpStream) -> String {
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut raw = vec![];
+                let mut b = [0; 1];
+                while !raw.ends_with(b"\r\n\r\n") {
+                    assert!(raw.len() < 16000);
+                    assert_eq!(socket.read(&mut b).unwrap(), 1);
+                    raw.push(b[0]);
+                }
+                String::from_utf8(raw).unwrap()
+            }
+            let mut socket = accept(&listener);
+            let initial = request(&mut socket);
+            assert!(!initial.to_ascii_lowercase().contains("range:"));
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_bytes.len()
+            )
+            .unwrap();
+            socket.write_all(&server_bytes[..8]).unwrap();
+            socket.flush().unwrap();
+            let start = std::time::Instant::now();
+            while server_part.metadata().map_or(0, |m| m.len()) < 8 {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "Partial bytes not written"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            match server_mode.as_str() {
+                "window" => server_env.utc_millis.store(closed, Ordering::Relaxed),
+                "cancel" => server_manager.cancel(&id).unwrap(),
+                "rate" => {}
+                _ => server_manager.pause(&id).unwrap(),
+            }
+            let mut b = [0; 1];
+            assert_eq!(
+                socket.read(&mut b).unwrap(),
+                0,
+                "Paused/cancelled response must close before waiting"
+            );
+            drop(socket);
+            if server_mode == "cancel" {
+                return;
+            }
+            assert_eq!(server_part.metadata().unwrap().len(), 8);
+            if server_mode == "window" {
+                server_env.utc_millis.store(open, Ordering::Relaxed);
+            } else if server_mode == "rate" {
+                server_manager.set_policy(Policy::default()).unwrap();
+            } else {
+                server_manager.resume(&id).unwrap();
+            }
+            let mut socket = accept(&listener);
+            let resumed = request(&mut socket);
+            assert!(resumed.to_ascii_lowercase().contains("range: bytes=8-"));
+            write!(socket,"HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 8-{}/{}\r\nConnection: close\r\n\r\n",server_bytes.len()-8,server_bytes.len()-1,server_bytes.len()).unwrap();
+            socket.write_all(&server_bytes[8..]).unwrap();
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(download_body_async(
+            &reqwest::Client::builder()
+                .no_proxy()
+                .read_timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            &url,
+            &path,
+            &asset,
+            &Control::default(),
+            &Activity::default(),
+            Some(&transfer),
+        ));
+        transfer.finish(&result).unwrap();
+        drop(transfer);
+        server.join().unwrap();
+        if mode == "cancel" {
+            assert!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<Fault>()
+                    .is_some_and(|f| f.code == "NG900")
+            );
+            assert!(!path.exists());
+            assert_eq!(fs::read(part).unwrap(), bytes[..8]);
+            assert_eq!(manager.list().unwrap()[0].status, Status::Cancelled);
+        } else {
+            result.unwrap();
+            assert_eq!(fs::read(path).unwrap(), bytes);
+            assert!(!part.exists());
+            assert_eq!(manager.list().unwrap()[0].status, Status::Complete);
+        }
+    }
+    #[test]
+    fn manager_pause_closes_response_then_resumes_exact_range() {
+        managed_response_closes_and_resumes("pause");
+    }
+    #[test]
+    fn manager_closed_window_closes_response_then_resumes_exact_range() {
+        managed_response_closes_and_resumes("window");
+    }
+    #[test]
+    fn manager_cancel_closes_response_and_preserves_unpublished_partial() {
+        managed_response_closes_and_resumes("cancel");
+    }
+    #[test]
+    fn manager_long_rate_wait_closes_response_then_resumes_exact_range() {
+        managed_response_closes_and_resumes("rate");
+    }
+    #[test]
+    fn manager_short_rate_waits_reuse_one_http_response_for_multiple_chunks() {
+        use crate::downloads::{Manager, Policy, Status};
+        use std::sync::{Arc, atomic::AtomicI64};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("throttled.gguf");
+        let part = path.with_extension("gguf.part");
+        let bytes = b"GGUF0123456789AB0123456789ABCDEF0123456789ABCDEF".to_vec();
+        let asset = Asset {
+            file: "throttled.gguf".into(),
+            bytes: bytes.len() as u64,
+            sha256: hex::encode(sha2::Sha256::digest(&bytes)),
+        };
+        let env = Arc::new(ManagedTestEnvironment {
+            utc_millis: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
+            started: std::time::Instant::now(),
+        });
+        let manager = Manager::open_with_environment(&dir.path().join("queue"), env).unwrap();
+        manager
+            .set_policy(Policy {
+                bytes_per_second: 1000,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut transfer=manager.begin("https://huggingface.co/notegen/tests/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/throttled.gguf",&path,&asset).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server_bytes = bytes.clone();
+        let server_part = part.clone();
+        let server = thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(start.elapsed() < Duration::from_secs(5));
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = vec![];
+            let mut one = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 16000);
+                assert_eq!(socket.read(&mut one).unwrap(), 1);
+                request.push(one[0]);
+            }
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_bytes.len()
+            )
+            .unwrap();
+            let chunks = server_bytes.chunks(16).collect::<Vec<_>>();
+            let mut total = 0;
+            for (index, chunk) in chunks.iter().enumerate() {
+                socket.write_all(chunk).unwrap();
+                socket.flush().unwrap();
+                total += chunk.len();
+                if index + 1 < chunks.len() {
+                    let start = std::time::Instant::now();
+                    while server_part.metadata().map_or(0, |m| m.len()) < total as u64 {
+                        assert!(start.elapsed() < Duration::from_secs(3));
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    // The body is deliberately incomplete: no bytes from the
+                    // client are expected. EOF would prove needless reconnect.
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(40)))
+                        .unwrap();
+                    let error = socket
+                        .peek(&mut one)
+                        .expect_err("Short throttling must keep the existing response open");
+                    assert!(matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ));
+                }
+            }
+            assert!(matches!(listener.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(download_body_async(
+            &reqwest::Client::builder()
+                .no_proxy()
+                .read_timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            &url,
+            &path,
+            &asset,
+            &Control::default(),
+            &Activity::default(),
+            Some(&transfer),
+        ));
+        transfer.finish(&result).unwrap();
+        drop(transfer);
+        server.join().unwrap();
+        result.unwrap();
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert_eq!(manager.list().unwrap()[0].status, Status::Complete);
+        assert!(!part.exists());
+    }
+    #[test]
+    fn downloader_never_replaces_existing_unverified_assets_or_loses_verified_part_on_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("reader.gguf");
+        let part = target.with_extension("gguf.part");
+        let original = b"USER ORIGINAL SOURCE";
+        let verified = b"GGUFverified-pending-publication";
+        fs::write(&target, original).unwrap();
+        fs::write(&part, verified).unwrap();
+        assert!(publish_download(&part, &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert_eq!(fs::read(&part).unwrap(), verified);
+        let asset = Asset {
+            file: "reader.gguf".into(),
+            bytes: verified.len() as u64,
+            sha256: hex::encode(sha2::Sha256::digest(verified)),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(download_async(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:1",
+            &target,
+            &asset,
+            &Control::default(),
+            &Activity::default(),
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Existing asset differs")
+        );
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert_eq!(fs::read(&part).unwrap(), verified);
     }
     use sha2::Digest;
 }

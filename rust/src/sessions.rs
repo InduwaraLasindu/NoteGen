@@ -564,6 +564,7 @@ pub fn run(
         cancelled: c.cancelled.clone(),
         paused: c.paused.clone(),
         clarify: None,
+        ..c.clone()
     };
     let output = work.join("result.docx");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

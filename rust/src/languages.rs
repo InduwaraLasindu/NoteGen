@@ -4,13 +4,10 @@ use crate::{
     types::*,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,99 +175,65 @@ fn download(dir: &Path, pack: &LanguagePack, c: &Control, log: &Activity) -> Res
     if healthy(&destination, pack, c)? {
         return Ok(());
     }
-    if let Ok(metadata) = destination.metadata() {
-        anyhow::ensure!(
-            metadata.is_file() && metadata.len() <= 20_000_000,
-            Fault::new(
-                "NG740",
-                "Existing OCR resource is not a regular bounded file; preserve it and choose another resource folder"
+    let current = match destination.metadata() {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_file() && metadata.len() <= 20_000_000,
+                Fault::new(
+                    "NG740",
+                    "Existing OCR resource is not a regular bounded file; preserve it and choose another resource folder"
+                )
+            );
+            (
+                Some(metadata.len()),
+                Some(storage::hash_file(&destination, c)?),
             )
-        );
-    }
-    let mut response = reqwest::blocking::Client::builder()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(180))
-        .user_agent(concat!(
-            "NoteGen/",
-            env!("CARGO_PKG_VERSION"),
-            " OCR resource setup"
-        ))
-        .build()?
-        .get(&pack.url)
-        .send()?
-        .error_for_status()?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-    let mut received = 0u64;
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        c.check()?;
-        let n = response.read(&mut buffer)?;
-        if n == 0 {
-            break;
         }
-        received += n as u64;
-        anyhow::ensure!(
-            received <= pack.bytes,
-            Fault::new("NG740", "OCR resource exceeds pinned size")
-        );
-        temp.write_all(&buffer[..n])?;
-        hash.update(&buffer[..n]);
-        log.emit(
-            "download",
-            format!("OCR {} · {} / {} bytes", pack.code, received, pack.bytes),
-            0,
-            received as usize,
-            pack.bytes as usize,
-            "",
-        );
-    }
-    anyhow::ensure!(
-        received == pack.bytes && hex::encode(hash.finalize()) == pack.sha256,
-        Fault::new(
-            "NG740",
-            "OCR resource download failed size/SHA256 verification; existing files were preserved"
-        )
-    );
-    temp.as_file().sync_all()?;
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
+        Err(e) => return Err(e.into()),
+    };
+    let expected = crate::diagnostics::RepairFile {
+        key: format!("ocr/{}", pack.code),
+        expected_bytes: pack.bytes,
+        expected_sha256: pack.sha256.clone(),
+        current_bytes: current.0,
+        current_sha256: current.1,
+        health: if current.0.is_some() {
+            crate::diagnostics::AssetHealth::Corrupt
+        } else {
+            crate::diagnostics::AssetHealth::Missing
+        },
+    };
+    let staging = tempfile::Builder::new()
+        .prefix(".notegen-ocr-")
+        .tempdir_in(dir)?;
+    let staged = tempfile::TempPath::try_from_path(staging.path().join("verified-asset"))?;
+    crate::models::download(
+        &pack.url,
+        &staged,
+        &crate::models::Asset {
+            file: pack.file.clone(),
+            bytes: pack.bytes,
+            sha256: pack.sha256.clone(),
+        },
+        c,
+        log,
+    )?;
     c.check()?;
     plain_path(&destination)?;
-    if destination.exists() {
-        anyhow::ensure!(
-            destination.is_file(),
-            Fault::new("NG740", "OCR resource target is not a regular file")
+    if let Some(backup) = crate::diagnostics::publish_repair(staged, &destination, &expected, c)? {
+        log.emit(
+            "repair",
+            format!(
+                "OCR {} repaired; previous bytes retained at {}",
+                pack.code,
+                backup.display()
+            ),
+            0,
+            1,
+            1,
+            "",
         );
-        let original = storage::hash_file(&destination, c)?;
-        let backup = dir.join(format!("{}.previous-{}", pack.file, &original[..12]));
-        if backup.exists() {
-            plain_path(&backup)?;
-            anyhow::ensure!(
-                backup.is_file() && storage::hash_file(&backup, c)? == original,
-                Fault::new(
-                    "NG740",
-                    "Previous OCR resource backup is incomplete or changed; preserve it before retrying"
-                )
-            );
-        } else {
-            let mut source = fs::File::open(&destination)?;
-            let mut out = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&backup)?;
-            std::io::copy(&mut source, &mut out)?;
-            out.sync_all()?;
-            anyhow::ensure!(
-                storage::hash_file(&backup, c)? == original,
-                Fault::new(
-                    "NG740",
-                    "OCR resource changed while retaining previous data"
-                )
-            );
-        }
-        temp.persist(&destination).map_err(|e| e.error)?;
-    } else {
-        temp.persist_noclobber(&destination).map_err(|e| e.error)?;
     }
     Ok(())
 }

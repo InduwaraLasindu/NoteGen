@@ -1,5 +1,11 @@
 use image::{DynamicImage, GrayImage, Luma};
-use notegen::{fontpack::FontOptions, profile_tools as tools, storage::Control, types::*, writers};
+use notegen::{
+    fontpack::{self, FontOptions},
+    profile_tools as tools,
+    storage::Control,
+    types::*,
+    writers,
+};
 use std::{fs, io::Read, path::Path, sync::atomic::Ordering};
 
 fn ink() -> DynamicImage {
@@ -12,6 +18,43 @@ fn ink() -> DynamicImage {
         }
     }
     DynamicImage::ImageLuma8(im)
+}
+fn font_bytes(root: &Path, id: &str, name: &str) -> (Vec<u8>, fontpack::FontCoverage) {
+    let path = root.join(name);
+    fontpack::export(
+        root,
+        id,
+        &path,
+        &FontOptions::default(),
+        &Control::default(),
+    )
+    .unwrap();
+    let mut zip = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    let mut bytes = vec![];
+    zip.by_name("Handwriting.ttf")
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    let coverage = serde_json::from_str(&read_zip(&mut zip, "font-coverage.json")).unwrap();
+    (bytes, coverage)
+}
+fn shape(bytes: &[u8], text: &str, features: &[(&[u8; 4], u32)]) -> Vec<u32> {
+    let font = harfrust::FontRef::new(bytes).unwrap();
+    let data = harfrust::ShaperData::new(&font);
+    let shaper = data.shaper(&font).build();
+    let mut buffer = harfrust::UnicodeBuffer::new();
+    buffer.push_str(text);
+    buffer.guess_segment_properties();
+    let features = features
+        .iter()
+        .map(|(tag, value)| harfrust::Feature::new(harfrust::Tag::new(tag), *value, ..))
+        .collect::<Vec<_>>();
+    shaper
+        .shape(buffer, harfrust::ShapeOptions::new().features(&features))
+        .glyph_infos()
+        .iter()
+        .map(|glyph| glyph.glyph_id)
+        .collect()
 }
 fn fixture(root: &Path) -> writers::Profile {
     let p = writers::create(root, "Private name").unwrap();
@@ -399,6 +442,310 @@ fn printable_font_proof_embeds_actual_ttf_and_marks_missing_glyphs_without_html_
     assert!(font.glyph_index('r').is_some());
     assert!(font.glyph_index('A').is_none());
     assert!(tools::font_proof_sheet(root, &p.id, &target, &FontOptions::default(), &c).is_err());
+}
+#[test]
+fn confirmed_unicode_ligatures_clusters_and_alternates_shape_with_real_opentype_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = writers::create(root, "Unicode confirmed shapes").unwrap();
+    for label in ["f", "i", "a", "Ж", "𝄞"] {
+        writers::add_example(root, &p.id, &ink(), BoxRect::full(), label, true, "").unwrap();
+    }
+    writers::add_example(
+        root,
+        &p.id,
+        &ink(),
+        BoxRect::full(),
+        "fi",
+        false,
+        "ordinary word, not a font ligature",
+    )
+    .unwrap();
+    let (before, _) = font_bytes(root, &p.id, "before.zip");
+    assert_eq!(
+        shape(&before, "fi", &[]).len(),
+        2,
+        "Ordinary word examples must never imply a ligature"
+    );
+    for (label, form) in [
+        ("fi", writers::FontShape::Ligature),
+        ("ffi", writers::FontShape::Ligature),
+        ("කි", writers::FontShape::Cluster),
+        ("a", writers::FontShape::Alternate { index: 1 }),
+        ("a", writers::FontShape::Alternate { index: 2 }),
+    ] {
+        writers::add_font_example(
+            root,
+            &p.id,
+            &ink(),
+            BoxRect::full(),
+            label,
+            form,
+            "explicitly confirmed complete shape",
+        )
+        .unwrap();
+    }
+    let (bytes, coverage) = font_bytes(root, &p.id, "shaped.zip");
+    let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+    let id = |label: &str, form: writers::FontShape| {
+        u32::from(
+            coverage
+                .shapes
+                .iter()
+                .find(|rule| rule.label == label && rule.shape == form)
+                .unwrap()
+                .glyph_id,
+        )
+    };
+    assert_eq!(
+        shape(&bytes, "fi", &[]),
+        vec![id("fi", writers::FontShape::Ligature)]
+    );
+    assert_eq!(
+        shape(&bytes, "ffi", &[]),
+        vec![id("ffi", writers::FontShape::Ligature)],
+        "Longest confirmed sequence must win before its suffix"
+    );
+    assert_eq!(shape(&bytes, "fi", &[(b"liga", 0)]).len(), 2);
+    assert_eq!(
+        shape(&bytes, "කි", &[]),
+        vec![id("කි", writers::FontShape::Cluster)]
+    );
+    assert_eq!(shape(&bytes, "කි", &[(b"ccmp", 0)]).len(), 2);
+    let base = u32::from(face.glyph_index('a').unwrap().0);
+    assert_eq!(shape(&bytes, "a", &[]), vec![base]);
+    assert_eq!(
+        shape(&bytes, "a", &[(b"salt", 1)]),
+        vec![id("a", writers::FontShape::Alternate { index: 1 })]
+    );
+    assert_eq!(
+        shape(&bytes, "a", &[(b"salt", 2)]),
+        vec![id("a", writers::FontShape::Alternate { index: 2 })]
+    );
+    assert_eq!(
+        shape(&bytes, "a", &[(b"ss01", 1)]),
+        vec![id("a", writers::FontShape::Alternate { index: 1 })]
+    );
+    assert_eq!(
+        shape(&bytes, "a", &[(b"ss02", 1)]),
+        vec![id("a", writers::FontShape::Alternate { index: 2 })]
+    );
+    for ch in ['Ж', '𝄞'] {
+        assert_eq!(
+            shape(&bytes, &ch.to_string(), &[]),
+            vec![u32::from(face.glyph_index(ch).unwrap().0)]
+        );
+        assert!(
+            face.tables()
+                .os2
+                .unwrap()
+                .unicode_ranges()
+                .contains_char(ch)
+        );
+    }
+    assert!(
+        face.tables()
+            .os2
+            .unwrap()
+            .unicode_ranges()
+            .contains_char('ක')
+    );
+    assert_eq!(shape(&bytes, "z", &[]), vec![0]);
+    assert!(!coverage.default_glyphs.contains('ක'));
+    assert!(coverage.component_placeholders.contains('ක'));
+    let placeholder = face.glyph_index('ක').unwrap();
+    let bbox = face.glyph_bounding_box(placeholder).unwrap();
+    assert!(
+        bbox.x_max > bbox.x_min && bbox.y_max > bbox.y_min,
+        "Unconfirmed standalone components must render visible boxes"
+    );
+    let source = ttf_parser::Face::parse(&before, 0).unwrap();
+    assert_eq!(
+        source.glyph_bounding_box(source.glyph_index('a').unwrap()),
+        face.glyph_bounding_box(face.glyph_index('a').unwrap()),
+        "Alternates must not be averaged into the default outline"
+    );
+    assert_eq!(
+        face.number_of_glyphs() as usize,
+        2 + coverage.default_glyphs.chars().count()
+            + coverage.component_placeholders.chars().count()
+            + coverage.shapes.len()
+    );
+    assert!(face.tables().gsub.is_some());
+    let (again, _) = font_bytes(root, &p.id, "again.zip");
+    assert_eq!(
+        bytes, again,
+        "Identical confirmed input must produce deterministic font bytes"
+    );
+}
+
+#[test]
+fn quarantined_shaping_forms_leave_no_active_rule_and_profile_sharing_preserves_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = writers::create(root, "Explicit forms").unwrap();
+    writers::add_example(root, &p.id, &ink(), BoxRect::full(), "a", true, "").unwrap();
+    for index in [1, 2] {
+        writers::add_font_example(
+            root,
+            &p.id,
+            &ink(),
+            BoxRect::full(),
+            "a",
+            writers::FontShape::Alternate { index },
+            "",
+        )
+        .unwrap();
+    }
+    let p = writers::add_font_example(
+        root,
+        &p.id,
+        &ink(),
+        BoxRect::full(),
+        "fi",
+        writers::FontShape::Ligature,
+        "",
+    )
+    .unwrap();
+    let rejected = p
+        .samples
+        .iter()
+        .find(|sample| sample.font_shape == Some(writers::FontShape::Alternate { index: 1 }))
+        .unwrap()
+        .id
+        .clone();
+    tools::quarantine(root, &p.id, &rejected, "wrong first alternate").unwrap();
+    let (bytes, coverage) = font_bytes(root, &p.id, "quarantine.zip");
+    assert!(
+        !coverage
+            .shapes
+            .iter()
+            .any(|rule| rule.sample_ids.contains(&rejected))
+    );
+    let base = ttf_parser::Face::parse(&bytes, 0)
+        .unwrap()
+        .glyph_index('a')
+        .unwrap()
+        .0;
+    assert_eq!(
+        shape(&bytes, "a", &[(b"salt", 1)]),
+        vec![u32::from(base)],
+        "A quarantined alternate index must not be renumbered to another form"
+    );
+    let second = coverage
+        .shapes
+        .iter()
+        .find(|rule| rule.shape == writers::FontShape::Alternate { index: 2 })
+        .unwrap()
+        .glyph_id;
+    assert_eq!(shape(&bytes, "a", &[(b"salt", 2)]), vec![u32::from(second)]);
+    let share = root.join("profile.zip");
+    writers::export_profile(root, &p.id, &share, &Control::default()).unwrap();
+    let imported =
+        writers::import_profile(&root.join("imported"), &share, &Control::default()).unwrap();
+    let copy = fontpack::coverage(&root.join("imported"), &imported.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&coverage).unwrap(),
+        serde_json::to_value(copy).unwrap()
+    );
+    let proof = root.join("forms.html");
+    tools::font_proof_sheet(
+        root,
+        &p.id,
+        &proof,
+        &FontOptions::default(),
+        &Control::default(),
+    )
+    .unwrap();
+    let html = fs::read_to_string(proof).unwrap();
+    assert!(html.contains("font-feature-settings:'salt' 2"));
+    assert!(html.contains("font-feature-settings:'ss02' 1"));
+    assert!(html.contains("Unconfirmed standalone components"));
+    assert!(html.contains("font-feature-settings:'liga' 1\">fi</p>"));
+}
+
+#[test]
+fn font_shape_confirmation_rejects_invalid_metadata_and_legacy_profiles_remain_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = fixture(root);
+    let before = fs::read(root.join(&p.id).join("profile.json")).unwrap();
+    for (label, form) in [
+        ("fi", writers::FontShape::Cluster),
+        ("a", writers::FontShape::Ligature),
+        ("a", writers::FontShape::Alternate { index: 0 }),
+        ("a", writers::FontShape::Alternate { index: 17 }),
+        ("x\u{0}", writers::FontShape::Ligature),
+        ("x\u{202e}", writers::FontShape::Ligature),
+        ("abcdefghijklmnopq", writers::FontShape::Ligature),
+    ] {
+        assert!(
+            writers::add_font_example(root, &p.id, &ink(), BoxRect::full(), label, form, "")
+                .is_err()
+        );
+    }
+    assert_eq!(
+        before,
+        fs::read(root.join(&p.id).join("profile.json")).unwrap()
+    );
+    assert!(
+        writers::add_example(root, &p.id, &ink(), BoxRect::full(), "\u{200d}", true, "").is_err()
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    for sample in value["samples"].as_array_mut().unwrap() {
+        sample.as_object_mut().unwrap().remove("font_shape");
+    }
+    fs::write(
+        root.join(&p.id).join("profile.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        writers::read(root, &p.id).unwrap().samples.len(),
+        p.samples.len()
+    );
+    let (_, coverage) = font_bytes(root, &p.id, "legacy.zip");
+    assert!(coverage.shapes.is_empty());
+    assert_eq!(coverage.default_glyphs, "1lnr");
+    value["samples"][0]["font_shape"] = serde_json::json!({"kind":"alternate","index":0});
+    fs::write(
+        root.join(&p.id).join("profile.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+    assert!(writers::read(root, &p.id).is_err());
+}
+
+#[test]
+fn oversized_unicode_font_is_rejected_before_reading_samples_or_creating_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = writers::create(root, "Large Unicode font").unwrap();
+    let mut metadata = serde_json::to_value(&p).unwrap();
+    metadata["samples"] = serde_json::Value::Array(
+        (0..4097)
+            .map(|i| {
+                let id = format!("glyph-{i}");
+                serde_json::json!({"id":id,"label":char::from_u32(0x4e00+i).unwrap().to_string(),
+            "glyph":true,"image":format!("glyph-{i}.png"),"created":"","source":""})
+            })
+            .collect(),
+    );
+    let path = root.join(&p.id).join("profile.json");
+    fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    let output = root.join("too-large.zip");
+    let error = fontpack::export(
+        root,
+        &p.id,
+        &output,
+        &FontOptions::default(),
+        &Control::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("4,096 mapped scalars"));
+    assert!(!output.exists());
+    assert_eq!(before, fs::read(path).unwrap());
 }
 #[test]
 fn duplicate_sample_ids_and_invalid_quarantine_metadata_are_rejected_on_import_or_read() {

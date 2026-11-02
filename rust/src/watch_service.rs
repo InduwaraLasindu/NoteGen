@@ -342,6 +342,15 @@ pub fn run(
     let initial = read_config(config_path)?;
     validate_layout(config_path, state_path, output_dir, &initial, pause_file)?;
     settings.validate()?;
+    let warm_pool = settings
+        .experience
+        .warm_reader
+        .then(|| {
+            crate::warm_runtime::WarmPool::new(Duration::from_secs(
+                settings.experience.warm_reader_ttl_secs,
+            ))
+        })
+        .transpose()?;
     let lease_path = state_path.with_extension("watch.lock");
     watch::no_links(&lease_path)?;
     if let Some(pause) = pause_file {
@@ -402,6 +411,11 @@ pub fn run(
         validate_layout(config_path, state_path, &output_dir, &config, pause_file)?;
         config.paused |= pause_file.is_some_and(Path::exists);
         if was_paused != Some(config.paused) {
+            if config.paused
+                && let Some(pool) = &warm_pool
+            {
+                pool.release();
+            }
             log.emit(
                 "watch",
                 if config.paused {
@@ -485,13 +499,19 @@ pub fn run(
                     Fault::new("NG500", "Watched input changed before conversion")
                 );
                 let output = output_path(&output_dir, &candidate)?;
-                let completed = crate::pipeline::convert(
-                    &candidate.path,
-                    &output,
-                    &conversion_settings,
-                    c,
-                    log,
-                )?;
+                let completed = if let Some(pool) = &warm_pool {
+                    crate::pipeline::convert_with_runtime(
+                        &candidate.path,
+                        &output,
+                        &conversion_settings,
+                        c,
+                        log,
+                        crate::pipeline::PreparationMode::Sequential,
+                        pool,
+                    )
+                } else {
+                    crate::pipeline::convert(&candidate.path, &output, &conversion_settings, c, log)
+                }?;
                 anyhow::ensure!(
                     storage::hash_file(&candidate.path, c)? == candidate.sha256,
                     Fault::new(
@@ -531,6 +551,9 @@ pub fn run(
                     );
                 }
                 Err(error) => {
+                    if let Some(pool) = &warm_pool {
+                        pool.release();
+                    }
                     if cancelled(c)
                         || error
                             .downcast_ref::<Fault>()

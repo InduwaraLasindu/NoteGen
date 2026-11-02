@@ -296,12 +296,16 @@ impl Desktop {
                             ui.checkbox(&mut self.state.settings.keep_page_breaks,"Keep original page breaks"); help(ui,"keep_page_breaks");
                             ui.add_space(12.); ui.heading("Workspace");
                             ui.checkbox(&mut self.state.settings.experience.live_preview,"Show live AI source and draft"); help(ui,"experience.live_preview");
+                            ui.checkbox(&mut self.state.settings.experience.warm_reader,"Keep one reader ready between compatible scans");
+                            ui.add(egui::Slider::new(&mut self.state.settings.experience.warm_reader_ttl_secs,1..=60).text("Reader expiry in seconds"));
+                            ui.small("Optional · off by default. Reuses one reset reader for up to 60 seconds. Native image buffers may remain in RAM until release. Retention sessions and hardware trials use fresh processes. Different readers or settings may require a reload.");
                             ui.checkbox(&mut self.state.settings.ui.reduced_motion,"Reduce animation"); help(ui,"ui.reduced_motion");
                             ui.checkbox(&mut self.state.settings.ui.dark,"Dark appearance");
                             ui.checkbox(&mut self.state.settings.ui.compact,"Compact spacing");
                             ui.add(egui::Slider::new(&mut self.state.settings.ui.scale,0.75..=2.).text("Interface scale")); help(ui,"ui.scale");
                             if ui.button("Advanced settings for power users").clicked() { self.draft=self.state.settings.clone(); self.raw=serde_json::to_string_pretty(&self.draft).unwrap_or_default(); self.advanced=true; }
                         });
+                        self.warm_reader_status_ui(ui);
                     }
                     1 => self.updates_ui(ui,ctx),
                     2 => self.tuning_ui(ui,ctx),
@@ -316,6 +320,9 @@ impl Desktop {
             });
         });
         self.experience.open = open;
+        if let Err(error) = self.sync_warm_reader_preferences() {
+            self.experience.error = error.to_string();
+        }
     }
     fn updates_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Local AI and dependencies");
@@ -549,6 +556,7 @@ impl Desktop {
             )
             .clicked()
         {
+            self.release_warm_reader();
             let s = self.state.settings.clone();
             self.studio_task(ctx, move |c, log| {
                 Ok(studio::StudioMessage::Tuned(Box::new(tuning::run(
@@ -872,5 +880,123 @@ mod accessibility_tests {
                     .label()
                     .is_some_and(|text| text.contains("PRIVATE DRAFT"))
         }));
+    }
+}
+
+#[cfg(test)]
+mod warm_preferences_tests {
+    use super::*;
+    #[test]
+    fn legacy_preferences_are_cold_and_expiry_is_validated_even_when_disabled() {
+        let mut preferences: ExperienceOptions = serde_json::from_str("{}").unwrap();
+        assert!(!preferences.warm_reader);
+        assert_eq!(preferences.warm_reader_ttl_secs, 30);
+        for value in [0, 61, u64::MAX] {
+            preferences.warm_reader_ttl_secs = value;
+            assert!(preferences.validate().is_err());
+            let settings = Settings {
+                experience: preferences.clone(),
+                ..Default::default()
+            };
+            assert!(settings.validate().is_err());
+        }
+        for value in [1, 60] {
+            preferences.warm_reader_ttl_secs = value;
+            preferences.validate().unwrap();
+        }
+    }
+    #[test]
+    fn changed_and_disabled_preferences_close_old_leases_and_preserve_other_settings() {
+        let mut app = Desktop::new(Workspace::default());
+        app.state.settings.subject = "Keep document context".into();
+        app.state.settings.experience.warm_reader = true;
+        app.sync_warm_reader_preferences().unwrap();
+        let original = app.warm_pool.clone().unwrap();
+        let control = Control::default();
+        let job = original.begin(&control).unwrap();
+        app.state.settings.experience.warm_reader_ttl_secs = 1;
+        app.sync_warm_reader_preferences().unwrap();
+        assert!(control.cancelled.load(Ordering::Acquire));
+        assert!(job.commit().is_err());
+        assert!(original.begin(&Control::default()).is_err());
+        let replacement = app.warm_pool.clone().unwrap();
+        assert!(!Arc::ptr_eq(&original, &replacement));
+        app.state.settings.experience.warm_reader = false;
+        app.sync_warm_reader_preferences().unwrap();
+        assert!(app.warm_pool.is_none());
+        assert!(replacement.begin(&Control::default()).is_err());
+        assert_eq!(app.state.settings.subject, "Keep document context");
+    }
+    #[test]
+    fn dropping_desktop_shuts_a_pool_still_referenced_by_a_worker() {
+        let mut app = Desktop::new(Workspace::default());
+        app.state.settings.experience.warm_reader = true;
+        app.sync_warm_reader_preferences().unwrap();
+        let pool = app.warm_pool.clone().unwrap();
+        let control = Control::default();
+        let job = pool.begin(&control).unwrap();
+        drop(app);
+        assert!(control.cancelled.load(Ordering::Acquire));
+        assert!(job.commit().is_err());
+        assert!(pool.begin(&Control::default()).is_err());
+    }
+    #[test]
+    fn visible_accessible_release_button_actually_cancels_the_owned_job() {
+        let mut app = Desktop::new(Workspace::default());
+        app.state.settings.experience.warm_reader = true;
+        app.sync_warm_reader_preferences().unwrap();
+        let pool = app.warm_pool.clone().unwrap();
+        let control = Control::default();
+        let job = pool.begin(&control).unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000., 400.));
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            |ui| app.warm_reader_status_ui(ui),
+        );
+        let tree = output.platform_output.accesskit_update.unwrap();
+        let button = &tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node.label() == Some("Stop task and release reader")
+            })
+            .unwrap()
+            .1;
+        assert!(!button.is_disabled());
+        let bounds = button.bounds().unwrap();
+        assert!(bounds.x1 > bounds.x0 && bounds.y1 > bounds.y0);
+        assert!(bounds.x0 >= 0. && bounds.y0 >= 0. && bounds.x1 <= 1000. && bounds.y1 <= 400.);
+        let position = egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.) as f32,
+            ((bounds.y0 + bounds.y1) / 2.) as f32,
+        );
+        assert!(viewport.contains(position));
+        for pressed in [true, false] {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| app.warm_reader_status_ui(ui),
+            );
+        }
+        assert!(control.cancelled.load(Ordering::Acquire));
+        assert!(job.commit().is_err());
+        assert!(app.notice.contains("released"));
     }
 }

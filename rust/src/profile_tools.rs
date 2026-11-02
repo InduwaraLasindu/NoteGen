@@ -54,7 +54,7 @@ pub fn coaching(root: &Path, id: &str) -> Result<CoverageReport> {
             continue;
         }
         report.active_samples += 1;
-        if sample.glyph {
+        if sample.default_glyph() {
             *report.glyph_counts.entry(sample.label.clone()).or_default() += 1;
         }
         for ch in sample
@@ -491,7 +491,7 @@ pub fn share_preview(
     }
     let mut included = vec![
         "writer and sample IDs, schema and revision".into(),
-        "confirmed labels and glyph flags".into(),
+        "confirmed labels, glyph flags and explicit font-shape metadata".into(),
         "selected handwriting images".into(),
         "user-confirmed capture conditions".into(),
     ];
@@ -622,37 +622,66 @@ pub fn font_proof_sheet(
     let mut zip = zip::ZipArchive::new(fs::File::open(pack)?)?;
     let mut font = vec![];
     zip.by_name("Handwriting.ttf")?.read_to_end(&mut font)?;
-    let profile = writers::read(root, id)?;
-    let glyphs = profile
-        .samples
-        .iter()
-        .filter(|s| s.active() && s.glyph)
-        .filter_map(|s| s.label.chars().next())
-        .filter(char::is_ascii_graphic)
-        .collect::<BTreeSet<_>>();
+    // Use the exact snapshot embedded beside this font, rather than rereading a
+    // profile that another confirmation/quarantine action might have changed.
+    let profile: writers::Profile = serde_json::from_reader(zip.by_name("profile.json")?)?;
+    let coverage: fontpack::FontCoverage =
+        serde_json::from_reader(zip.by_name("font-coverage.json")?)?;
+    let glyphs = coverage.default_glyphs.chars().collect::<BTreeSet<_>>();
     let missing = ('A'..='Z')
         .chain('a'..='z')
         .chain('0'..='9')
         .filter(|c| !glyphs.contains(c))
         .collect::<String>();
     let mut html = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Font proof sheet</title><style>@font-face{{font-family:Proof;src:url(data:font/ttf;base64,{}) format('truetype')}}body{{font:16px/1.6 system-ui;max-width:60rem;margin:2rem auto;padding:1rem}}.sample{{font:32px/1.8 Proof,monospace;white-space:pre-wrap}}.missing{{font-family:system-ui;color:#a00000;text-decoration:underline}}.practice{{border-bottom:1px dashed #888;min-height:3rem}}@media print{{body{{margin:0}}.practice{{break-inside:avoid}}}}</style></head><body><h1>{}</h1><p>{count} confirmed glyphs. Missing letters/numbers: <strong>{}</strong>.</p><p>Red underlined characters use a fallback font because this handwriting font has no confirmed glyph for them. Print using the browser's Print command. The font is embedded; no network connection is used. Joining and ligatures are not inferred.</p>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Font proof sheet</title><style>@font-face{{font-family:Proof;src:url(data:font/ttf;base64,{}) format('truetype')}}body{{font:16px/1.6 system-ui;max-width:60rem;margin:2rem auto;padding:1rem}}.sample{{font:32px/1.8 Proof,monospace;white-space:pre-wrap}}.missing{{font-family:system-ui;color:#a00000;text-decoration:underline}}.practice{{border-bottom:1px dashed #888;min-height:3rem}}@media print{{body{{margin:0}}.practice{{break-inside:avoid}}}}</style></head><body><h1>{}</h1><p>{count} confirmed glyphs/shapes. Missing standalone letters/numbers: <strong>{}</strong>.</p><p>Red underlined text uses a fallback font because this handwriting font has no confirmed standalone glyph or complete sequence for it. Print using the browser's Print command. The font is embedded; no network connection is used. Only explicitly confirmed ligatures, complete clusters and alternate forms are substituted; contextual joining and missing forms are not inferred.</p>",
         base64::engine::general_purpose::STANDARD.encode(font),
         crate::word::xml(&options.family),
         crate::word::xml(&missing)
     );
     let sample_html = |text: &str| {
-        text.chars()
-            .map(|ch| {
+        let mut html = String::new();
+        let mut remaining = text;
+        while !remaining.is_empty() {
+            if let Some(rule) = coverage
+                .shapes
+                .iter()
+                .filter(|rule| {
+                    !matches!(rule.shape, writers::FontShape::Alternate { .. })
+                        && remaining.starts_with(&rule.label)
+                })
+                .max_by_key(|rule| rule.label.len())
+            {
+                html.push_str(&crate::word::xml(&rule.label));
+                remaining = &remaining[rule.label.len()..];
+            } else {
+                let ch = remaining.chars().next().expect("nonempty remainder");
                 let escaped = crate::word::xml(&ch.to_string());
                 if ch.is_whitespace() || glyphs.contains(&ch) {
-                    escaped
+                    html.push_str(&escaped);
                 } else {
-                    format!("<span class=\"missing\">{escaped}</span>")
+                    html.push_str(&format!("<span class=\"missing\">{escaped}</span>"));
                 }
-            })
-            .collect::<String>()
+                remaining = &remaining[ch.len_utf8()..];
+            }
+        }
+        html
     };
+    html.push_str(&format!("<p>{}</p><p>Unconfirmed standalone components (visible boxes when no confirmed sequence applies): <strong>{}</strong></p>",crate::word::xml(&coverage.note),crate::word::xml(&coverage.component_placeholders)));
+    if !coverage.shapes.is_empty() {
+        html.push_str("<h2>Confirmed shaping forms</h2>");
+    }
+    for rule in &coverage.shapes {
+        c.check()?;
+        let (feature, value) = match rule.shape {
+            writers::FontShape::Alternate { index } => ("salt", index),
+            _ => (rule.feature.as_str(), 1),
+        };
+        html.push_str(&format!("<p>Confirmed {} · glyph {} · {}={value}</p><p class=\"sample\" style=\"font-feature-settings:'{feature}' {value}\">{}</p>",crate::word::xml(&rule.label),rule.glyph_id,crate::word::xml(feature),crate::word::xml(&rule.label)));
+        if let writers::FontShape::Alternate { index } = rule.shape {
+            html.push_str(&format!("<p>Equivalent stylistic set ss{index:02}</p><p class=\"sample\" style=\"font-feature-settings:'ss{index:02}' 1\">{}</p>",crate::word::xml(&rule.label)));
+        }
+    }
     html.push_str(&format!(
         "<h2>Words and sentences</h2><p class=\"sample\">{}</p>",
         sample_html("The quick brown fox jumps over the lazy dog.\n0123456789 1.25 -10 +20")
@@ -660,7 +689,7 @@ pub fn font_proof_sheet(
     for sample in profile
         .samples
         .iter()
-        .filter(|s| s.active() && !s.glyph)
+        .filter(|s| s.active() && !s.glyph && s.font_shape.is_none())
         .take(12)
     {
         html.push_str(&format!(

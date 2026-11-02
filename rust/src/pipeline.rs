@@ -107,11 +107,9 @@ fn bounded_preparation<T: Send, R>(
     let abort = AtomicBool::new(false);
     let finished = AtomicBool::new(false);
     let consumer_done = AtomicBool::new(false);
-    let linked = Control {
-        cancelled: Arc::new(AtomicBool::new(false)),
-        paused: c.paused.clone(),
-        clarify: None,
-    };
+    let mut linked = c.clone();
+    linked.cancelled = Arc::new(AtomicBool::new(false));
+    linked.clarify = None;
     thread::scope(|scope| {
         let (tx, rx) = mpsc::sync_channel(1);
         let bridge = scope.spawn(|| {
@@ -324,6 +322,32 @@ pub fn convert_with_preparation(
     activity: &Activity,
     preparation_mode: PreparationMode,
 ) -> Result<Completed> {
+    convert_internal(source, output, s, c, activity, preparation_mode, None)
+}
+/// Explicit normal-workspace opt-in. Retention sessions and hardware trials keep
+/// using the cold conversion API and never supply a pool.
+pub fn convert_with_runtime(
+    source: &Path,
+    output: &Path,
+    s: &Settings,
+    c: &Control,
+    activity: &Activity,
+    preparation_mode: PreparationMode,
+    pool: &crate::warm_runtime::WarmPool,
+) -> Result<Completed> {
+    convert_internal(source, output, s, c, activity, preparation_mode, Some(pool))
+}
+#[allow(clippy::too_many_arguments)]
+fn convert_internal(
+    source: &Path,
+    output: &Path,
+    s: &Settings,
+    c: &Control,
+    activity: &Activity,
+    preparation_mode: PreparationMode,
+    pool: Option<&crate::warm_runtime::WarmPool>,
+) -> Result<Completed> {
+    let mut warm_job = pool.map(|pool| pool.begin(c)).transpose()?;
     let begun = Instant::now();
     s.validate()?;
     let language_digest = if s.tessdata_dir.as_os_str().is_empty() {
@@ -669,7 +693,17 @@ pub fn convert_with_preparation(
                 .saturating_sub(plan.image_tokens + 6000)
                 .max(512),
         );
-        let mut server = Server::start(model, &plan, &active_settings, c, &log, &root);
+        let mut server = if let Some(job) = warm_job.as_mut() {
+            job.reader(model, &plan, &active_settings, c, &log, &root)
+        } else {
+            Server::start(model, &plan, &active_settings, c, &log, &root)
+                .map(crate::warm_runtime::ReaderLease::cold)
+        };
+        if server.is_err()
+            && let Some(job) = warm_job.as_mut()
+        {
+            job.taint();
+        }
         if let Err(e) = &server
             && e.downcast_ref::<Fault>().is_some_and(|f| f.code == "NG900")
         {
@@ -694,7 +728,17 @@ pub fn convert_with_preparation(
                     .saturating_sub(recovery.image_tokens + 6000)
                     .max(512),
             );
-            server = Server::start(model, &recovery, &active_settings, c, &log, &root);
+            server = if let Some(job) = warm_job.as_mut() {
+                job.reader(model, &recovery, &active_settings, c, &log, &root)
+            } else {
+                Server::start(model, &recovery, &active_settings, c, &log, &root)
+                    .map(crate::warm_runtime::ReaderLease::cold)
+            };
+            if server.is_err()
+                && let Some(job) = warm_job.as_mut()
+            {
+                job.taint();
+            }
         }
         let server = match server {
             Ok(v) => v,
@@ -968,7 +1012,11 @@ pub fn convert_with_preparation(
                 "",
             );
         }
-        drop(server);
+        if let Some(job) = warm_job.as_mut() {
+            job.finish_reader(server, c, &log);
+        } else {
+            drop(server);
+        }
     }
     log.work(
         Work::new(Phase::Crop, crop_done, crop_done, read_ms / 2, false),
@@ -1101,6 +1149,18 @@ pub fn convert_with_preparation(
         return Err(Fault::new("NG100","Source changed or became unavailable during conversion. Export was withheld. Retry uses fresh checkpoints; previous evidence is preserved for inspection.").into());
     }
     word::export(&project, output, c)?;
+    if let Some(job) = warm_job
+        && let Err(error) = job.commit()
+    {
+        log.emit(
+            "model",
+            format!("Completed output retained; warm reader released: {error}"),
+            0,
+            0,
+            0,
+            "NG200",
+        );
+    }
     log.work(
         Work::new(Phase::Export, 1, 1, 2000, false),
         "Word document saved",

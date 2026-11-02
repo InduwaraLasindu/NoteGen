@@ -32,8 +32,10 @@ path = "rust/tests/engine.rs"
 
 [dev-dependencies]
 imageproc = { version = "0.25", default-features = false }
+harfrust = "=0.12.0"
 
 [dependencies]
+age = { version = "=0.12.1", default-features = false }
 ttf-parser = "0.25"
 ab_glyph = "0.2"
 anyhow = "1"
@@ -43,11 +45,13 @@ serde_json = "1"
 semver = "=1.0.28"
 sha2 = "0.10"
 hex = "0.4"
+getrandom = "=0.4.3"
 zeroize = "=1.9.1"
 sysinfo = "0.37"
 csv = "1"
 strsim = "0.11"
 unicode-normalization = "0.1"
+unicode-segmentation = "=1.13.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -203,4 +207,20 @@ path = "rust/tests/credentials.rs"
 [[test]]
 name = "hardware_trials"
 path = "rust/tests/hardware_trials.rs"
+
+[[test]]
+name = "warm_reader"
+path = "rust/tests/warm_reader.rs"
+
+[[test]]
+name = "redactions"
+path = "rust/tests/redactions.rs"
+
+[[test]]
+name = "downloads"
+path = "rust/tests/downloads.rs"
+
+[[test]]
+name = "vault"
+path = "rust/tests/vault.rs"
 

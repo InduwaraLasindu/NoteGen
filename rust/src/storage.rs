@@ -20,17 +20,29 @@ pub struct Control {
     pub cancelled: Arc<AtomicBool>,
     pub paused: Arc<AtomicBool>,
     pub clarify: Option<Clarifier>,
+    pub downloads: Option<crate::downloads::Manager>,
+    pub transfer_cancelled: Option<Arc<AtomicBool>>,
 }
 impl Control {
-    pub fn check(&self) -> Result<()> {
-        while self.paused.load(Ordering::Relaxed) && !self.cancelled.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(50));
-        }
+    /// A nonblocking cancellation check for open HTTP responses. Pausing a
+    /// transfer must drop its response before waiting, rather than hold a socket.
+    pub fn check_cancelled(&self) -> Result<()> {
         anyhow::ensure!(
-            !self.cancelled.load(Ordering::Relaxed),
+            !self.cancelled.load(Ordering::Relaxed)
+                && !self
+                    .transfer_cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed)),
             Fault::new("NG900", "Cancelled; completed work is preserved")
         );
         Ok(())
+    }
+    pub fn check(&self) -> Result<()> {
+        while self.paused.load(Ordering::Relaxed) {
+            self.check_cancelled()?;
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.check_cancelled()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

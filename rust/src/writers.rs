@@ -9,6 +9,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sample {
@@ -23,6 +24,41 @@ pub struct Sample {
     /// User-confirmed capture conditions; never guessed from the image.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<String>,
+    /// Explicit font-only shaping intent. Absent in legacy profiles and ordinary examples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_shape: Option<FontShape>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FontShape {
+    Ligature,
+    Cluster,
+    Alternate { index: u8 },
+}
+pub(crate) fn font_scalar(ch: char) -> bool {
+    !ch.is_control()
+        && !ch.is_whitespace()
+        && (ch as u32 & 0xffff) < 0xfffe
+        && !matches!(ch as u32,0x00ad|0x061c|0x200b..=0x200f|0x202a..=0x202e|0x2060..=0x206f|0xfe00..=0xfe0f|0xfeff|0xfff9..=0xfffb|0x1bca0..=0x1bca3|0x1d173..=0x1d17a|0xe0000..=0xe0fff)
+}
+impl FontShape {
+    fn valid(&self, label: &str, glyph: bool) -> bool {
+        let count = label.chars().count();
+        if !label.chars().all(|ch| {
+            font_scalar(ch)
+                || matches!(self, Self::Cluster)
+                    && matches!(ch as u32,0x200c|0x200d|0xfe00..=0xfe0f|0xe0100..=0xe01ef)
+        }) {
+            return false;
+        }
+        match self {
+            Self::Alternate { index } => glyph && count == 1 && (1..=16).contains(index),
+            Self::Ligature => !glyph && (2..=16).contains(&count),
+            Self::Cluster => {
+                !glyph && (2..=16).contains(&count) && label.graphemes(true).count() == 1
+            }
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Quarantine {
@@ -32,6 +68,9 @@ pub struct Quarantine {
 impl Sample {
     pub fn active(&self) -> bool {
         self.quarantine.is_none()
+    }
+    pub fn default_glyph(&self) -> bool {
+        self.glyph && self.font_shape.is_none()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,7 +120,10 @@ pub(crate) fn validate(p: &Profile) -> Result<()> {
                 && s.image == format!("{}.png", s.id)
                 && !s.label.trim().is_empty()
                 && s.label.len() <= 160
-                && (!s.glyph || s.label.chars().count() == 1)
+                && (!s.glyph || s.label.chars().count() == 1 && s.label.chars().all(font_scalar))
+                && s.font_shape
+                    .as_ref()
+                    .is_none_or(|shape| shape.valid(&s.label, s.glyph))
                 && s.source.len() <= 4000
                 && s.conditions.len() <= 16
                 && s.conditions.iter().all(|v| !v.is_empty()
@@ -269,16 +311,49 @@ pub fn add_example(
     glyph: bool,
     source: &str,
 ) -> Result<Profile> {
+    add_selected_example(root, id, image, region, (label, glyph, None), source)
+}
+/// Confirm a complete ink shape for a ligature, cluster or explicitly selected alternate.
+/// Ordinary word labels never become font substitutions automatically.
+/// Ligatures contain 2–16 visible scalars; clusters contain one grapheme with
+/// 2–16 scalars; alternate indexes 1–16 each label one visible scalar.
+pub fn add_font_example(
+    root: &Path,
+    id: &str,
+    image: &DynamicImage,
+    region: BoxRect,
+    label: &str,
+    shape: FontShape,
+    source: &str,
+) -> Result<Profile> {
+    let glyph = matches!(shape, FontShape::Alternate { .. });
+    add_selected_example(root, id, image, region, (label, glyph, Some(shape)), source)
+}
+fn add_selected_example(
+    root: &Path,
+    id: &str,
+    image: &DynamicImage,
+    region: BoxRect,
+    selection: (&str, bool, Option<FontShape>),
+    source: &str,
+) -> Result<Profile> {
     anyhow::ensure!(
         region.valid() && image.width() > 0 && image.height() > 0,
         Fault::new("NG610", "Select a visible handwriting region")
     );
+    let (label, glyph, font_shape) = selection;
     let label = label.trim();
     anyhow::ensure!(
         !label.is_empty()
             && label.len() <= 160
-            && (!glyph || label.len() == 1 && label.as_bytes()[0].is_ascii_graphic()),
-        Fault::new("NG610", "Label one English glyph or a word/short phrase")
+            && (!glyph || label.chars().count() == 1 && label.chars().all(font_scalar))
+            && font_shape
+                .as_ref()
+                .is_none_or(|shape| shape.valid(label, glyph)),
+        Fault::new(
+            "NG610",
+            "Label one visible Unicode glyph, a bounded confirmed font shape, or a word/short phrase"
+        )
     );
     let (x, y, w, h) = region.pixels(image.width(), image.height());
     let normalized = normalize(
@@ -286,7 +361,12 @@ pub fn add_example(
         if glyph { 64 } else { 320 },
         80,
     )?;
-    let sample_id = fingerprint(&(label, glyph, normalized.as_raw()))?[..24].to_string();
+    let sample_id = if let Some(shape) = &font_shape {
+        fingerprint(&(label, glyph, shape, normalized.as_raw()))?
+    } else {
+        fingerprint(&(label, glyph, normalized.as_raw()))?
+    }[..24]
+        .to_string();
     let dir = folder(root, id)?;
     let lock = fs::OpenOptions::new()
         .write(true)
@@ -316,6 +396,7 @@ pub fn add_example(
         source: source.chars().take(500).collect(),
         quarantine: None,
         conditions: vec![],
+        font_shape,
     });
     bump_revision(&mut p)?;
     validate(&p)?;
@@ -376,13 +457,13 @@ pub fn reference(root: &Path, id: &str) -> Result<Option<Reference>> {
     let glyphs = p
         .samples
         .iter()
-        .filter(|s| s.glyph && s.active())
+        .filter(|s| s.default_glyph() && s.active())
         .filter_map(|s| s.label.chars().next())
         .take(10000)
         .collect::<std::collections::BTreeSet<_>>();
     let glyphs = glyphs
         .into_iter()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(|c| c.is_ascii_alphanumeric() || !c.is_ascii() && font_scalar(*c))
         .collect::<Vec<_>>();
     let mut seen = std::collections::HashSet::new();
     let words = p
@@ -453,7 +534,7 @@ pub fn coverage(p: &Profile) -> String {
         .filter(|c| {
             p.samples
                 .iter()
-                .any(|s| s.active() && s.glyph && s.label == c.to_string())
+                .any(|s| s.active() && s.default_glyph() && s.label == c.to_string())
         })
         .collect()
 }
@@ -461,7 +542,7 @@ pub fn average_glyph(root: &Path, p: &Profile, ch: char) -> Result<GrayImage> {
     let samples = p
         .samples
         .iter()
-        .filter(|s| s.active() && s.glyph && s.label == ch.to_string())
+        .filter(|s| s.active() && s.default_glyph() && s.label == ch.to_string())
         .rev()
         .take(32)
         .collect::<Vec<_>>();

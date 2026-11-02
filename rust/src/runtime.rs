@@ -112,6 +112,10 @@ pub fn register(dir: &Path, id: &str, weights: &Path, projector: &Path) -> Resul
 pub struct Server {
     child: Option<Arc<Mutex<Child>>>,
     alive: Arc<AtomicBool>,
+    cancellation: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    watcher: Option<std::thread::JoinHandle<()>>,
+    failed: Arc<AtomicBool>,
+    api_key: Option<String>,
     pub endpoint: String,
     pub model: Model,
     pub acceleration_verified: bool,
@@ -119,15 +123,133 @@ pub struct Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Relaxed);
-        if let Some(c) = &self.child
-            && let Ok(mut c) = c.lock()
-        {
+        if let Some(c) = &self.child {
+            let mut c = c.lock().unwrap_or_else(|error| error.into_inner());
             let _ = c.kill();
             let _ = c.wait();
         }
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
+    }
+}
+#[derive(Clone)]
+pub(crate) struct ManagedShutdown {
+    child: Arc<Mutex<Child>>,
+    alive: Arc<AtomicBool>,
+}
+impl ManagedShutdown {
+    pub(crate) fn stop(&self) {
+        self.alive.store(false, Ordering::Release);
+        let mut child = self.child.lock().unwrap_or_else(|error| error.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 impl Server {
+    /// Logical reset for the pinned b12032 single-slot runtime. Erasing KV alone
+    /// leaves task_prev alive; a completed neutral task must replace it first.
+    pub(crate) fn reset_for_reuse(&self, c: &Control) -> Result<()> {
+        anyhow::ensure!(
+            self.healthy(),
+            Fault::new("NG200", "Reader cannot be reused after failure")
+        );
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        let json_response = |response: reqwest::blocking::Response| -> Result<Value> {
+            let mut bytes = vec![];
+            response
+                .error_for_status()?
+                .take(65_537)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= 65_536,
+                Fault::new("NG200", "Oversized reader reset response")
+            );
+            Ok(serde_json::from_slice(&bytes)?)
+        };
+        let authorize = |request: reqwest::blocking::RequestBuilder| {
+            if let Some(key) = &self.api_key {
+                request.bearer_auth(key)
+            } else {
+                request
+            }
+        };
+        let erase = || -> Result<()> {
+            c.check()?;
+            let result = json_response(
+                authorize(client.post(format!("{}/slots/0?action=erase", self.endpoint)))
+                    .json(&json!({}))
+                    .send()?,
+            )?;
+            anyhow::ensure!(
+                result["id_slot"] == 0 && result["n_erased"].as_u64().is_some(),
+                Fault::new("NG200", "Reader reset was not acknowledged")
+            );
+            Ok(())
+        };
+        erase()?;
+        c.check()?;
+        let result = json_response(
+            authorize(client.post(format!("{}/completion", self.endpoint)))
+                .json(&json!({
+                    "prompt":"NoteGen neutral context reset.","id_slot":0,"cache_prompt":false,
+                    "n_predict":1,"stream":false,"temperature":0,"seed":0
+                }))
+                .send()?,
+        )?;
+        anyhow::ensure!(
+            result["stop"].as_bool() == Some(true),
+            Fault::new("NG200", "Neutral reader reset did not complete")
+        );
+        // The erase task queues behind release/reset, providing the task_prev barrier.
+        erase()?;
+        c.check()?;
+        let slots =
+            json_response(authorize(client.get(format!("{}/slots", self.endpoint))).send()?)?;
+        let slots = slots
+            .as_array()
+            .ok_or_else(|| Fault::new("NG200", "Reader reset slots unavailable"))?;
+        anyhow::ensure!(
+            slots.len() == 1
+                && slots[0]["id"] == 0
+                && slots[0]["is_processing"].as_bool() == Some(false)
+                && slots[0]["speculative"].as_bool() == Some(false)
+                && slots[0]["n_prompt_tokens"].as_u64() == Some(0),
+            Fault::new("NG200", "Reader context remained occupied after reset")
+        );
+        anyhow::ensure!(
+            self.healthy(),
+            Fault::new("NG200", "Reader exited during reset")
+        );
+        Ok(())
+    }
+    pub(crate) fn shutdown_handle(&self) -> Option<ManagedShutdown> {
+        self.child.as_ref().map(|child| ManagedShutdown {
+            child: child.clone(),
+            alive: self.alive.clone(),
+        })
+    }
+    pub(crate) fn healthy(&self) -> bool {
+        !self.failed.load(Ordering::Acquire)
+            && self.alive.load(Ordering::Acquire)
+            && self.child.as_ref().is_some_and(|child| {
+                child
+                    .lock()
+                    .is_ok_and(|mut child| matches!(child.try_wait(), Ok(None)))
+            })
+    }
+    pub(crate) fn bind_control(&self, control: Option<&Control>) -> Result<()> {
+        *self
+            .cancellation
+            .lock()
+            .map_err(|_| Fault::new("NG200", "Reader cancellation lease failed"))? =
+            control.map(|control| control.cancelled.clone());
+        Ok(())
+    }
     /// The process owned by this managed reader, if any. External endpoints have no owned PID.
     pub fn managed_pid(&self) -> Option<u32> {
         self.child
@@ -141,6 +263,31 @@ impl Server {
         c: &Control,
         log: &Activity,
         root: &Path,
+    ) -> Result<Self> {
+        Self::start_inner(model, plan, s, c, log, root, None)
+    }
+    pub(crate) fn start_private(
+        model: &Model,
+        plan: &Plan,
+        s: &Settings,
+        c: &Control,
+        log: &Activity,
+        root: &Path,
+    ) -> Result<Self> {
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key)
+            .map_err(|_| Fault::new("NG200", "Cannot create a private reader credential"))?;
+        Self::start_inner(model, plan, s, c, log, root, Some(hex::encode(key)))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn start_inner(
+        model: &Model,
+        plan: &Plan,
+        s: &Settings,
+        c: &Control,
+        log: &Activity,
+        root: &Path,
+        api_key: Option<String>,
     ) -> Result<Self> {
         if s.external_server || model.endpoint.is_some() {
             let endpoint = model
@@ -180,6 +327,10 @@ impl Server {
             return Ok(Self {
                 child: None,
                 alive: Arc::new(AtomicBool::new(false)),
+                cancellation: Arc::new(Mutex::new(None)),
+                watcher: None,
+                failed: Arc::new(AtomicBool::new(false)),
+                api_key: None,
                 endpoint: endpoint.to_string(),
                 model: model.clone(),
                 acceleration_verified: false,
@@ -194,7 +345,10 @@ impl Server {
             Fault::new("NG300", "Free RAM changed before model load")
         );
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
-        let args = server_args(model, plan, s, port);
+        let mut args = server_args(model, plan, s, port);
+        if let Some(key) = &api_key {
+            args.extend(["--api-key".into(), key.clone()]);
+        }
         let log_path = root.join(format!("server-{}.log", model.id));
         let file = fs::File::create(&log_path)?;
         // Report the runtime's actual device support, not just the presence of nvidia-smi.
@@ -231,10 +385,25 @@ impl Server {
             0,
             "",
         );
-        let child = command(&s.server)
+        let mut process = command(&s.server);
+        if api_key.is_some() {
+            // Warm compatibility covers the explicit owned command. Inherited native
+            // model/LoRA/template/cache/log settings must not add unhashed files or
+            // retain a separate prompt cache behind the single-slot reset contract.
+            for (name, _) in std::env::vars_os() {
+                let text = name.to_string_lossy().to_ascii_uppercase();
+                if text.starts_with("LLAMA_") || text == "GGML_BACKEND_DL_PATH" {
+                    process.env_remove(name);
+                }
+            }
+        }
+        let child = process
             .args(args)
             .env("HF_HUB_OFFLINE", "1")
             .env("LLAMA_ARG_OFFLINE", "1")
+            .env("LLAMA_TRACE", "0")
+            .env("LLAMA_SERVER_SLOTS_DEBUG", "0")
+            .env("LLAMA_LOG_VERBOSITY", "0")
             .stdin(Stdio::null())
             .stdout(file.try_clone()?)
             .stderr(file)
@@ -244,22 +413,35 @@ impl Server {
         let alive = Arc::new(AtomicBool::new(true));
         let watch = alive.clone();
         let proc = child.clone();
-        let cancel = c.cancelled.clone();
-        std::thread::spawn(move || {
+        let cancellation = Arc::new(Mutex::new(Some(c.cancelled.clone())));
+        let watch_cancellation = cancellation.clone();
+        let watcher = std::thread::spawn(move || {
             while watch.load(Ordering::Relaxed) {
-                if cancel.load(Ordering::Relaxed) {
+                let Ok(binding) = watch_cancellation.lock() else {
+                    break;
+                };
+                if binding
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+                {
                     if let Ok(mut child) = proc.lock() {
                         let _ = child.kill();
                         let _ = child.wait();
                     }
+                    watch.store(false, Ordering::Release);
                     break;
                 }
+                drop(binding);
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
         let mut server = Self {
             child: Some(child),
             alive,
+            cancellation,
+            watcher: Some(watcher),
+            failed: Arc::new(AtomicBool::new(false)),
+            api_key,
             endpoint: format!("http://127.0.0.1:{port}"),
             model: model.clone(),
             acceleration_verified: verified,
@@ -294,11 +476,11 @@ impl Server {
         server.acceleration_verified = verified && layers > 0;
         log.emit(
             "hardware",
-            format!(
-                "{:?}: {layers} model layers offloaded; full startup details in {}",
-                plan.backend,
-                log_path.display()
-            ),
+            if server.api_key.is_some() {
+                format!("{:?}: {layers} model layers offloaded; temporary runtime diagnostics are discarded when this owned reader is released", plan.backend)
+            } else {
+                format!("{:?}: {layers} model layers offloaded; full startup details in {}", plan.backend, log_path.display())
+            },
             0,
             0,
             0,
@@ -336,6 +518,10 @@ impl Server {
         let adapter = Self {
             child: None,
             alive: Arc::new(AtomicBool::new(false)),
+            cancellation: Arc::new(Mutex::new(None)),
+            watcher: None,
+            failed: self.failed.clone(),
+            api_key: self.api_key.clone(),
             endpoint: self.endpoint.clone(),
             model,
             acceleration_verified: self.acceleration_verified,
@@ -344,6 +530,23 @@ impl Server {
     }
     #[allow(clippy::too_many_arguments)]
     pub fn read(
+        &self,
+        image: &DynamicImage,
+        evidence: &str,
+        context: &str,
+        s: &Settings,
+        c: &Control,
+        log: &Activity,
+        page: usize,
+    ) -> Result<PageContent> {
+        let result = self.read_inner(image, evidence, context, s, c, log, page);
+        if result.is_err() {
+            self.failed.store(true, Ordering::Release);
+        }
+        result
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn read_inner(
         &self,
         image: &DynamicImage,
         evidence: &str,
@@ -380,6 +583,9 @@ impl Server {
             items.push(json!({"type":"text","text":reference.description}));
         }
         let mut body = json!({"model":if self.model.alias.is_empty() || self.model.endpoint.is_none() && !s.external_server{&self.model.id}else{&self.model.alias},"messages":messages,"stream":true,"max_tokens":s.max_tokens,"temperature":s.temperature,"top_p":s.top_p,"seed":s.seed,"chat_template_kwargs":{"enable_thinking":false}});
+        if self.model.endpoint.is_none() && !s.external_server {
+            body["cache_prompt"] = json!(false);
+        }
         if self.model.endpoint.is_some() {
             body.as_object_mut()
                 .expect("compiled request object")
@@ -392,7 +598,15 @@ impl Server {
                 json!({"type":"json_object","schema":page_schema()})
             };
         }
-        let text = chat(&self.endpoint, body, s, c, log, page)?;
+        let text = chat_authenticated(
+            &self.endpoint,
+            body,
+            s,
+            c,
+            log,
+            page,
+            self.api_key.as_deref(),
+        )?;
         if let Err(error) = log.capture_response(&self.model.id, page, &text) {
             log.emit(
                 "evidence",
@@ -531,10 +745,24 @@ pub fn chat(
     log: &Activity,
     page: usize,
 ) -> Result<String> {
+    chat_authenticated(endpoint, body, s, c, log, page, None)
+}
+#[allow(clippy::too_many_arguments)]
+fn chat_authenticated(
+    endpoint: &str,
+    body: Value,
+    s: &Settings,
+    c: &Control,
+    log: &Activity,
+    page: usize,
+    api_key: Option<&str>,
+) -> Result<String> {
     let url = local_endpoint(endpoint)?.join("v1/chat/completions")?;
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
         let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(s.timeout()).build()?;
-        let request = client.post(url).json(&body).send();
+        let request = client.post(url).json(&body);
+        let request = if let Some(key) = api_key { request.bearer_auth(key) } else { request };
+        let request = request.send();
         tokio::pin!(request);
         let mut response = loop {
             tokio::select! {

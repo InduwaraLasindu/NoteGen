@@ -295,6 +295,8 @@ pub struct Desktop {
     review_error: String,
     opened_at: Option<f64>,
     completed_at: Option<Instant>,
+    warm_pool: Option<Arc<crate::warm_runtime::WarmPool>>,
+    warm_preference: (bool, u64),
 }
 impl Desktop {
     fn tr<'a>(&self, key: &'a str) -> &'a str {
@@ -305,6 +307,10 @@ impl Desktop {
         let draft = state.settings.clone();
         let raw = serde_json::to_string_pretty(&draft).unwrap_or_default();
         let studio = studio::Studio::new(&state.settings);
+        let warm_preference = (
+            state.settings.experience.warm_reader,
+            state.settings.experience.warm_reader_ttl_secs,
+        );
         Self {
             workbench: workbench::Workbench::default(),
             studio,
@@ -347,6 +353,76 @@ impl Desktop {
             review_error: String::new(),
             opened_at: None,
             completed_at: None,
+            warm_pool: None,
+            warm_preference,
+        }
+    }
+    /// Call before confidential sessions, hardware trials, or other cold-only work.
+    /// An active pool job is cancelled; an idle owned reader is stopped and waited for.
+    pub fn release_warm_reader(&self) {
+        if let Some(pool) = &self.warm_pool {
+            pool.release();
+        }
+    }
+    fn sync_warm_reader_preferences(&mut self) -> Result<()> {
+        self.state.settings.experience.validate()?;
+        let preference = (
+            self.state.settings.experience.warm_reader,
+            self.state.settings.experience.warm_reader_ttl_secs,
+        );
+        if preference != self.warm_preference {
+            if let Some(pool) = self.warm_pool.take() {
+                pool.shutdown();
+            }
+            self.warm_preference = preference;
+        }
+        if preference.0 && self.warm_pool.is_none() {
+            self.warm_pool = Some(Arc::new(crate::warm_runtime::WarmPool::new(
+                std::time::Duration::from_secs(preference.1),
+            )?));
+        }
+        Ok(())
+    }
+    pub(super) fn warm_reader_status_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(pool) = self.warm_pool.clone() else {
+            return;
+        };
+        let status = pool.status();
+        let busy = status.busy || self.active.is_some();
+        ui.horizontal_wrapped(|ui| {
+            let text = if busy {
+                "Warm reader is in use".into()
+            } else if status.cached_pid.is_some() {
+                format!(
+                    "Reader ready for compatible scans · {} s remaining",
+                    status.remaining_seconds
+                )
+            } else {
+                "Warm reader released".into()
+            };
+            ui.small(text).on_hover_text(&status.note);
+            if ui
+                .add_enabled(
+                    busy || status.cached_pid.is_some(),
+                    egui::Button::new(if busy {
+                        "Stop task and release reader"
+                    } else {
+                        "Release reader now"
+                    }),
+                )
+                .clicked()
+            {
+                self.running_queue = false;
+                if self.active.is_some() {
+                    self.control.cancelled.store(true, Ordering::Release);
+                }
+                pool.release();
+                self.notice = "Owned reader released. A later conversion starts fresh.".into();
+            }
+        });
+        if status.cached_pid.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
     pub fn from_context(cc: &eframe::CreationContext<'_>) -> Self {
@@ -617,6 +693,17 @@ impl Desktop {
         }
         let output = output_name(&input, &folder);
         let s = self.state.settings.clone();
+        if let Err(error) = self.sync_warm_reader_preferences() {
+            self.notice = error.to_string();
+            self.running_queue = false;
+            return;
+        }
+        let warm_pool = if s.preset == Preset::Fast {
+            self.release_warm_reader();
+            None
+        } else {
+            self.warm_pool.clone()
+        };
         self.control = Control::default();
         let cancelled = self.control.cancelled.clone();
         let questions = self.tx.clone();
@@ -674,7 +761,19 @@ impl Desktop {
                     }
                     let _ = tx.send(Message::QueueWeights(weights));
                 }
-                pipeline::convert(&input, &output, &s, &c, &log)
+                if let Some(pool) = &warm_pool {
+                    pipeline::convert_with_runtime(
+                        &input,
+                        &output,
+                        &s,
+                        &c,
+                        &log,
+                        pipeline::PreparationMode::Sequential,
+                        pool,
+                    )
+                } else {
+                    pipeline::convert(&input, &output, &s, &c, &log)
+                }
             }));
             let msg=match result {
                 Ok(Ok(r))=>Message::Complete(Box::new(r)),Ok(Err(e))=>failure(e),Err(_)=>Message::Failed("NG500".into(),"Worker stopped unexpectedly. Saved checkpoints remain available; inspect the activity log.".into())}
@@ -732,6 +831,9 @@ impl Desktop {
         let now = ctx.input(|i| i.time);
         self.opened_at.get_or_insert(now);
         self.poll(&ctx);
+        if let Err(error) = self.sync_warm_reader_preferences() {
+            self.experience.error = error.to_string();
+        }
         self.check_updates_when_idle(&ctx);
         self.theme(&ctx);
         let files = ctx.input(|i| i.raw.dropped_files.clone());
@@ -849,6 +951,7 @@ impl Desktop {
                 ui.add_space(17.);
                 self.progress_ui(ui);
                 self.live_preview_ui(ui);
+                self.warm_reader_status_ui(ui);
                 if !self.notice.is_empty(){
                     egui::Frame::new().fill(if self.error_code.is_empty(){
                         self.surface()}
@@ -1415,6 +1518,7 @@ impl Desktop {
                     ){
                         Ok(s)=>{
                             self.state.settings=s.clone();
+                            if let Err(error) = self.sync_warm_reader_preferences() { self.settings_error = error.to_string(); }
                             self.draft=s;
                             self.settings_error.clear();
                             self.notice="Settings applied. Adaptive values use 0; current running jobs keep their original settings.".into();
@@ -2268,6 +2372,17 @@ impl Desktop {
         }
     }
 }
+impl Drop for Desktop {
+    fn drop(&mut self) {
+        self.control.cancelled.store(true, Ordering::Release);
+        if let Some(pool) = &self.warm_pool {
+            pool.shutdown();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 impl eframe::App for Desktop {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         self.render(ui);
@@ -2286,6 +2401,9 @@ impl eframe::App for Desktop {
         let _ = self.flush_review();
         self.control.cancelled.store(true, Ordering::Relaxed);
         self.running_queue = false;
+        if let Some(pool) = &self.warm_pool {
+            pool.shutdown();
+        }
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }

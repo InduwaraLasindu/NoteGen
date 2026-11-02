@@ -219,6 +219,8 @@ pub struct ExperienceOptions {
     pub check_updates: bool,
     pub update_channel: UpdateChannel,
     pub defer_updates_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub warm_reader: bool,
+    pub warm_reader_ttl_secs: u64,
 }
 impl Default for ExperienceOptions {
     fn default() -> Self {
@@ -227,7 +229,18 @@ impl Default for ExperienceOptions {
             check_updates: true,
             update_channel: UpdateChannel::Stable,
             defer_updates_until: None,
+            warm_reader: false,
+            warm_reader_ttl_secs: 30,
         }
+    }
+}
+impl ExperienceOptions {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (1..=60).contains(&self.warm_reader_ttl_secs),
+            Fault::new("NG102", "Warm reader expiry must be 1–60 seconds")
+        );
+        Ok(())
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +395,7 @@ impl Settings {
             return bad("Invalid model allowlist");
         }
         self.assistance.validate()?;
+        self.experience.validate()?;
         anyhow::ensure!(
             self.writer
                 .id
@@ -625,6 +639,9 @@ pub struct Page {
     /// Human-confirmed annotation metadata, separate from model-generated blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub manual_layers: Vec<crate::layers::Assignment>,
+    /// Confirmed source covers, bound to exact source pixels and kept separate from reader output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_redactions: Vec<crate::redactions::ConfirmedMask>,
 }
 impl Page {
     pub fn validate(&self) -> Result<()> {
@@ -647,6 +664,16 @@ impl Page {
         );
         self.content.validate()?;
         crate::layers::validate_metadata(&self.manual_layers)?;
+        crate::redactions::validate_metadata(&self.confirmed_redactions)?;
+        anyhow::ensure!(
+            self.confirmed_redactions
+                .iter()
+                .all(|mask| mask.source.page == self.page),
+            Fault::new(
+                "NG500",
+                "Redaction source page does not match its checkpoint"
+            )
+        );
         let mut blocks = 0usize;
         for candidate in &self.candidates {
             blocks += candidate.content.blocks.len();

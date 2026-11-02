@@ -27,6 +27,10 @@ foreach($id in @('glm-ocr','lighton3-1b','qwen35-2b')){
  $env:NOTEGEN_LIVE_PROJECTOR=$registered.projector
  & cargo test --locked --features desktop --test engine live_model -j 2 -- --ignored --nocapture
  if($LASTEXITCODE -ne 0){throw "Real local inference failed: $id"}
+ if($id -eq 'glm-ocr'){
+  & cargo test --locked --features desktop --test warm_reader native_warm_reader_reuses_pid_with_fresh_context_and_bounded_lifecycle -j 2 -- --ignored --nocapture --test-threads=1
+  if($LASTEXITCODE -ne 0){throw 'Native warm-reader isolation and lifecycle gate failed'}
+ }
 }
 # Exercise actual model-major orchestration and persisted evidence, not only adapters.
 $settings=Join-Path $smoke 'smoke-settings.json'
