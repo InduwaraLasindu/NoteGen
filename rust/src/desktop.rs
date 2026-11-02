@@ -1747,9 +1747,11 @@ impl Desktop {
         let mut export = false;
         let mut reorder = None;
         let mut action = None;
-        egui::Window::new("Review & correct").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).resizable(true).show(ctx,|ui|{
+        let review_bounds = ctx.content_rect().shrink(8.);
+        egui::Window::new("Review & correct").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).max_height(review_bounds.height()).constrain_to(review_bounds).vscroll(true).resizable(true).show(ctx,|ui|{
             if self.worker.is_some(){ui.disable();}
-            ui.horizontal(|ui|{
+            let content_top = ui.cursor().top();
+            ui.horizontal_wrapped(|ui|{
                 ui.strong(format!("Page {} / {}",r.page.page,r.project.manifest.pages.len()));
                 if ui.add_enabled(r.index>0 && !r.dirty && !r.raw_open,egui::Button::new("← Previous")).clicked(){
                     next=Some(r.index-1);
@@ -1778,8 +1780,15 @@ impl Desktop {
                 }
                 if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Re-read with context")).clicked(){self.reconsider_review(&r.project,ctx);}
             });
+            // The window scroll area has an unbounded content height. Use its
+            // finite clip height and reserve wrapped action/help rows instead.
+            // Subtracting content-relative header height keeps this stable as
+            // the outer window scrolls; expanded headers remain reachable.
+            let action_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button) + ui.spacing().button_padding.y * 2.);
+            let footer_height = action_height * 4. + ui.spacing().item_spacing.y * 6. + ui.text_style_height(&egui::TextStyle::Small) * 4.;
+            let pane_height = (ui.clip_rect().height() - (ui.cursor().top() - content_top) - footer_height).clamp(96.,530.);
             ui.columns(2,|cols|{
-                egui::ScrollArea::both().id_salt("source").max_height(530.).show(&mut cols[0],|ui|{
+                egui::ScrollArea::both().id_salt("source").max_height(pane_height).show(&mut cols[0],|ui|{
                     if let Some(texture)=&r.texture {
                         let size=texture.size_vec2();
                         let width=ui.available_width().max(200.)*r.zoom;
@@ -1823,7 +1832,7 @@ impl Desktop {
                     }
                 }
                 );
-                egui::ScrollArea::vertical().id_salt("editor").max_height(530.).show(&mut cols[1],|ui|{
+                egui::ScrollArea::vertical().id_salt("editor").max_height(pane_height).show(&mut cols[1],|ui|{
                     for w in &r.page.content.warnings {
                         ui.colored_label(Color32::from_rgb(241,187,111),w);
                     }
@@ -2688,6 +2697,200 @@ mod acceptance {
                 .unwrap();
         }
         (dir, project)
+    }
+
+    fn review_access_tree(
+        app: &mut Desktop,
+        ctx: &egui::Context,
+        viewport: Vec2,
+        events: Vec<egui::Event>,
+    ) -> egui::accesskit::TreeUpdate {
+        app.theme(ctx);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport)),
+                events,
+                ..Default::default()
+            },
+            |ui| app.review_ui(ui.ctx()),
+        );
+        output.textures_delta.clear();
+        output.platform_output.accesskit_update.take().unwrap()
+    }
+    fn review_button<'a>(
+        tree: &'a egui::accesskit::TreeUpdate,
+        prefix: &str,
+    ) -> (egui::accesskit::NodeId, &'a egui::accesskit::Node) {
+        tree.nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node.label().is_some_and(|label| label.starts_with(prefix))
+            })
+            .map(|(id, node)| (*id, node))
+            .unwrap_or_else(|| panic!("Missing review button: {prefix}"))
+    }
+    fn visible_review_button(
+        tree: &egui::accesskit::TreeUpdate,
+        prefix: &str,
+        viewport: Vec2,
+        window: egui::Rect,
+    ) -> egui::Rect {
+        let (_, node) = review_button(tree, prefix);
+        assert!(
+            !node.is_hidden() && !node.is_disabled(),
+            "{prefix} is unavailable"
+        );
+        let bounds = node.bounds().unwrap();
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+        );
+        assert!(
+            rect.is_finite() && rect.width() > 40. && rect.height() > 24.,
+            "{prefix} has invalid or clipped bounds: {rect:?}"
+        );
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, viewport).contains_rect(rect),
+            "{prefix} is outside viewport: {rect:?}, viewport={viewport:?}"
+        );
+        assert!(
+            window.shrink(2.).contains_rect(rect),
+            "{prefix} is outside review window: {rect:?}, window={window:?}"
+        );
+        rect
+    }
+
+    #[test]
+    fn review_footer_actions_fit_normal_viewport_and_large_text_and_save_by_pointer() {
+        for scale in [1., 1.4] {
+            let (_dir, project) = two_page_review();
+            image::RgbImage::from_pixel(900, 1200, image::Rgb([255, 255, 255]))
+                .save(project.image(1))
+                .unwrap();
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut app = Desktop::new(Workspace::default());
+            app.state.settings.ui.scale = scale;
+            app.state.settings.ui.reduced_motion = true;
+            app.open_review(project.root.clone(), &ctx);
+            let review = app.review.as_mut().unwrap();
+            assert!(review.texture.is_some());
+            review.page.content.blocks[0].text = "Correction saved from visible footer".into();
+            review.dirty = true;
+            let viewport = egui::vec2(1140., 890.) / scale;
+            for _ in 0..3 {
+                review_access_tree(&mut app, &ctx, viewport, vec![]);
+            }
+            let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+            let window = ctx
+                .memory(|memory| memory.area_rect(egui::Id::unique("Review & correct")))
+                .unwrap();
+            let save = visible_review_button(&tree, "Save draft", viewport, window);
+            visible_review_button(&tree, "Save & mark reviewed", viewport, window);
+            visible_review_button(&tree, "Keyboard review", viewport, window);
+            // Bounds alone do not prove hit testing. Activate Save with real
+            // pointer events at the visible button, without scrolling first.
+            for pressed in [true, false] {
+                review_access_tree(
+                    &mut app,
+                    &ctx,
+                    viewport,
+                    vec![
+                        egui::Event::PointerMoved(save.center()),
+                        egui::Event::PointerButton {
+                            pos: save.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                );
+            }
+            assert!(
+                !app.review.as_ref().unwrap().dirty,
+                "Visible Save was not clickable at scale {scale}: {}",
+                app.review_error
+            );
+            assert_eq!(
+                project.load(1).unwrap().content.plain(),
+                "Correction saved from visible footer"
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_review_queue_can_scroll_footer_actions_into_a_small_viewport() {
+        use egui::accesskit::{Action, ActionRequest, TreeId};
+        let (_dir, project) = two_page_review();
+        image::RgbImage::from_pixel(900, 1200, image::Rgb([255, 255, 255]))
+            .save(project.image(1))
+            .unwrap();
+        let mut page = project.load(1).unwrap();
+        page.content.blocks = (0..30)
+            .map(|i| Block::text(format!("Uncertain source {i}")))
+            .collect();
+        project.save(&page).unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = Desktop::new(Workspace::default());
+        app.state.settings.ui.reduced_motion = true;
+        app.open_review(project.root.clone(), &ctx);
+        let viewport = egui::vec2(780., 560.);
+        for _ in 0..3 {
+            review_access_tree(&mut app, &ctx, viewport, vec![]);
+        }
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        let queue = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::DisclosureTriangle
+                    && node
+                        .label()
+                        .is_some_and(|label| label.starts_with("Review queue"))
+            })
+            .unwrap()
+            .0;
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Click,
+                target_tree: TreeId::ROOT,
+                target_node: queue,
+                data: None,
+            })],
+        );
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        review_button(&tree, "Defer selected issue");
+        let (save, node) = review_button(&tree, "Save draft");
+        assert!(
+            node.bounds().unwrap().y0 > viewport.y as f64,
+            "Expanded queue did not exercise outer-window scrolling"
+        );
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::ScrollIntoView,
+                target_tree: TreeId::ROOT,
+                target_node: save,
+                data: None,
+            })],
+        );
+        for _ in 0..3 {
+            review_access_tree(&mut app, &ctx, viewport, vec![]);
+        }
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        let window = ctx
+            .memory(|memory| memory.area_rect(egui::Id::unique("Review & correct")))
+            .unwrap();
+        visible_review_button(&tree, "Save draft", viewport, window);
+        visible_review_button(&tree, "Save & mark reviewed", viewport, window);
+        visible_review_button(&tree, "Keyboard review", viewport, window);
     }
 
     #[test]

@@ -50,8 +50,50 @@ function Test-Desktop([string]$name) {
   $results.Add("Installed GUI launched: $name")
  } finally {if(-not $p.HasExited){Stop-Process -Id $p.Id -Force}}
 }
+function Test-Provenance([string]$stage) {
+ Write-Host "[QA] Checking installed provenance: $stage"
+ foreach($file in @('build-provenance.json','notegen.cdx.json','provenance.sha256')){
+  if(-not(Test-Path -LiteralPath (Join-Path $installDir "provenance/$file") -PathType Leaf)){throw "Installed provenance missing ($stage): $file"}
+ }
+ $metadataHashes=@{}
+ foreach($line in (Get-Content (Join-Path $installDir 'provenance/provenance.sha256'))){
+  if($line -notmatch '^([a-f0-9]{64})  (build-provenance\.json|notegen\.cdx\.json)$'){throw "Installed provenance hash record is invalid ($stage)."}
+  $metadataName=$Matches[2];$metadataHash=$Matches[1]
+  if($metadataHashes.ContainsKey($metadataName)){throw "Installed provenance hash record is duplicated ($stage)."}
+  $metadataHashes[$metadataName]=$metadataHash
+  if((Get-FileHash -LiteralPath (Join-Path $installDir "provenance/$metadataName") -Algorithm SHA256).Hash.ToLowerInvariant() -ne $metadataHash){throw "Installed provenance hash mismatch ($stage): $metadataName"}
+ }
+ if($metadataHashes.Count -ne 2){throw "Installed provenance hash inventory is incomplete ($stage)."}
+ $installedProvenance=Get-Content (Join-Path $installDir 'provenance/build-provenance.json') -Raw | ConvertFrom-Json
+ if($installedProvenance.application.version -ne $Version -or $installedProvenance.source.commit -notmatch '^[a-f0-9]{40}$'){throw "Installed provenance source or version is invalid ($stage)."}
+ foreach($binaryName in @('NoteGen.exe','notegen-cli.exe')){
+  $subjects=@($installedProvenance.subjects | Where-Object name -EQ $binaryName)
+  if($subjects.Count -ne 1 -or (Get-FileHash -LiteralPath (Join-Path $installDir $binaryName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $subjects[0].digest.sha256){throw "Installed application provenance mismatch ($stage): $binaryName"}
+ }
+ $results.Add("Installed dependency inventory and build provenance match their hashes and application executables: $stage")
+}
 try {
  if($PreviousInstaller){
+  # Exercise the current installer on a genuinely absent target before the upgrade chain.
+  if(Test-Path -LiteralPath $installDir){throw 'Clean-install QA target already exists.'}
+  Install-NoteGen 'clean-current-install'
+  Push-Location $installDir
+  try {
+   $reportedCurrent=& ./notegen-cli.exe --version
+   if($LASTEXITCODE -ne 0 -or ([string]$reportedCurrent).Trim() -ne "notegen-cli $Version"){throw 'Clean-installed executable version does not match the release.'}
+   & ./notegen-cli.exe self-test -o (Join-Path $Evidence 'clean-installed-word.docx')
+   if($LASTEXITCODE -ne 0){throw 'Clean-installed CLI Word export failed.'}
+  } finally {Pop-Location}
+  Test-Provenance "clean $Version installation"
+  Test-Desktop "clean $Version installation"
+  $cleanUninstallLog=Join-Path $Evidence 'clean-current-uninstall.log'
+  $cleanUninstaller=Start-Process -FilePath (Join-Path $installDir 'unins000.exe') -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="{0}"' -f $cleanUninstallLog)) -WindowStyle Hidden -PassThru
+  $cleanExit=Wait-QAProcess $cleanUninstaller 'Clean-install uninstaller' 180 $cleanUninstallLog
+  if($cleanExit -ne 0){throw "Clean-install uninstall failed: $cleanExit"}
+  for($i=0;$i -lt 20 -and (Test-Path (Join-Path $installDir 'NoteGen.exe'));$i++){Start-Sleep -Milliseconds 250}
+  if(Test-Path (Join-Path $installDir 'NoteGen.exe')){throw 'Clean-install uninstall left the application EXE behind.'}
+  if(Test-Path $registry){throw 'Clean-install uninstall left its Apps & Features registration behind.'}
+  $results.Add("Clean $Version installation, CLI version, Word export, GUI, provenance and uninstall passed")
   $newInstaller=$Installer
   $Installer=(Resolve-Path $PreviousInstaller).Path
   Install-NoteGen 'previous-version-install'
@@ -68,9 +110,11 @@ try {
  if($PreviousInstaller -and [IO.File]::ReadAllText($legacyMarker) -ne 'EXISTING USER DATA MUST SURVIVE'){throw "Version $PreviousVersion to $Version upgrade changed user data."}
  if($PreviousInstaller){$results.Add("Real $PreviousVersion to $Version upgrade preserved existing user data and updated the executable")}
 
- foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/tesseract/tesseract.exe','runtime/llama-server.exe','vcruntime140.dll','runtime/vcruntime140.dll','scripts/Configure-AI.ps1','unins000.exe')) {
+ foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/tesseract/tesseract.exe','runtime/llama-server.exe','vcruntime140.dll','runtime/vcruntime140.dll','scripts/Configure-AI.ps1','provenance/build-provenance.json','provenance/notegen.cdx.json','provenance/provenance.sha256','unins000.exe')) {
   if(-not(Test-Path (Join-Path $installDir $f))){throw "Installed dependency missing: $f"}
  }
+ $currentStage=if($PreviousInstaller){"$PreviousVersion to $Version upgrade"}else{"clean $Version installation"}
+ Test-Provenance $currentStage
  $entry=Get-ItemProperty $registry -ErrorAction Stop
  if($entry.DisplayVersion -ne $Version -or $entry.InstallLocation.TrimEnd('\') -ne $installDir.TrimEnd('\')){throw 'Apps & Features registration is incorrect.'}
  $programs=[Environment]::GetFolderPath('Programs')
@@ -83,7 +127,7 @@ try {
  Write-Host "[QA] Built-in PowerShell AI setup dry run"
  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir 'scripts/Configure-AI.ps1') -DryRun -NoPause
  if($LASTEXITCODE -ne 0){throw 'Start menu AI setup helper failed validation.'}
- Test-Desktop 'fresh installation'
+ Test-Desktop $currentStage
  Push-Location $installDir
  try {
  Write-Host "[QA] Installed CLI and native dependencies"
@@ -144,6 +188,7 @@ try {
  $results.Add('Installed writer creation, confirmed crop learning, profile/font export and native Windows TTF rendering passed')
  Write-Host '[QA] One-click AI setup through the actual installer'
  Install-NoteGen 'integrated-ai-setup' -AI
+ Test-Provenance 'after integrated AI setup'
  $aiLog=Get-Content (Join-Path $Evidence 'integrated-ai-setup.log') -Raw
  if($aiLog -notmatch 'NOTEGEN_AI_SETUP_VERIFIED' -or $aiLog -notmatch 'NGPROGRESS\|1000\|'){throw 'Installer did not finish its integrated AI progress/setup branch.'}
  $aiProfile=Join-Path $installDir 'ai-settings.json'
@@ -186,6 +231,7 @@ try {
  $customEngineHash=(Get-FileHash $engine -Algorithm SHA256).Hash
  Write-Host "[QA] Reinstall and runtime/data preservation"
  Install-NoteGen 'upgrade'
+ Test-Provenance 'same-version reinstall'
  if((Get-FileHash $writerFile -Algorithm SHA256).Hash -ne $writerHash){throw 'Upgrade modified a handwriting profile.'}
  if([IO.File]::ReadAllText($model) -ne 'USER MODEL MUST SURVIVE' -or [IO.File]::ReadAllText($document) -ne 'USER DOCUMENT MUST SURVIVE'){throw 'Upgrade modified user data.'}
  if((Get-FileHash $engine -Algorithm SHA256).Hash -ne $customEngineHash){throw 'Upgrade overwrote the selected AI runtime.'}

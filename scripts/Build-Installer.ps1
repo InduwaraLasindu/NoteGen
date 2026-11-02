@@ -10,7 +10,7 @@ $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Use a numeric major.minor.patch version.'}
 $sourceRoot=Split-Path $PSScriptRoot -Parent
 $Payload=(Resolve-Path $Payload).Path
-foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/llama-server.exe','runtime/tesseract/tesseract.exe','assets/model-downloads.json','LICENSE')) {
+foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/llama-server.exe','runtime/tesseract/tesseract.exe','assets/model-downloads.json','provenance/build-provenance.json','provenance/notegen.cdx.json','provenance/provenance.sha256','LICENSE')) {
  if(-not(Test-Path (Join-Path $Payload $f))){throw "Verified payload is incomplete: $f"}
 }
 # The original package smoke test leaves only synthetic checkpoints. None belong in an installer.

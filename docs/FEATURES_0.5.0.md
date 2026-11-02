@@ -1,6 +1,6 @@
 # 0.5.0 implementation ledger
 
-This ledger covers all 100 proposals. Implemented describes the concrete code path; release validation is still in progress. Partial items explicitly retain missing scope. Planned items remain work, not shipped claims. Corpus collection (#1) and Windows signing (#10) were excluded at the user’s request. No release can promise universal accuracy or 100% stability.
+This ledger covers all 100 proposals. Implemented describes the concrete code path; [validation](TESTING.md) and the published installer manifest record release evidence. Partial items explicitly retain missing scope. Planned items remain work, not shipped claims. Corpus collection (#1) and Windows signing (#10) were excluded at the user’s request. No release can promise universal accuracy or 100% stability.
 
 | # | Proposal | Status | Implementation / remaining scope |
 |---|---|---|---|

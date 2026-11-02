@@ -1,6 +1,8 @@
 # NoteGen 0.5.0
 
-Release candidate. Windows/Linux and installer validation remain in progress.
+The [verification record](TESTING.md) describes the source and installer release
+gates. Published assets include their exact source, binary hashes and validation
+results in `installer-manifest.json`.
 
 The local workbench brings project search, metadata, templates, references and recovery
 together with source-linked review. Saved revisions support undo, redo, comparison and

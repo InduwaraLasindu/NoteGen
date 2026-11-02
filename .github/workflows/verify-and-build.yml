@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       NOTEGEN_FIXTURE_DIR: build/native-fixture
       NOTEGEN_FONT_EVIDENCE: build/font-evidence

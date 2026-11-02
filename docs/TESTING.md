@@ -4,13 +4,17 @@ Implemented behavior, mocked/protocol tests and physical quality evidence are se
 Use [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 for exact Windows/Linux results, native visual evidence and the executable download.
 
-## 0.5.0 validation — in progress
+## 0.5.0 release gates
 
-The 0.5.0 workbench changes have not yet passed the release gate. Windows and Linux
-CI run all-target strict Clippy and the complete ordinary suite twice, with the
+Publishing 0.5.0 requires successful Windows and Linux verification. CI runs
+all-target strict Clippy and the complete ordinary suite twice, with the
 second pass using serial test execution. Native OCR, font installation, credential
 storage, desktop captures, packaged conversion and real CPU model checks follow.
-The installer has separate clean-install, 0.4.1 upgrade and retention checks.
+The installer has separate clean-install, 0.4.1 upgrade and retention checks,
+including verification of the installed dependency inventory and application
+provenance. Its published `installer-manifest.json` identifies the exact source
+commit, source run, asset hashes and successful installer checks. Use that run
+for the test count and native-model results of the downloaded version.
 
 Local formatting and locked metadata checks are available. Local compilation is
 blocked by Windows Application Control rejecting dependency build scripts; CI is
