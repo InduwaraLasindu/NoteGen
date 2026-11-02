@@ -18,6 +18,7 @@ fn fault(s: &str) -> anyhow::Error {
     Fault::new("NG500", s).into()
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Shape {
     kind: String,
     bbox: Option<BoxRect>,
@@ -35,6 +36,7 @@ fn shape(b: &Block) -> Shape {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BaselineField {
     tag: String,
     page: usize,
@@ -43,6 +45,7 @@ pub(crate) struct BaselineField {
     text: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Baseline {
     schema: u32,
     input_sha256: String,
@@ -113,7 +116,7 @@ fn parse(xml: &str) -> Result<roxmltree::Document<'_>> {
 fn named(n: roxmltree::Node<'_, '_>, name: &str) -> bool {
     n.tag_name().namespace() == Some(W) && n.tag_name().name() == name
 }
-fn tag(n: roxmltree::Node<'_, '_>) -> Option<&str> {
+fn tag<'a, 'input>(n: roxmltree::Node<'a, 'input>) -> Option<&'a str> {
     n.children()
         .find(|n| named(*n, "sdtPr"))?
         .children()
@@ -318,12 +321,35 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
         fault("Invalid Word document namespace")
     );
     let mut exported = BTreeSet::new();
+    anyhow::ensure!(
+        b.pages
+            .iter()
+            .all(|(n, shapes)| p.manifest.pages.contains(n) && shapes.len() <= 500),
+        fault("Word baseline references invalid source pages")
+    );
     for f in &b.fields {
+        let saved = b
+            .pages
+            .get(&f.page)
+            .and_then(|shapes| shapes.get(f.block))
+            .ok_or_else(|| fault("Word baseline block is absent"))?;
+        let allowed = if saved.kind == "table" {
+            let parts: Vec<_> = f.field.split(':').collect();
+            parts.len() == 3
+                && parts[0] == "cell"
+                && parts[1].parse::<usize>().is_ok_and(|r| r < saved.rows)
+                && parts[2].parse::<usize>().is_ok_and(|c| c < saved.cols)
+        } else if saved.kind == "figure" {
+            ["description", "interpretation"].contains(&f.field.as_str())
+        } else {
+            f.field == "text"
+        };
         anyhow::ensure!(
             p.manifest.pages.contains(&f.page)
                 && f.tag == format!("ng:p{}:b{}:{}", f.page, f.block, f.field)
                 && exported.insert(f.tag.clone())
-                && f.text.len() <= 120000,
+                && f.text.len() <= 120000
+                && allowed,
             fault("Invalid or duplicate Word baseline control")
         );
     }

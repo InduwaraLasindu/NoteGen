@@ -208,7 +208,11 @@ impl Estimate {
     pub fn window(&self, now: f64) -> Option<FinishWindow> {
         let remaining = self.snapshot(now).remaining?;
         if self.succeeded {
-            return Some(FinishWindow { earliest_seconds: 0., latest_seconds: 0., reasons: vec![] });
+            return Some(FinishWindow {
+                earliest_seconds: 0.,
+                latest_seconds: 0.,
+                reasons: vec![],
+            });
         }
         let mut expected = 0.;
         let mut lower = 0.;
@@ -216,31 +220,48 @@ impl Estimate {
         let mut contributors = vec![];
         for (phase, s) in &self.steps {
             let left = s.total.saturating_sub(s.done) as f64;
-            if left == 0. { continue; }
+            if left == 0. {
+                continue;
+            }
             let estimate = left * s.seconds;
             expected += estimate;
             let (lo, hi) = if s.samples >= 3 {
-                (s.fastest.max(0.000_001) * 0.8, s.slowest.max(s.seconds) * 1.25)
+                (
+                    s.fastest.max(0.000_001) * 0.8,
+                    s.slowest.max(s.seconds) * 1.25,
+                )
             } else {
                 (s.seconds * 0.5, s.slowest.max(s.seconds) * 2.5)
             };
             lower += left * lo;
             upper += left * hi;
-            contributors.push((estimate, if s.samples == 0 {
-                format!("{phase:?}: initial estimate; no completed timing samples")
-            } else {
-                format!("{phase:?}: {} timing samples, observed {:.2}–{:.2}s per unit{}",s.samples,s.fastest,s.slowest,
-                    if s.samples < 3 { "; sparse observations widen range" } else { "" })
-            }));
+            contributors.push((
+                estimate,
+                if s.samples == 0 {
+                    format!("{phase:?}: initial estimate; no completed timing samples")
+                } else {
+                    format!(
+                        "{phase:?}: {} timing samples, observed {:.2}–{:.2}s per unit{}",
+                        s.samples,
+                        s.fastest,
+                        s.slowest,
+                        if s.samples < 3 {
+                            "; sparse observations widen range"
+                        } else {
+                            ""
+                        }
+                    )
+                },
+            ));
         }
         if expected <= 0. || !expected.is_finite() || !remaining.is_finite() {
             return None;
         }
-        contributors.sort_by(|a,b| b.0.total_cmp(&a.0));
+        contributors.sort_by(|a, b| b.0.total_cmp(&a.0));
         Some(FinishWindow {
-            earliest_seconds: remaining * (lower / expected).clamp(0.,1.),
+            earliest_seconds: remaining * (lower / expected).clamp(0., 1.),
             latest_seconds: remaining * (upper / expected).max(1.),
-            reasons: contributors.into_iter().map(|(_,reason)|reason).collect(),
+            reasons: contributors.into_iter().map(|(_, reason)| reason).collect(),
         })
     }
 }
@@ -382,17 +403,17 @@ mod tests {
     }
     #[test]
     fn planning_windows_show_sparse_stages_and_observed_variability() {
-        let mut e=Estimate::new(0.);
-        e.update(&Work::new(Phase::Read,0,10,10000,true),0.);
-        e.update(&Work::new(Phase::Export,0,1,1000,false),0.);
-        let initial=e.window(0.).unwrap();
-        assert_eq!(initial.earliest_seconds,50.5);
-        assert_eq!(initial.latest_seconds,252.5);
+        let mut e = Estimate::new(0.);
+        e.update(&Work::new(Phase::Read, 0, 10, 10000, true), 0.);
+        e.update(&Work::new(Phase::Export, 0, 1, 1000, false), 0.);
+        let initial = e.window(0.).unwrap();
+        assert_eq!(initial.earliest_seconds, 50.5);
+        assert_eq!(initial.latest_seconds, 252.5);
         assert!(initial.reasons[0].contains("initial"));
-        for (done,now) in [(1,5.),(2,15.),(3,35.)] {
-            e.update(&Work::new(Phase::Read,done,10,10000,true),now);
+        for (done, now) in [(1, 5.), (2, 15.), (3, 35.)] {
+            e.update(&Work::new(Phase::Read, done, 10, 10000, true), now);
         }
-        let measured=e.window(35.).unwrap();
+        let measured = e.window(35.).unwrap();
         assert!(measured.earliest_seconds < e.snapshot(35.).remaining.unwrap());
         assert!(measured.latest_seconds > e.snapshot(35.).remaining.unwrap());
         assert!(measured.reasons[0].contains("3 timing samples"));
@@ -401,15 +422,18 @@ mod tests {
     }
     #[test]
     fn planning_windows_pause_finish_and_scale_without_nonfinite_output() {
-        let mut e=Estimate::new(0.);
+        let mut e = Estimate::new(0.);
         assert!(e.window(0.).is_none());
-        e.update(&Work::new(Phase::Read,0,2,1000,true),0.);
-        let w=e.window(0.).unwrap();
-        assert_eq!(w.scaled(2.).unwrap().latest_seconds,w.latest_seconds*2.);
+        e.update(&Work::new(Phase::Read, 0, 2, 1000, true), 0.);
+        let w = e.window(0.).unwrap();
+        assert_eq!(w.scaled(2.).unwrap().latest_seconds, w.latest_seconds * 2.);
         assert!(w.scaled(f64::INFINITY).is_none());
         assert!(w.scaled(-1.).is_none());
-        e.suspend(1.,true); assert!(e.window(10.).is_none());
-        e.suspend(11.,false); assert!(e.window(12.).is_some());
-        e.finish(13.,true); assert_eq!(e.window(13.).unwrap().latest_seconds,0.);
+        e.suspend(1., true);
+        assert!(e.window(10.).is_none());
+        e.suspend(11., false);
+        assert!(e.window(12.).is_some());
+        e.finish(13., true);
+        assert_eq!(e.window(13.).unwrap().latest_seconds, 0.);
     }
 }

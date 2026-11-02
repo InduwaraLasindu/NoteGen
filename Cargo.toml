@@ -135,3 +135,7 @@ path = "rust/tests/bundles.rs"
 name = "resources"
 path = "rust/tests/resources.rs"
 
+[[test]]
+name = "roundtrip"
+path = "rust/tests/roundtrip.rs"
+

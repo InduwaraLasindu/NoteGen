@@ -132,13 +132,30 @@ pub fn metadata(p: &Project) -> Result<Metadata> {
     }
     Ok(m)
 }
-pub fn save_metadata(p: &Project, m: &Metadata) -> Result<()> {
+fn metadata_lock(p: &Project) -> Result<fs::File> {
+    let path = p.root.join("project-metadata.lock");
+    internal(p, &path)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.try_lock()
+        .map_err(|_| fault("Another project metadata edit is active; retry after it finishes"))?;
+    Ok(file)
+}
+fn save_metadata_locked(p: &Project, m: &Metadata) -> Result<()> {
     validate_metadata(m)?;
     let mut m = m.clone();
     m.updated = chrono::Utc::now().to_rfc3339();
     let path = p.root.join("project-metadata.json");
     internal(p, &path)?;
     atomic_json(&path, &m)
+}
+pub fn save_metadata(p: &Project, m: &Metadata) -> Result<()> {
+    let _guard = metadata_lock(p)?;
+    save_metadata_locked(p, m)
 }
 /// Attach an explicitly selected local background file. It never becomes transcription evidence.
 pub fn attach_reference(
@@ -170,13 +187,14 @@ pub fn attach_reference(
         sha256,
         bytes: info.len(),
     };
+    let _guard = metadata_lock(p)?;
     let mut m = metadata(p)?;
     anyhow::ensure!(
         !m.references.iter().any(|r| r.id == reference.id),
         fault("This file and role are already linked")
     );
     m.references.push(reference.clone());
-    save_metadata(p, &m)?;
+    save_metadata_locked(p, &m)?;
     Ok(reference)
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

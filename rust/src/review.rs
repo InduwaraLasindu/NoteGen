@@ -90,11 +90,21 @@ fn page_valid(p: &Project, page: &Page) -> Result<()> {
             && page.seconds.is_finite()
             && page.seconds >= 0.0
             && page.candidates.len() <= 1024
-            && page.source_warnings.len() <= 1000,
+            && page.source_warnings.len() <= 1000
+            && page.source_warnings.iter().all(|w| w.len() <= 8000),
         fail("Invalid revision evidence")
     );
     page.content.validate()?;
     for c in &page.candidates {
+        anyhow::ensure!(
+            c.reliability.is_finite()
+                && c.reliability >= 0.0
+                && c.model_id.len() <= 1000
+                && c.family.len() <= 1000
+                && c.view.len() <= 1000
+                && c.region.as_ref().is_none_or(BoxRect::valid),
+            fail("Invalid reader evidence in review revision")
+        );
         c.content.validate()?;
     }
     Ok(())
