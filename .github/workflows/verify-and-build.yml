@@ -63,7 +63,7 @@ jobs:
       - run: cargo clippy --locked --all-features --all-targets --keep-going -j 2 -- -D warnings
       - name: Review window interaction and viewport acceptance
         id: review_layout
-        run: cargo test --locked --all-features --lib desktop::acceptance:: -j 2
+        run: 'cargo test --locked --all-features --lib desktop::acceptance:: -j 2'
       - name: All Rust tests and real raster-PDF OCR
         id: first_tests
         if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.review_layout.outcome == 'success' }}
