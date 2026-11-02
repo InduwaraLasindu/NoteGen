@@ -16,10 +16,12 @@ provenance. Its published `installer-manifest.json` identifies the exact source
 commit, source run, asset hashes and successful installer checks. Use that run
 for the test count and native-model results of the downloaded version.
 
-Local formatting and locked metadata checks are available. Local compilation is
-blocked by Windows Application Control rejecting dependency build scripts; CI is
-the compilation/test source for this change. Native accessibility-tree tests are
-included; the [Narrator audit](ACCESSIBILITY.md) remains pending. Real handwriting
+Local formatting, locked metadata and all-feature/all-target type checks passed.
+A local GNU test executable compiled but exited with an access violation before
+the test harness; no tests passed in that attempt. Native execution evidence comes
+from Linux/MSVC CI and the verified MSVC portable's local CLI, Word and two printed
+OCR checks. Native accessibility-tree tests are included; the
+[Narrator audit](ACCESSIBILITY.md) remains pending. Real handwriting
 quality, additional hardware and native-language acceptance require their own
 measurements. The historical results below apply to their named source snapshots.
 

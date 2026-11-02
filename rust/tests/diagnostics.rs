@@ -436,7 +436,7 @@ fn repair_requires_supported_unique_pins_and_respects_storage_failures() {
 fn repair_rejects_same_size_atomic_replacement_without_touching_it_or_registrations() {
     let root = tempfile::tempdir().unwrap();
     let s = repair_settings(root.path());
-    let ids = vec!["lighton3-1b".into()];
+    let ids: Vec<String> = vec!["lighton3-1b".into()];
     let (_, pin) = setup::pinned(&ids[0]).unwrap();
     let version = s.models_dir.join("versions/lighton3-1b").join(pin.revision);
     fs::create_dir_all(&version).unwrap();

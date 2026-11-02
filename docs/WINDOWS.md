@@ -1,8 +1,8 @@
 # Windows setup and usage
 
 Use Windows 10 build 19041 or newer, or Windows 11, on an x64-compatible system.
-Download **[NoteGen-Setup-0.2.0.exe](https://github.com/InduwaraLasindu/NoteGen/releases/download/v0.2.0/NoteGen-Setup-0.2.0.exe)** from
-[GitHub Releases](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.2.0) and run the wizard. It installs per user without
+Download the latest **NoteGen-Setup** installer from
+[GitHub Releases](https://github.com/InduwaraLasindu/NoteGen/releases/latest) and run the wizard. It installs per user without
 requesting administrator rights. Launch NoteGen from the Start menu. English print,
 PDFium, Tesseract and Word export are included. See [Installer details](INSTALLER.md).
 
@@ -26,7 +26,7 @@ CUDA13 uses CUDA 13.4 and requires a compatible GPU/driver; older cards may need
 runtime such as CUDA13. CPU mode is also available with -Backend CPU.
 CUDA runtime/server downloads total roughly 590 MB; Vulkan roughly 38 MB.
 
-Scripts pin official llama.cpp b11998 asset SHA256. Model setup pins immutable model
+Scripts pin official llama.cpp b12032 asset SHA256. Model setup pins immutable model
 revisions and original LFS SHA256, probes free RAM/VRAM, chooses fitting models and
 registers verified files. Conversion never downloads. Downloads resume via .part files.
 If a range is rejected, remove only that invalid .part and retry. Model terms remain
