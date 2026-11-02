@@ -1,6 +1,6 @@
 //! Durable, source-preserving review revisions and previewed correction rules.
 use crate::{
-    storage::{Project, atomic_json, fingerprint, read_json},
+    storage::{Control, Project, atomic_json, fingerprint, read_json},
     types::*,
 };
 use serde::{Deserialize, Serialize};

@@ -1130,7 +1130,12 @@ mod tests {
                 let start = std::time::Instant::now();
                 loop {
                     match listener.accept() {
-                        Ok((socket, _)) => return socket,
+                        Ok((socket, _)) => {
+                            // Windows accepted sockets inherit listener mode.
+                            // A bounded blocking EOF read must not fail early.
+                            socket.set_nonblocking(false).unwrap();
+                            return socket;
+                        }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             assert!(
                                 start.elapsed() < Duration::from_secs(8),
@@ -1298,7 +1303,10 @@ mod tests {
             let start = std::time::Instant::now();
             let mut socket = loop {
                 match listener.accept() {
-                    Ok((socket, _)) => break socket,
+                    Ok((socket, _)) => {
+                        socket.set_nonblocking(false).unwrap();
+                        break socket;
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         assert!(start.elapsed() < Duration::from_secs(5));
                         thread::sleep(Duration::from_millis(5));

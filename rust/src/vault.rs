@@ -429,9 +429,11 @@ fn private_permissions(path: &Path, directory: bool, c: &Control) -> Result<()> 
     // Static script; paths are passed as data through a child-only environment
     // variable, never interpolated into shell code. Only this new empty file or
     // app-created directory is changed, before any secret content is written.
+    // Use Windows PowerShell's .NET Framework APIs directly: an inherited pwsh
+    // PSModulePath can make Set-Acl import an incompatible PowerShell 7 module.
     const SCRIPT: &str = r#"$ErrorActionPreference='Stop'
+try {
 $p=$env:NOTEGEN_VAULT_PERMISSION_TARGET
-if($p.StartsWith('\\?\UNC\')){$p='\\'+$p.Substring(8)}elseif($p.StartsWith('\\?\')){$p=$p.Substring(4)}
 $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $rights=[System.Security.AccessControl.FileSystemRights]::FullControl
 $allow=[System.Security.AccessControl.AccessControlType]::Allow
@@ -446,12 +448,21 @@ if($env:NOTEGEN_VAULT_PERMISSION_DIRECTORY -eq '1'){
 $acl.SetOwner($sid)
 $acl.SetAccessRuleProtection($true,$false)
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $p -AclObject $acl
-$check=Get-Acl -LiteralPath $p
+if($env:NOTEGEN_VAULT_PERMISSION_DIRECTORY -eq '1'){
+ [System.IO.Directory]::SetAccessControl($p,$acl)
+ $check=[System.IO.Directory]::GetAccessControl($p)
+}else{
+ [System.IO.File]::SetAccessControl($p,$acl)
+ $check=[System.IO.File]::GetAccessControl($p)
+}
 $rules=@($check.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]))
 if(!$check.AreAccessRulesProtected -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value -or $rules[0].AccessControlType -ne $allow -or ($rules[0].FileSystemRights -band $rights) -ne $rights -or $check.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value){throw 'Private permissions did not verify'}
 if($env:NOTEGEN_VAULT_PERMISSION_DIRECTORY -eq '1' -and $rules[0].InheritanceFlags -ne $inherit){throw 'Private inheritance did not verify'}
-Write-Output 'PRIVATE_OK'
+[Console]::Out.WriteLine('PRIVATE_OK')
+}catch{
+ [Console]::Error.WriteLine('Private ACL operation failed: '+$_.Exception.GetType().FullName+'; HRESULT '+$_.Exception.HResult)
+ exit 1
+}
 "#;
     let system = std::env::var_os("SystemRoot")
         .ok_or_else(|| fail("Windows permission helper is unavailable"))?;
@@ -507,12 +518,27 @@ Write-Output 'PRIVATE_OK'
     let output = child
         .wait_with_output()
         .map_err(|_| fail("Could not verify private permissions"))?;
-    anyhow::ensure!(
-        output.status.success()
-            && output.stdout.len() <= 1024
-            && String::from_utf8_lossy(&output.stdout).trim() == "PRIVATE_OK",
-        fail("Private permissions could not be enforced; no secret data was written")
-    );
+    if !output.status.success()
+        || output.stdout.len() > 1024
+        || String::from_utf8_lossy(&output.stdout).trim() != "PRIVATE_OK"
+    {
+        // The script prints only exception type/HRESULT. Never pass arbitrary
+        // PowerShell diagnostics (which may contain a private path) to UI/logs.
+        let error = String::from_utf8_lossy(&output.stderr);
+        let diagnostic = error
+            .lines()
+            .find(|line| {
+                line.starts_with("Private ACL operation failed:")
+                    && line.len() <= 256
+                    && line
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b" .:;_-".contains(&byte))
+            })
+            .unwrap_or("Private ACL helper did not return a verified result");
+        return Err(fail(&format!(
+            "Private permissions could not be enforced; no secret data was written. {diagnostic}"
+        )));
+    }
     Ok(())
 }
 #[cfg(not(any(unix, windows)))]
@@ -2061,6 +2087,73 @@ fn cleanup_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_private_acl_handles_open_quoted_paths_and_inherits_to_new_files() {
+        use std::{os::windows::process::CommandExt, process::Command};
+        let temp = tempfile::Builder::new()
+            .prefix("vault ACL ' & σ ")
+            .tempdir()
+            .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let held = tempfile::NamedTempFile::new_in(&root).unwrap();
+        private_permissions(held.path(), false, &Control::default()).unwrap();
+        private_permissions(&root, true, &Control::default()).unwrap();
+        let child = root.join("child ' & σ.txt");
+        File::create(&child).unwrap();
+        const VERIFY: &str = r#"$ErrorActionPreference='Stop'
+try{
+ $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
+ $acl=[System.IO.File]::GetAccessControl($env:NOTEGEN_VAULT_PERMISSION_TARGET)
+ $rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]))
+ if($rules.Count -ne 1 -or !$rules[0].IsInherited -or $rules[0].IdentityReference.Value -ne $sid.Value -or $rules[0].AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or $rules[0].FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl){exit 2}
+ [Console]::Out.WriteLine('PRIVATE_CHILD_OK')
+}catch{exit 3}
+"#;
+        let encoded = STANDARD.encode(
+            VERIFY
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let executable = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut child = Command::new(executable)
+            .creation_flags(0x08000000)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encoded,
+            ])
+            .env("NOTEGEN_VAULT_PERMISSION_TARGET", &child)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if start.elapsed() > Duration::from_secs(20) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("Child ACL query timed out");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "Child ACL verification failed: {:?}",
+            output.status.code()
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "PRIVATE_CHILD_OK"
+        );
+    }
 
     // The attacker can construct an otherwise authentic age payload (for example
     // from an imported container). Its private names and lengths remain untrusted.

@@ -912,6 +912,21 @@ impl Desktop {
         Ok(())
     }
     pub fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) -> bool {
+        let resolved = match path.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                self.notice = error.to_string();
+                return false;
+            }
+        };
+        if resolved
+            .ancestors()
+            .any(|parent| parent.join("notegen-vault-work.json").exists())
+        {
+            self.notice="Open this managed plaintext copy through Encrypted project workspace so its workers and cleanup stay guarded.".into();
+            self.vault.open();
+            return false;
+        }
         if self.review.as_ref().is_some_and(|r| r.raw_open) {
             self.notice =
                 "Apply or discard page JSON and close its editor before opening another project."
@@ -2995,12 +3010,13 @@ mod acceptance {
 
     fn uploaded_crop(ctx: &egui::Context, id: egui::TextureId) -> std::sync::Arc<egui::ColorImage> {
         let mut delta = ctx.tex_manager().write().take_delta();
-        let (_, image) = delta
+        let image = delta
             .set
-            .iter()
-            .find(|(texture, _)| *texture == id)
-            .expect("crop upload");
-        let image = image.image.clone();
+            .get(&id)
+            .and_then(|updates| updates.last())
+            .expect("crop upload")
+            .image
+            .clone();
         delta.clear();
         let egui::ImageData::Color(image) = image;
         image

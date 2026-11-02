@@ -917,12 +917,10 @@ mod tests {
         let managed = copy.work_root().to_owned();
         let ctx = egui::Context::default();
         let _textures = TextureDrain(ctx.clone());
-        let mut ui = VaultUi {
-            open: true,
-            managed_path: Some(managed.clone()),
-            copy: Some(copy),
-            ..Default::default()
-        };
+        let mut ui = VaultUi::default();
+        ui.open = true;
+        ui.managed_path = Some(managed.clone());
+        ui.copy = Some(copy);
         ui.install_editor(
             load_page(ui.copy.as_ref().unwrap(), 0, &Control::default()).unwrap(),
             &ctx,
