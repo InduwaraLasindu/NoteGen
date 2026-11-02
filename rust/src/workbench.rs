@@ -28,6 +28,7 @@ pub(super) struct Workbench {
     query: String,
     palette_query: String,
     entries: Vec<crate::projects::Entry>,
+    catalog_loaded: bool,
     hits: Vec<crate::projects::SearchHit>,
     report: String,
     metadata: String,
@@ -61,7 +62,7 @@ impl Workbench {
     fn clear_secret(&mut self, ctx: &egui::Context) {
         self.secret.zeroize();
         ctx.data_mut(|data| {
-            data.remove::<egui::text_edit::TextEditState>(egui::Id::new("private-update-token"))
+            data.remove::<egui::text_edit::TextEditState>(egui::Id::unique("private-update-token"))
         });
     }
     fn task(&mut self, ctx: &egui::Context, f: impl FnOnce() -> Result<Report> + Send + 'static) {
@@ -724,7 +725,7 @@ impl Desktop {
             return;
         }
         let mut output = egui::TextEdit::singleline(&mut w.secret)
-            .id(egui::Id::new("private-update-token"))
+            .id(egui::Id::unique("private-update-token"))
             .password(true)
             .char_limit(2048)
             .hint_text("Paste a private-update bearer token")
@@ -908,6 +909,7 @@ impl Desktop {
     pub fn tools_open(&mut self, tab: usize) {
         self.workbench.open = true;
         self.workbench.tab = tab.min(3);
+        self.workbench.catalog_loaded = false;
     }
     pub(super) fn workbench_ui(&mut self, ctx: &egui::Context) {
         self.workbench.poll();
@@ -957,6 +959,20 @@ impl Desktop {
             return;
         }
         let mut w = std::mem::take(&mut self.workbench);
+        if w.tab == 0 && !w.catalog_loaded && w.rx.is_none() {
+            w.catalog_loaded = true;
+            let roots = self.state.recent.clone();
+            let query = w.query.clone();
+            w.task(ctx, move || {
+                Ok(Report::Catalog(crate::projects::catalog(
+                    &roots,
+                    &crate::projects::Filter {
+                        query,
+                        ..Default::default()
+                    },
+                )?))
+            });
+        }
         let mut open = true;
         let mut jump = None;
         egui::Window::new("Project workbench").open(&mut open).default_size([850.,680.]).resizable(true).show(ctx,|ui| {
@@ -1009,7 +1025,7 @@ impl Desktop {
                             if ui.button("Spacious").clicked(){self.state.settings.ui.scale=1.1;self.state.settings.ui.compact=false;}
                             if ui.button("Compact").clicked(){self.state.settings.ui.scale=1.;self.state.settings.ui.compact=true;}
                             if ui.button("High contrast").clicked(){self.state.settings.ui.dark=true;self.state.settings.ui.background=[0,0,0];self.state.settings.ui.accent=[255,255,0];self.state.settings.ui.reduced_motion=true;}
-                            if ui.button("Default appearance").clicked(){self.state.settings.ui=Appearance::default();}
+                            if ui.button("Default appearance").clicked(){let locale=self.state.settings.ui.locale;self.state.settings.ui=Appearance::default();self.state.settings.ui.locale=locale;}
                         });
                         ui.small("Ctrl+K opens the command palette. Tab moves focus, Enter activates buttons. Review includes source zoom and disagreement markers.");
                         self.resource_tools(&mut w,ui,ctx);

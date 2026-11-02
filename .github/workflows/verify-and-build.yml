@@ -103,6 +103,10 @@ jobs:
           xvfb-run -a target/debug/examples/ui_capture docs/images/rust-settings.png settings
           xvfb-run -a target/debug/examples/ui_capture docs/images/rust-updates.png updates
           xvfb-run -a target/debug/examples/ui_capture docs/images/rust-hardware.png hardware
+          xvfb-run -a target/debug/examples/ui_capture docs/images/rust-projects.png workbench-projects "$project"
+          xvfb-run -a target/debug/examples/ui_capture docs/images/rust-exports.png workbench-export "$project"
+          xvfb-run -a target/debug/examples/ui_capture docs/images/rust-recovery.png workbench-recovery "$project"
+          xvfb-run -a target/debug/examples/ui_capture docs/images/rust-privacy.png workbench-privacy "$project"
       - name: Verify Windows AI runtime installer
         if: runner.os == 'Windows'
         shell: pwsh

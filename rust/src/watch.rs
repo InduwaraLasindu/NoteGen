@@ -165,7 +165,7 @@ fn bind(state: &mut WatchState, folder: &Path) -> Result<()> {
             )
         );
         state.schema = 1;
-        state.folder_identity = identity;
+        state.folder_identity = identity.clone();
     }
     anyhow::ensure!(
         state.schema == 1

@@ -666,6 +666,9 @@ impl Desktop {
         }
         match Project::read(path).and_then(|p| Review::load(p, 0, ctx)) {
             Ok(r) => {
+                self.state.recent.retain(|p| p != &r.project.root);
+                self.state.recent.insert(0, r.project.root.clone());
+                self.state.recent.truncate(100);
                 self.review = Some(r);
                 self.review_open = true;
                 true
@@ -896,10 +899,20 @@ impl Desktop {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add_sized([125., 40.], egui::Button::new("Choose PDFs"))
+                            .add_sized([125., 40.], egui::Button::new(self.tr("import_scans")))
                             .clicked()
                         {
                             self.pick_files();
+                        }
+                        if ui
+                            .add_sized([125., 40.], egui::Button::new("Import folder"))
+                            .on_hover_text(
+                                "Combine supported scans in filename order into one project.",
+                            )
+                            .clicked()
+                            && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                        {
+                            self.state.enqueue(folder);
                         }
                     });
                 });

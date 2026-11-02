@@ -15,11 +15,12 @@ Copy-Item target/release/NoteGen.exe,target/release/notegen-cli.exe $package
 Copy-Item scripts/Setup-Runtime.ps1,scripts/Install-Models.ps1 "$package/scripts"
 Copy-Item rust/downloads.json "$package/assets/model-downloads.json"
 Copy-Item rust/languages.json "$package/assets/ocr-language-downloads.json"
-Copy-Item README.md,LICENSE,THIRD_PARTY_NOTICES.md $package
+Copy-Item README.md,LICENSE,THIRD_PARTY_NOTICES.md,CONTRIBUTING.md $package
 Copy-Item docs/WINDOWS.md,docs/TESTING.md,docs/RUST_PLAN.md,docs/STUDIO.md,docs/RELEASE_0.4.0.md,docs/RELEASE_0.4.1.md "$package/docs"
-Copy-Item docs/WORKBENCH.md,docs/FEATURES_0.5.0.md "$package/docs"
+Copy-Item docs/WORKBENCH.md,docs/FEATURES_0.5.0.md,docs/INSTALLER.md "$package/docs"
 New-Item -ItemType Directory -Force "$package/docs/images" | Out-Null
 Copy-Item docs/images/notegen-banner.svg "$package/docs/images"
+Copy-Item docs/images/rust-workspace.png "$package/docs/images"
 $native=Join-Path (Get-Location) 'build/pdfium-rust'
 if(-not(Test-Path "$native/bin/pdfium.dll")){
  New-Item -ItemType Directory -Force $native | Out-Null
