@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use notegen::{hardware, pipeline, planning, runtime, storage::*, types::*, word};
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 #[path = "../commands.rs"]
 mod commands;
 #[derive(Parser)]

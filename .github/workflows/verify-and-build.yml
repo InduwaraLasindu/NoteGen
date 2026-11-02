@@ -179,6 +179,8 @@ jobs:
           path: build/font-evidence/*
           retention-days: 30
       - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        timeout-minutes: 5
+        continue-on-error: true
         # Keep compiled dependencies for the next regression run. Failed checks still fail the job.
         if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
         with:
