@@ -8,10 +8,12 @@ use std::{fs, io::Read, path::PathBuf, sync::atomic::Ordering};
 
 #[test]
 fn default_summary_excludes_private_fields_and_ignores_unselected_sources() {
-    let mut s = Settings::default();
-    s.subject = "PRIVATE_TOPIC".into();
-    s.models_dir = "PRIVATE_MODEL_PATH".into();
-    s.server = "PRIVATE_SERVER_PATH".into();
+    let mut s = Settings {
+        subject: "PRIVATE_TOPIC".into(),
+        models_dir: "PRIVATE_MODEL_PATH".into(),
+        server: "PRIVATE_SERVER_PATH".into(),
+        ..Default::default()
+    };
     s.writer.root = "PRIVATE_WRITER_PATH".into();
     let options = SupportOptions::default();
     let unavailable = vec![PathBuf::from("unavailable-private-document")];

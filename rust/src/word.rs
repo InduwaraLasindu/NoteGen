@@ -390,9 +390,20 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
         for warning in &page.content.warnings {
             body.write_all(paragraph(warning, "Caption").as_bytes())?;
         }
+        let layers = crate::layers::report(&page)?;
+        for layer in layers.iter().filter(|a| !a.confirmed()) {
+            body.write_all(paragraph(&layer.caption(), "Caption").as_bytes())?;
+        }
         for (block_index, b) in page.content.blocks.iter().enumerate() {
             c.check()?;
             b.validate()?;
+            for layer in layers
+                .iter()
+                .filter(|a| a.confirmed() && a.assignment.block == block_index)
+            {
+                // Outside editable source controls: importing Word text cannot invent a layer.
+                body.write_all(paragraph(&layer.caption(), "Caption").as_bytes())?;
+            }
             match b.kind.as_str() {
                 "table" => body.write_all(table(b, *n, block_index, &mut baseline).as_bytes())?,
                 "figure" if project.manifest.settings.preserve_figures => {
@@ -446,7 +457,45 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
                     )?;
                     media.push(path);
                 }
-                "figure" => {}
+                "figure" => {
+                    // Choosing to omit the raster never removes manually labelled observations.
+                    body.write_all(
+                        paragraph(
+                            "Figure image omitted by export preference. Observed:",
+                            "Caption",
+                        )
+                        .as_bytes(),
+                    )?;
+                    body.write_all(
+                        crate::roundtrip::tagged(
+                            &mut baseline,
+                            *n,
+                            block_index,
+                            "description",
+                            &b.description,
+                            &paragraph(&b.description, "Caption"),
+                        )
+                        .as_bytes(),
+                    )?;
+                    body.write_all(
+                        paragraph(
+                            "Contextual interpretation (verify against source):",
+                            "Caption",
+                        )
+                        .as_bytes(),
+                    )?;
+                    body.write_all(
+                        crate::roundtrip::tagged(
+                            &mut baseline,
+                            *n,
+                            block_index,
+                            "interpretation",
+                            &b.interpretation,
+                            &paragraph(&b.interpretation, "Normal"),
+                        )
+                        .as_bytes(),
+                    )?;
+                }
                 "equation" => {
                     match crate::equations::convert(&b.text) {
                         Ok(equation) => {

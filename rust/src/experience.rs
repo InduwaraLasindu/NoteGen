@@ -93,8 +93,14 @@ impl Desktop {
         })
         .inner
     }
-    fn request_update_check(&mut self, ctx: &egui::Context) {
+    fn request_update_check(&mut self, ctx: &egui::Context, mode: maintenance::CheckMode) {
         if self.experience.checking {
+            return;
+        }
+        let now = chrono::Utc::now();
+        if maintenance::check_decision(&self.state.settings.experience, None, now, mode)
+            != maintenance::CheckDecision::Due
+        {
             return;
         }
         self.experience.checking = true;
@@ -102,7 +108,10 @@ impl Desktop {
         self.experience.error.clear();
         let _ = atomic_json(
             Path::new("user-data/last-update-check.json"),
-            &chrono::Utc::now(),
+            &maintenance::CheckStamp {
+                checked_at: now,
+                channel: self.state.settings.experience.update_channel,
+            },
         );
         let s = self.state.settings.clone();
         let tx = self.tx.clone();
@@ -119,19 +128,43 @@ impl Desktop {
     }
     pub(super) fn check_updates_when_idle(&mut self, ctx: &egui::Context) {
         if !self.experience.checked_session
+            && !self.experience.checking
             && self.clock.elapsed().as_secs() >= 10
             && self.hardware.is_some()
             && self.worker.is_none()
-            && self.state.settings.experience.check_updates
         {
-            self.experience.checked_session = true;
-            let recent = read_json::<chrono::DateTime<chrono::Utc>>(
-                Path::new("user-data/last-update-check.json"),
-                1000,
-            )
-            .is_ok_and(|last| chrono::Utc::now().signed_duration_since(last).num_hours() < 24);
-            if !recent {
-                self.request_update_check(ctx);
+            let now = chrono::Utc::now();
+            if maintenance::check_decision(
+                &self.state.settings.experience,
+                None,
+                now,
+                maintenance::CheckMode::Automatic,
+            ) != maintenance::CheckDecision::Due
+            {
+                return;
+            }
+            let path = Path::new("user-data/last-update-check.json");
+            let stamp = read_json::<maintenance::CheckStamp>(path, 1000)
+                .or_else(|_| {
+                    // Older desktops stored a single UTC timestamp for the stable channel.
+                    read_json::<chrono::DateTime<chrono::Utc>>(path, 1000).map(|checked_at| {
+                        maintenance::CheckStamp {
+                            checked_at,
+                            channel: UpdateChannel::Stable,
+                        }
+                    })
+                })
+                .ok();
+            if maintenance::check_decision(
+                &self.state.settings.experience,
+                stamp.as_ref(),
+                now,
+                maintenance::CheckMode::Automatic,
+            ) == maintenance::CheckDecision::Due
+            {
+                self.request_update_check(ctx, maintenance::CheckMode::Automatic);
+            } else {
+                self.experience.checked_session = true;
             }
         }
     }
@@ -310,6 +343,67 @@ impl Desktop {
             "Check for updates daily when idle",
         );
         help(ui, "experience.check_updates");
+        let previous_channel = self.state.settings.experience.update_channel;
+        egui::ComboBox::from_label("App update channel")
+            .selected_text(previous_channel.label())
+            .show_ui(ui, |ui| {
+                for channel in [UpdateChannel::Stable, UpdateChannel::Preview] {
+                    ui.selectable_value(
+                        &mut self.state.settings.experience.update_channel,
+                        channel,
+                        channel.label(),
+                    );
+                }
+            });
+        if previous_channel != self.state.settings.experience.update_channel {
+            self.experience.updates = None;
+            self.experience.checked_session = false;
+        }
+        help(ui, "experience.update_channel");
+        if self.state.settings.experience.update_channel == UpdateChannel::Preview {
+            ui.colored_label(Color32::LIGHT_YELLOW, "Preview app releases are enabled. Check compatibility notes and keep a project backup before installing.");
+        }
+        let now = chrono::Utc::now();
+        if let Some(until) = self
+            .state
+            .settings
+            .experience
+            .defer_updates_until
+            .filter(|until| *until > now)
+        {
+            Self::accessible_status(
+                ui,
+                "update-deferral",
+                &format!(
+                    "Automatic publisher checks are deferred until {} UTC. Check all updates now bypasses the deferral.",
+                    until.format("%Y-%m-%d %H:%M")
+                ),
+                false,
+            );
+        } else if !self.state.settings.experience.check_updates {
+            ui.label(
+                "Automatic publisher checks are off. Check all updates now remains available.",
+            );
+        }
+        ui.horizontal_wrapped(|ui| {
+            for days in [7, 30] {
+                if ui
+                    .button(format!("Defer automatic checks for {days} days"))
+                    .clicked()
+                {
+                    self.state.settings.experience.defer_updates_until =
+                        Some(now + chrono::Duration::days(days));
+                    self.experience.checked_session = false;
+                }
+            }
+            if self.state.settings.experience.defer_updates_until.is_some()
+                && ui.button("Clear update deferral").clicked()
+            {
+                self.state.settings.experience.defer_updates_until = None;
+                self.experience.checked_session = false;
+            }
+        });
+        help(ui, "experience.defer_updates_until");
         if ui
             .add_enabled(
                 !self.experience.checking,
@@ -321,7 +415,7 @@ impl Desktop {
             )
             .clicked()
         {
-            self.request_update_check(ctx);
+            self.request_update_check(ctx, maintenance::CheckMode::Manual);
         }
         if self.experience.checking {
             Self::accessible_status(
@@ -343,6 +437,11 @@ impl Desktop {
             );
         }
         if let Some(report) = self.experience.updates.clone() {
+            if report.channel != self.state.settings.experience.update_channel {
+                ui.label("The completed check used the previous app channel. Check again to see results for the selected channel.");
+                return;
+            }
+            ui.small(format!("Checked app channel: {}", report.channel.label()));
             ui.small(format!("Last checked: {}", report.checked_at));
             if report.count() == 0 && report.errors.is_empty() {
                 ui.label("All checked components are current.");
@@ -381,11 +480,25 @@ impl Desktop {
                     "NoteGen {} includes bundled dependency updates.",
                     app.version
                 ));
+                ui.small(maintenance::app_compatibility(&app));
+                egui::CollapsingHeader::new("Publisher release notes (plain text)")
+                    .id_salt(("app-release-notes", &app.version))
+                    .show(ui, |ui| {
+                        ui.label(if app.release_notes.is_empty() {
+                            "No release notes were provided by the publisher."
+                        } else {
+                            &app.release_notes
+                        });
+                    });
                 if cfg!(windows)
                     && ui
                         .add_enabled(
                             self.worker.is_none(),
-                            egui::Button::new("Download & run app update"),
+                            egui::Button::new(if app.prerelease {
+                                "Download & run preview app update"
+                            } else {
+                                "Download & run app update"
+                            }),
                         )
                         .clicked()
                 {
@@ -578,19 +691,45 @@ mod accessibility_tests {
     }
 
     fn named_node<'a>(tree: &'a TreeUpdate, name: &str, role: Role) -> &'a egui::accesskit::Node {
+        // egui stores visible Label text in value; explicit widget names use label.
+        let text = |node: &egui::accesskit::Node| {
+            if node.role() == Role::Label {
+                node.value().or(node.label()).map(str::to_owned)
+            } else {
+                node.label().map(str::to_owned)
+            }
+        };
         &tree
             .nodes
             .iter()
             .find(|(_, node)| {
                 node.role() == role
-                    && (node.label() == Some(name)
+                    && (text(node).as_deref() == Some(name)
                         || node.labelled_by().iter().any(|label| {
-                            tree.nodes
-                                .iter()
-                                .any(|(id, target)| id == label && target.label() == Some(name))
+                            tree.nodes.iter().any(|(id, target)| {
+                                id == label && text(target).as_deref() == Some(name)
+                            })
                         }))
             })
-            .unwrap_or_else(|| panic!("Missing accessible name: {name}, role: {role:?}"))
+            .unwrap_or_else(|| {
+                let nodes = tree
+                    .nodes
+                    .iter()
+                    .take(80)
+                    .map(|(id, node)| {
+                        format!(
+                            "{id:?} {:?} label={:?} value={:?} labelled_by={:?}",
+                            node.role(),
+                            node.label()
+                                .map(|s| s.chars().take(100).collect::<String>()),
+                            node.value()
+                                .map(|s| s.chars().take(100).collect::<String>()),
+                            node.labelled_by()
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                panic!("Missing accessible name: {name}, role: {role:?}; nodes={nodes:#?}")
+            })
             .1
     }
 

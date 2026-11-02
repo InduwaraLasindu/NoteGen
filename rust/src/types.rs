@@ -214,12 +214,31 @@ impl Default for Settings {
 pub struct ExperienceOptions {
     pub live_preview: bool,
     pub check_updates: bool,
+    pub update_channel: UpdateChannel,
+    pub defer_updates_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 impl Default for ExperienceOptions {
     fn default() -> Self {
         Self {
             live_preview: true,
             check_updates: true,
+            update_channel: UpdateChannel::Stable,
+            defer_updates_until: None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Preview,
+}
+impl UpdateChannel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "Stable",
+            Self::Preview => "Preview (opt in)",
         }
     }
 }
@@ -600,6 +619,9 @@ pub struct Page {
     pub agreement: f64,
     pub reviewed: bool,
     pub seconds: f64,
+    /// Human-confirmed annotation metadata, separate from model-generated blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_layers: Vec<crate::layers::Assignment>,
 }
 impl Page {
     pub fn validate(&self) -> Result<()> {
@@ -621,6 +643,7 @@ impl Page {
             )
         );
         self.content.validate()?;
+        crate::layers::validate_metadata(&self.manual_layers)?;
         let mut blocks = 0usize;
         for candidate in &self.candidates {
             blocks += candidate.content.blocks.len();
@@ -642,17 +665,18 @@ impl Page {
         Ok(())
     }
     pub fn needs_review(&self, threshold: f32) -> bool {
-        !self.reviewed
-            && (self.agreement < 0.92
-                || !self.content.warnings.is_empty()
-                || !self.source_warnings.is_empty()
-                || self.content.blocks.is_empty()
-                || self.content.blocks.iter().any(|b| {
-                    b.uncertain
-                        || b.kind == "figure"
-                        || b.confidence.is_none_or(|v| v < threshold)
-                        || b.plain().to_lowercase().contains("[illegible]")
-                }))
+        crate::layers::needs_review(self)
+            || !self.reviewed
+                && (self.agreement < 0.92
+                    || !self.content.warnings.is_empty()
+                    || !self.source_warnings.is_empty()
+                    || self.content.blocks.is_empty()
+                    || self.content.blocks.iter().any(|b| {
+                        b.uncertain
+                            || b.kind == "figure"
+                            || b.confidence.is_none_or(|v| v < threshold)
+                            || b.plain().to_lowercase().contains("[illegible]")
+                    }))
     }
 }
 pub fn pages_range(spec: &str, total: usize) -> Result<Vec<usize>> {

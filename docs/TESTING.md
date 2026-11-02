@@ -4,7 +4,22 @@ Implemented behavior, mocked/protocol tests and physical quality evidence are se
 Use [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 for exact Windows/Linux results, native visual evidence and the executable download.
 
-## Verified build — 31 October 2026
+## 0.5.0 validation — in progress
+
+The 0.5.0 workbench changes have not yet passed the release gate. Windows and Linux
+CI run all-target strict Clippy and the complete ordinary suite twice, with the
+second pass using serial test execution. Native OCR, font installation, credential
+storage, desktop captures, packaged conversion and real CPU model checks follow.
+The installer has separate clean-install, 0.4.1 upgrade and retention checks.
+
+Local formatting and locked metadata checks are available. Local compilation is
+blocked by Windows Application Control rejecting dependency build scripts; CI is
+the compilation/test source for this change. Native accessibility-tree tests are
+included; the [Narrator audit](ACCESSIBILITY.md) remains pending. Real handwriting
+quality, additional hardware and native-language acceptance require their own
+measurements. The historical results below apply to their named source snapshots.
+
+## Historical verified build — 31 October 2026
 
 [Windows/Linux run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803) at source commit
 [`1dd2606`](https://github.com/InduwaraLasindu/NoteGen/commit/1dd2606040305fc12c06b8396004c81485c0917b)
@@ -30,7 +45,7 @@ This digest identifies the outer Actions artifact, not the inner portable ZIP.
 | 5 | 61 ordinary tests + format/clippy locally: motion/reduced-motion render comparisons, animation timing and frame budgets, backward-compatible appearance settings, invalid AI grounding recovery and raw response evidence |
 | 6 | 65 ordinary tests + format/clippy locally: Fast conversion with damaged/invalid unused AI registrations, selected-reader checksum rejection, handwriting/preset validation, CLI settings preservation and honest single-family agreement labels |
 
-The current source passes all 65 ordinary tests with all features/targets on Linux,
+The 31 October source passed all 65 ordinary tests with all features/targets on Linux,
 plus strict format and clippy checks. The native desktop was started under an authenticated
 virtual X display; workspace, Advanced and review were captured, and the actual scanning
 graphic was recorded for four seconds. The screenshot harness decodes its output before

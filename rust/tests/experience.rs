@@ -153,10 +153,157 @@ fn live_and_update_preferences_do_not_invalidate_recognition_checkpoints() {
     let mut b = a.clone();
     b.experience.live_preview = false;
     b.experience.check_updates = false;
+    b.experience.update_channel = UpdateChannel::Preview;
+    b.experience.defer_updates_until = Some(chrono::Utc::now());
     assert_eq!(
         serde_json::to_value(pipeline::recognition_settings(&a)).unwrap(),
         serde_json::to_value(pipeline::recognition_settings(&b)).unwrap()
     );
+}
+
+fn app_release(version: &str, preview: bool) -> Value {
+    let file = format!("NoteGen-Setup-{version}.exe");
+    json!({"tag_name":format!("v{version}"),"draft":false,"prerelease":preview,"body":"Compatibility notes\nKeep a backup.","assets":[{"id":321,"name":file,"size":123456,"digest":format!("sha256:{}","b".repeat(64)),"browser_download_url":format!("https://github.com/InduwaraLasindu/NoteGen/releases/download/v{version}/{file}")}]})
+}
+
+#[test]
+fn app_channels_select_highest_version_and_stable_excludes_both_kinds_of_preview() {
+    let data = json!([
+        app_release("0.6.0", false),
+        app_release("0.8.0-rc.1", false),
+        app_release("0.7.0", true),
+        app_release("0.5.1", false)
+    ]);
+    let stable = maintenance::select_app_release(&data, UpdateChannel::Stable, "0.5.0")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stable.version, "0.6.0");
+    assert!(!stable.prerelease);
+    let preview = maintenance::select_app_release(&data, UpdateChannel::Preview, "0.5.0")
+        .unwrap()
+        .unwrap();
+    assert_eq!(preview.version, "0.8.0-rc.1");
+    assert!(preview.prerelease);
+    assert!(
+        maintenance::select_app_release(&data, UpdateChannel::Stable, "0.9.0")
+            .unwrap()
+            .is_none()
+    );
+    let mut draft = app_release("0.9.0", false);
+    draft["draft"] = json!(true);
+    assert!(
+        maintenance::select_app_release(&draft, UpdateChannel::Preview, "0.5.0")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn app_metadata_rejects_noncanonical_versions_duplicate_assets_and_changed_downloads() {
+    for bad in ["01.6.0", "0.6.0+build", "../0.6.0", "0.6", "0.6.0-rc/1"] {
+        assert!(
+            maintenance::select_app_release(
+                &app_release(bad, true),
+                UpdateChannel::Preview,
+                "0.5.0"
+            )
+            .is_err()
+        );
+    }
+    let mut duplicate = app_release("0.6.0", false);
+    let asset = duplicate["assets"][0].clone();
+    duplicate["assets"].as_array_mut().unwrap().push(asset);
+    assert!(maintenance::select_app_release(&duplicate, UpdateChannel::Stable, "0.5.0").is_err());
+    let mut data = app_release("0.6.0", false);
+    data["assets"][0]["browser_download_url"] = json!("https://example.com/setup.exe");
+    assert!(maintenance::select_app_release(&data, UpdateChannel::Stable, "0.5.0").is_err());
+    let mut selected = maintenance::select_app_release(
+        &app_release("0.6.0", false),
+        UpdateChannel::Stable,
+        "0.5.0",
+    )
+    .unwrap()
+    .unwrap();
+    selected.asset.file = "../setup.exe".into();
+    assert!(maintenance::validate_app_release(&selected).is_err());
+    assert!(
+        maintenance::select_app_release(
+            &json!(vec![app_release("0.6.0", false); 21]),
+            UpdateChannel::Stable,
+            "0.5.0"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn app_notes_are_bounded_plain_text_and_saved_reports_are_revalidated() {
+    let mut data = app_release("0.6.0", false);
+    data["body"] = json!(format!("Keep\r\nbackup\u{202e}\u{1b}{}", "語".repeat(7000)));
+    let mut selected = maintenance::select_app_release(&data, UpdateChannel::Stable, "0.5.0")
+        .unwrap()
+        .unwrap();
+    assert!(selected.release_notes.contains("shortened"));
+    assert!(
+        !selected
+            .release_notes
+            .contains(['\r', '\u{202e}', '\u{1b}'])
+    );
+    maintenance::validate_app_release(&selected).unwrap();
+    selected.release_notes.push('\u{202e}');
+    assert!(maintenance::validate_app_release(&selected).is_err());
+}
+
+#[test]
+fn automatic_check_deferral_is_exact_and_manual_checks_bypass_it() {
+    use maintenance::{CheckDecision as D, CheckMode as M, CheckStamp};
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-02T00:00:00Z")
+        .unwrap()
+        .to_utc();
+    let until = now + chrono::Duration::days(7);
+    let mut preferences = ExperienceOptions {
+        defer_updates_until: Some(until),
+        ..Default::default()
+    };
+    assert_eq!(
+        maintenance::check_decision(&preferences, None, now, M::Automatic),
+        D::Deferred(until)
+    );
+    assert_eq!(
+        maintenance::check_decision(&preferences, None, now, M::Manual),
+        D::Due
+    );
+    assert_eq!(
+        maintenance::check_decision(&preferences, None, until, M::Automatic),
+        D::Due
+    );
+    preferences.check_updates = false;
+    assert_eq!(
+        maintenance::check_decision(&preferences, None, now, M::Automatic),
+        D::Disabled
+    );
+    assert_eq!(
+        maintenance::check_decision(&preferences, None, now, M::Manual),
+        D::Due
+    );
+    preferences.check_updates = true;
+    preferences.defer_updates_until = None;
+    let stamp = CheckStamp {
+        checked_at: now,
+        channel: UpdateChannel::Stable,
+    };
+    assert_eq!(
+        maintenance::check_decision(&preferences, Some(&stamp), now, M::Automatic),
+        D::Recent(now + chrono::Duration::hours(24))
+    );
+    preferences.update_channel = UpdateChannel::Preview;
+    assert_eq!(
+        maintenance::check_decision(&preferences, Some(&stamp), now, M::Automatic),
+        D::Due
+    );
+    let legacy: ExperienceOptions = serde_json::from_value(json!({"check_updates":true})).unwrap();
+    assert_eq!(legacy.update_channel, UpdateChannel::Stable);
+    assert!(legacy.defer_updates_until.is_none());
 }
 #[test]
 fn every_serialized_setting_has_an_explanation() {

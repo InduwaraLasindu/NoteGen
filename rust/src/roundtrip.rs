@@ -71,6 +71,9 @@ pub(crate) struct Baseline {
     pages: BTreeMap<usize, Vec<Shape>>,
     fields: Vec<BaselineField>,
     layout: Vec<String>,
+    /// Full manual-layer metadata binding; Word source text cannot change annotation labels.
+    #[serde(default)]
+    layers: BTreeMap<usize, String>,
     #[serde(skip)]
     budget: ExportBudget,
 }
@@ -82,6 +85,7 @@ pub(crate) fn baseline(p: &Project) -> Result<Baseline> {
         pages: BTreeMap::new(),
         fields: vec![],
         layout: vec![],
+        layers: BTreeMap::new(),
         budget: ExportBudget::default(),
     })
 }
@@ -107,6 +111,16 @@ pub(crate) fn record_page(b: &mut Baseline, page: &Page) {
         shapes.push(entry);
     }
     b.pages.insert(page.page, shapes);
+    if let Ok(digest) = fingerprint(&page.manual_layers) {
+        if b.budget.metadata_bytes.saturating_add(96) > METADATA_BUDGET {
+            disable(b);
+            return;
+        }
+        b.budget.metadata_bytes += 96;
+        b.layers.insert(page.page, digest);
+    } else {
+        disable(b);
+    }
 }
 pub(crate) fn enabled(b: &Baseline) -> bool {
     !b.budget.disabled
@@ -116,6 +130,7 @@ pub(crate) fn disable(b: &mut Baseline) {
     b.pages = BTreeMap::new();
     b.fields = vec![];
     b.layout = vec![];
+    b.layers = BTreeMap::new();
 }
 pub(crate) fn clean(text: &str) -> String {
     text.replace("\r\n", "\n")
@@ -406,6 +421,7 @@ struct CurrentPage {
     page: usize,
     image: String,
     content: PageContent,
+    manual_layers: Vec<crate::layers::Assignment>,
 }
 fn checkpoint(p: &Project, n: usize) -> Result<PathBuf> {
     let edits = p.root.join(format!("page-{n:05}.edits.json"));
@@ -434,6 +450,7 @@ fn current_page(p: &Project, n: usize, c: &Control) -> Result<(CurrentPage, Stri
         fault("Word correction checkpoint source identity changed")
     );
     page.content.validate()?;
+    crate::layers::validate_metadata(&page.manual_layers)?;
     anyhow::ensure!(
         hash_file(&path, c)? == digest,
         fault("Project changed while previewing Word corrections; preview again")
@@ -459,6 +476,7 @@ fn load_snapshot(path: &Path, page: usize, admitted_bytes: u64) -> Result<Page> 
         fault("Word correction checkpoint source identity changed")
     );
     snapshot.content.validate()?;
+    crate::layers::validate_metadata(&snapshot.manual_layers)?;
     Ok(snapshot)
 }
 pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
@@ -524,6 +542,17 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
             && b.fields.len() <= 100000
             && b.pages.len() <= 3000,
         fault("Word document belongs to a different source, project or schema")
+    );
+    anyhow::ensure!(
+        b.layers.len() <= 3000
+            && b.layers
+                .iter()
+                .all(|(page, digest)| b.pages.contains_key(page)
+                    && digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())),
+        fault("Invalid manual-layer provenance in Word baseline")
     );
     let document = zip_text(&mut zip, "word/document.xml")?;
     let doc = parse(&document)?;
@@ -681,6 +710,11 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
                     .zip(&page.content.blocks)
                     .all(|(saved, block)| same_shape(saved, block))
         });
+        let layers_changed = if let Some(saved) = b.layers.get(n) {
+            *saved != fingerprint(&page.manual_layers)?
+        } else {
+            !page.manual_layers.is_empty()
+        };
         for field in fields {
             c.check()?;
             let block = page.content.blocks.get(field.block);
@@ -701,12 +735,13 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
             };
             let (status, message) = if layout_changed
                 || shape_changed
+                || layers_changed
                 || invalid.contains(&field.tag)
                 || imported.is_none()
             {
                 (
                     "structural_conflict",
-                    "Source controls, block geometry or Word structure changed. Review manually.",
+                    "Source controls, block geometry, manual annotation layers or Word structure changed. Review manually; Word imports never relabel annotations.",
                 )
             } else if imported.as_ref() == Some(&baseline_comparison) {
                 ("unchanged", "No Word correction to import.")

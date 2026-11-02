@@ -8,6 +8,10 @@ Compare the selected source region and all reader evidence. Save a draft or appr
 
 The review queue ranks numeric disagreements, totals, table-column anomalies and uncertain regions. Its orange overlay marks affected source regions. These are suggestions, not automatic corrections or calibrated accuracy scores. Source zoom supports keyboard focus and the scrollable source pane.
 
+Focus **Keyboard review** to use **Ctrl/Cmd+S** to save a draft, **Ctrl/Cmd+Enter** to approve, **Ctrl/Cmd+J** for the next suggestion and **Ctrl/Cmd+D** to defer the current suggestion. These shortcuts require the active review window and are disabled while editing text/JSON, running a conversion or using another tool. Optional auto-advance moves to the next page only after approval saves successfully. Deferrals and auto-advance last for the current review session; deferred issues remain visible and can be reset.
+
+**Manual annotation layers** labels the selected recognized block as original text, highlight, marginal note, stamp, teacher correction or other annotation. Labels never remove source ink or recognized text. A changed block makes its label stale and requires explicit reconfirmation. Set, remove and reconfirm actions create undoable revisions. Exports retain labels and stale notices outside the editable source text. CLI equivalents are `layers`, `set-layer`, `remove-layer` and `reconfirm-layer`; CLI block indexes start at zero.
+
 The export/rules tab previews a literal replacement across the project. Applying the inspected preview creates one revision; undo restores the previous values. CLI rules accept selected stable page numbers and block exclusions.
 
 ## Projects
@@ -103,6 +107,8 @@ Files must remain stable across polls. Only successful conversions receive an im
 Use `bundle-preview`, `export-bundle`, `inspect-bundle` and `import-bundle` for verified offline AI transfer. Import creates an isolated destination and saves a new settings file; it does not silently replace active registrations. A compatible installed NoteGen/native runtime is still required. `install-preflight` reports selected/reusable/download bytes, retained rollback space and conservative disk bounds.
 
 The privacy workbench exposes reversible application resource profiles and Windows Credential Manager controls for this repository's private update access. Credentials are masked, excluded from saved settings/diagnostics and only retrieved for the fixed publisher API. Existing explicit environment-based authentication remains compatible. Application budgets are not OS power governors or hard memory quotas.
+
+**Settings → Updates** defaults to the stable app channel. Preview is an explicit opt-in and shows publisher notes as bounded plain text. Neither channel downloads or installs automatically. Defer automatic publisher checks for 7 or 30 days, or clear the deferral; **Check all updates now** bypasses it. Channels apply to app releases, not model accuracy or a project's exact reader revision. Per-project version preferences are not yet exposed.
 
 `hardware-trial` benchmarks a copied source page on explicitly selected compatible devices. Reports separate measured duration, sampled memory, review flags and optional groundtruth scorecards. VRAM can be unavailable; sampled highwater excludes startup spikes. A physical multi-GPU run is not implied by ordinary tests.
 

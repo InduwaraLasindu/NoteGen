@@ -297,6 +297,14 @@ pub const GUIDE: &[(&str, &str)] = &[
         "experience.check_updates",
         "Check official publishers at most daily when idle. Downloads need your click; no document content is sent.",
     ),
+    (
+        "experience.update_channel",
+        "App update channel: stable excludes preview releases; preview explicitly opts in to newer prereleases. Runtime and reader publisher channels are unchanged. Switching channels never installs or downgrades the app.",
+    ),
+    (
+        "experience.defer_updates_until",
+        "Optional UTC time until which automatic publisher checks are deferred. Check all updates now bypasses this deferral. It does not schedule downloads or change recognition checkpoints.",
+    ),
 ];
 pub fn description(key: &str) -> &'static str {
     GUIDE

@@ -2718,6 +2718,7 @@ dependencies = [
  "rfd",
  "roxmltree",
  "scraper",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

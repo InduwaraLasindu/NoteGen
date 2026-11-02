@@ -29,7 +29,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 23 | Perspective correction | Partial | Validated four-corner perspective transform via CLI; draggable desktop corner editor remains. |
 | 24 | Handwritten line segmentation | Partial | Editable source bounds and page JSON; dedicated handwritten line-boundary editor remains. |
 | 25 | Paper-background controls | Implemented | Optional pale ruling/grid suppression with original and comparison metrics. |
-| 26 | Annotation layers | Planned | Implementation remains. |
+| 26 | Annotation layers | Implemented | Human-confirmed block labels for original/highlight/margin/stamp/correction layers, exact source bindings, visible staleness, undo and export provenance; all text retained, no automatic ink separation. |
 | 27 | Redaction-aware recognition | Planned | Implementation remains. |
 | 28 | Preprocessing comparison | Implemented | Cleanup variants, retained original and difference/ink-preservation reports. |
 | 29 | Double-page splitting | Implemented | Double-page splitting with adjustable gutter, retained original and explicit source relationships. |
@@ -37,7 +37,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 31 | Targeted region re-reading | Implemented | Selected reader/task/resolution/context region reread; source and confirmed edits retained. |
 | 32 | Disagreement heatmap | Partial | Block-level disagreement/review overlay; word-level localization is unavailable when readers do not provide it. |
 | 33 | Impact-based review queue | Implemented | Source-linked issues ranked by numeric/table/uncertainty impact. |
-| 34 | Fast review controls | Partial | Keyboard-focusable review/palette actions; configurable auto-advance/defer workflow remains. |
+| 34 | Fast review controls | Implemented | Explicit keyboard-review focus, save/approve/next/defer shortcuts, visible session deferrals and optional advance only after durable approval; bindings are fixed. |
 | 35 | Revision timeline | Implemented | Named page/context revisions, snapshots, comparison and restore. |
 | 36 | Context-change comparison | Implemented | Field-level revision differences retain uncertain interpretations and contextual evidence. |
 | 37 | Interactive table-grid repair | Partial | Editable cells, headers, rows/columns, merge splitting and source bounds; visual grid-boundary repair remains. |
@@ -81,7 +81,7 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 75 | Shared model storage | Partial | Offline bundle objects deduplicate by hash; shared global version-aware weight storage remains. |
 | 76 | Canary update validation | Planned | Implementation remains. |
 | 77 | Per-project model pinning | Partial | Project fingerprints bind input/settings/models and reject mismatches; revision resolution/restoration UI remains. |
-| 78 | Update channels | Planned | Implementation remains. |
+| 78 | Update channels | Partial | Stable default and explicit preview channel, bounded release notes and compatibility notes, automatic-check deferral with manual bypass; per-project version preference controls remain. |
 | 79 | Safe storage cleanup | Implemented | Token-bound selected cleanup of verified known runtime ZIP caches; user data, active/pinned/rollback assets and unknown files protected. |
 | 80 | Private-update credentials | Implemented | Fixed-publisher Windows Credential Manager entry, masked UI, zeroizing secret, scoped retrieval and no secret serialization. |
 | 81 | Privacy dashboard | Partial | Privacy panel reports configured connections, update/lookup state and data locations; not OS connection monitoring. |

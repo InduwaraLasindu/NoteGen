@@ -63,6 +63,7 @@ pub struct BlockTrace {
     pub alternatives: Vec<String>,
     pub evidence: Vec<Evidence>,
     pub cells: Vec<CellTrace>,
+    pub manual_layers: Vec<crate::layers::ResolvedLayer>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PageTrace {
@@ -72,6 +73,8 @@ pub struct PageTrace {
     pub requires_review: bool,
     pub warnings: Vec<String>,
     pub blocks: Vec<BlockTrace>,
+    /// Includes stale assignments without attaching them to a different current block.
+    pub manual_layers: Vec<crate::layers::ResolvedLayer>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Traceability {
@@ -174,11 +177,21 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
     };
     let mut total_cells = 0usize;
     let mut total_blocks = 0usize;
+    let mut total_layers = 0usize;
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
         let checkpoint = checkpoint_uri(project, &page)?;
         let evidence = evidence_index(&page, &checkpoint)?;
+        let layers = crate::layers::report(&page)?;
+        total_layers += layers.len();
+        anyhow::ensure!(
+            total_layers <= 10_000,
+            Fault::new(
+                "NG400",
+                "Traceability exceeds 10,000 manual layers; export fewer pages"
+            )
+        );
         let mut p = PageTrace {
             page: page.page,
             source_uri: source_uri(project, &page, &BoxRect::full())?,
@@ -186,6 +199,7 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
             requires_review: page.needs_review(project.manifest.settings.review_threshold),
             warnings: page.source_warnings.clone(),
             blocks: vec![],
+            manual_layers: layers.clone(),
         };
         p.warnings.extend(page.content.warnings.clone());
         for (bi, b) in page.content.blocks.iter().enumerate() {
@@ -229,6 +243,11 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
                 alternatives: b.alternatives.clone(),
                 evidence: evidence.get(&b.plain()).cloned().unwrap_or_default(),
                 cells: vec![],
+                manual_layers: layers
+                    .iter()
+                    .filter(|a| a.confirmed() && a.assignment.block == bi)
+                    .cloned()
+                    .collect(),
             };
             for (r, row) in b.rows.iter().enumerate() {
                 for (col, value) in row.iter().enumerate() {
@@ -305,6 +324,13 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
         };
         let mut warnings = page.source_warnings.clone();
         warnings.extend(page.content.warnings.clone());
+        let layers = crate::layers::report(&page)?;
+        warnings.extend(
+            layers
+                .iter()
+                .filter(|a| !a.confirmed())
+                .map(crate::layers::ResolvedLayer::caption),
+        );
         if page.needs_review(project.manifest.settings.review_threshold) {
             warnings.insert(0, "REVIEW NEEDED: compare with the scan".into());
         }
@@ -356,6 +382,16 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                         xml(&uri),
                         xml(&status)
                     )?;
+                    for layer in layers
+                        .iter()
+                        .filter(|a| a.confirmed() && a.assignment.block == index)
+                    {
+                        writeln!(
+                            out,
+                            "<p class=\"manual-layer\">{}</p>",
+                            xml(&layer.caption())
+                        )?;
+                    }
                     match b.kind.as_str() {
                         "table" => {
                             writeln!(
@@ -396,6 +432,12 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                         latex(&uri),
                         latex(&status)
                     )?;
+                    for layer in layers
+                        .iter()
+                        .filter(|a| a.confirmed() && a.assignment.block == index)
+                    {
+                        writeln!(out, "\\textit{{{}}}\\par", latex(&layer.caption()))?;
+                    }
                     if b.kind == "table" {
                         writeln!(
                             out,
@@ -425,6 +467,12 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                 }
                 _ => {
                     writeln!(out, "[Source: {}](<{uri}>)\n", markdown(&status))?;
+                    for layer in layers
+                        .iter()
+                        .filter(|a| a.confirmed() && a.assignment.block == index)
+                    {
+                        writeln!(out, "> {}\n", markdown(&layer.caption()))?;
+                    }
                     if b.kind == "table" {
                         let columns = b.rows[0].len();
                         // A neutral header avoids falsely promoting a data row to a heading.
@@ -697,6 +745,89 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
                 format!("Page {n}, block {}", bi + 1),
             ));
         }
+    }
+    // A separate visible sheet preserves every manual label, including stale and non-table ones.
+    let annotation_id = sheets.len() + 1;
+    let mut annotation_sheet = String::from(SHEET_START);
+    annotation_sheet.push_str("<row r=\"1\">");
+    for (col, header) in [
+        "Page",
+        "Assigned block",
+        "Layer",
+        "Status",
+        "Label",
+        "Note",
+        "Full block fingerprint",
+        "Review note",
+        "Source",
+    ]
+    .iter()
+    .enumerate()
+    {
+        annotation_sheet.push_str(&inline_cell(
+            &format!("{}1", column_name(col + 1)?),
+            header,
+            1,
+        )?);
+    }
+    annotation_sheet.push_str("</row>");
+    let mut annotation_row = 1usize;
+    for n in &project.manifest.pages {
+        c.check()?;
+        let page = project.load(*n)?;
+        for layer in crate::layers::report(&page)? {
+            annotation_row += 1;
+            anyhow::ensure!(
+                annotation_row <= 1_048_576,
+                Fault::new(
+                    "NG400",
+                    "Too many annotation layers for Excel; split the project"
+                )
+            );
+            annotation_sheet.push_str(&format!("<row r=\"{annotation_row}\">"));
+            let a = &layer.assignment;
+            for (col, value) in [
+                page.page.to_string(),
+                (a.block + 1).to_string(),
+                a.kind.name().into(),
+                layer.status.clone(),
+                a.label.clone(),
+                a.note.clone(),
+                a.block_fingerprint.clone(),
+                layer.message.clone(),
+                source_uri(
+                    project,
+                    &page,
+                    &layer.source_region.clone().unwrap_or_else(BoxRect::full),
+                )?,
+            ]
+            .iter()
+            .enumerate()
+            {
+                annotation_sheet.push_str(&inline_cell(
+                    &format!("{}{annotation_row}", column_name(col + 1)?),
+                    value,
+                    if layer.confirmed() { 0 } else { 2 },
+                )?);
+            }
+            annotation_sheet.push_str("</row>");
+            anyhow::ensure!(
+                annotation_row <= 10_001 && annotation_sheet.len() <= 16_000_000,
+                Fault::new(
+                    "NG400",
+                    "Spreadsheet annotation metadata exceeds its bounded budget; export fewer pages"
+                )
+            );
+        }
+    }
+    if annotation_row > 1 {
+        annotation_sheet.push_str("</sheetData></worksheet>");
+        zip_text(
+            &mut zip,
+            &format!("xl/worksheets/sheet{annotation_id}.xml"),
+            &annotation_sheet,
+        )?;
+        sheets.push(("Annotations".into(), String::new()));
     }
     if review_row == 1 {
         review.push_str("<row r=\"2\">");

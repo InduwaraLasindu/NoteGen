@@ -27,6 +27,7 @@ pub(super) struct Workbench {
     tab: usize,
     query: String,
     palette_query: String,
+    palette_focus: bool,
     entries: Vec<crate::projects::Entry>,
     catalog_loaded: bool,
     hits: Vec<crate::projects::SearchHit>,
@@ -35,6 +36,9 @@ pub(super) struct Workbench {
     format: usize,
     find: String,
     replace: String,
+    layer_kind: usize,
+    layer_label: String,
+    layer_note: String,
     rule: Option<(PathBuf, crate::review::RulePreview)>,
     word: Option<WordPreview>,
     reader: String,
@@ -145,6 +149,143 @@ impl Workbench {
 }
 
 impl Review {
+    pub(super) fn inherit_session(&mut self, previous: &mut Self) {
+        if self.project.root == previous.project.root {
+            self.auto_advance = previous.auto_advance;
+            self.zoom = previous.zoom;
+            self.heatmap = previous.heatmap;
+            self.issue_page = previous.issue_page;
+            self.deferred_issues = std::mem::take(&mut previous.deferred_issues);
+            self.active_issue = previous.active_issue.take();
+            self.prune_session();
+        }
+    }
+    fn prune_session(&mut self) {
+        let live: BTreeSet<&str> = self
+            .issues
+            .iter()
+            .filter(|i| i.page > 0)
+            .map(|i| i.id.as_str())
+            .collect();
+        self.deferred_issues.retain(|id| live.contains(id.as_str()));
+        if self
+            .active_issue
+            .as_ref()
+            .is_some_and(|id| !live.contains(id.as_str()))
+        {
+            self.active_issue = None;
+        }
+        self.issue_page = self.issue_page.min(
+            self.issues
+                .iter()
+                .filter(|i| i.page > 0)
+                .count()
+                .saturating_sub(1)
+                / 100,
+        );
+    }
+    pub(super) fn navigate(
+        &mut self,
+        index: usize,
+        block: usize,
+        ctx: &egui::Context,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.dirty && !self.raw_open,
+            Fault::new(
+                "NG500",
+                "Save the draft and close page JSON before navigating"
+            )
+        );
+        let mut next = Self::load(self.project.clone(), index, ctx)?;
+        anyhow::ensure!(
+            block < next.page.content.blocks.len() || block == 0,
+            Fault::new("NG500", "The selected source block changed; refresh review")
+        );
+        next.selected = block;
+        next.inherit_session(self);
+        *self = next;
+        Ok(())
+    }
+    fn selected_issue(&self) -> Option<&crate::review::Issue> {
+        self.issues
+            .iter()
+            .find(|i| {
+                i.page == self.page.page
+                    && i.block == self.selected
+                    && self.active_issue.as_ref() == Some(&i.id)
+            })
+            .or_else(|| {
+                self.issues.iter().find(|i| {
+                    i.page == self.page.page
+                        && i.block == self.selected
+                        && !self.deferred_issues.contains(&i.id)
+                })
+            })
+    }
+    fn open_issue(&mut self, id: &str, ctx: &egui::Context) -> Result<()> {
+        let issue = self
+            .issues
+            .iter()
+            .find(|i| i.page > 0 && i.id == id)
+            .ok_or_else(|| Fault::new("NG500", "Review issue is no longer available"))?;
+        let index = self
+            .project
+            .manifest
+            .pages
+            .iter()
+            .position(|n| *n == issue.page)
+            .ok_or_else(|| Fault::new("NG500", "Review issue page is unavailable"))?;
+        let block = issue.block;
+        self.navigate(index, block, ctx)?;
+        self.active_issue = self
+            .issues
+            .iter()
+            .any(|i| i.id == id)
+            .then(|| id.to_owned());
+        Ok(())
+    }
+    fn next_issue(&mut self, ctx: &egui::Context) -> Result<()> {
+        anyhow::ensure!(
+            !self.dirty && !self.raw_open,
+            Fault::new(
+                "NG500",
+                "Save the draft and close page JSON before navigating"
+            )
+        );
+        let start = self
+            .active_issue
+            .as_ref()
+            .and_then(|id| self.issues.iter().position(|i| &i.id == id))
+            .map_or(0, |position| position + 1);
+        let id = self
+            .issues
+            .iter()
+            .skip(start)
+            .chain(self.issues.iter().take(start))
+            .find(|i| i.page > 0 && !self.deferred_issues.contains(&i.id))
+            .map(|i| i.id.clone());
+        if let Some(id) = id {
+            self.open_issue(&id, ctx)?;
+        }
+        Ok(())
+    }
+    fn defer_selected(&mut self, ctx: &egui::Context) -> Result<()> {
+        anyhow::ensure!(
+            !self.dirty && !self.raw_open,
+            Fault::new(
+                "NG500",
+                "Save the draft and close page JSON before deferring an issue"
+            )
+        );
+        if let Some(issue) = self.selected_issue() {
+            let id = issue.id.clone();
+            self.deferred_issues.insert(id.clone());
+            self.active_issue = Some(id);
+            self.next_issue(ctx)?;
+        }
+        Ok(())
+    }
     pub(super) fn save(&mut self, approved: bool) -> Result<()> {
         let mut page = self.page.clone();
         page.edited = true;
@@ -159,6 +300,13 @@ impl Review {
             self.revision_name.trim()
         };
         crate::review::commit(&self.project, &self.baseline, &page, label)?;
+        if self.dirty {
+            for issue in &self.issues {
+                if issue.page == self.page.page {
+                    self.deferred_issues.remove(&issue.id);
+                }
+            }
+        }
         self.page = page.clone();
         self.baseline = page;
         self.dirty = false;
@@ -168,8 +316,11 @@ impl Review {
     }
     fn history_action(&mut self, redo: bool) -> Result<()> {
         anyhow::ensure!(
-            !self.dirty,
-            Fault::new("NG500", "Save the current draft before undo or redo")
+            !self.dirty && !self.raw_open,
+            Fault::new(
+                "NG500",
+                "Save the current draft and close page JSON before undo or redo"
+            )
         );
         if redo {
             crate::review::redo(&self.project)?;
@@ -190,6 +341,16 @@ impl Review {
         Ok(())
     }
     fn refresh_issues(&mut self) {
+        match crate::layers::report(&self.page) {
+            Ok(layers) => {
+                self.layer_cache = layers;
+                self.layer_notice.clear();
+            }
+            Err(e) => {
+                self.layer_cache.clear();
+                self.layer_notice = format!("Saved labels could not be refreshed: {e}");
+            }
+        }
         match crate::review::issues(&self.project) {
             Ok(issues) => {
                 self.issues = issues;
@@ -202,20 +363,179 @@ impl Review {
                 );
             }
         }
-        self.issue_page = self.issue_page.min(
-            self.issues
-                .iter()
-                .filter(|i| i.page > 0)
-                .count()
-                .saturating_sub(1)
-                / 100,
-        );
+        self.prune_session();
     }
 }
 
 impl Desktop {
+    pub(super) fn layer_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Manual annotation layers").show(ui, |ui| {
+            ui.small("Label the selected block as original text, a highlight, marginal note, stamp or correction. Labels retain all content. They do not remove ink or redact hidden text. Changed source bindings need explicit reconfirmation.");
+            let kinds=[crate::layers::LayerKind::OriginalText,crate::layers::LayerKind::Highlight,crate::layers::LayerKind::MarginalNote,crate::layers::LayerKind::Stamp,crate::layers::LayerKind::TeacherCorrection,crate::layers::LayerKind::Other];
+            self.workbench.layer_kind=self.workbench.layer_kind.min(kinds.len()-1);
+            let editable=!r.dirty && !r.raw_open && self.worker.is_none();
+            ui.add_enabled_ui(editable,|ui| {
+                egui::ComboBox::from_label("Annotation kind").selected_text(kinds[self.workbench.layer_kind].name()).show_ui(ui,|ui|{
+                    for (index,kind) in kinds.iter().enumerate(){ui.selectable_value(&mut self.workbench.layer_kind,index,kind.name());}
+                });
+                ui.add(egui::TextEdit::singleline(&mut self.workbench.layer_label).hint_text("Optional label")).accessible_name("Manual annotation label");
+                ui.add(egui::TextEdit::multiline(&mut self.workbench.layer_note).desired_rows(2).hint_text("Optional annotation note")).accessible_name("Manual annotation note");
+                if ui.button(format!("Label selected block {}",r.selected+1)).clicked(){
+                    let result=crate::layers::set(&r.project,&r.page,r.selected,kinds[self.workbench.layer_kind],&self.workbench.layer_label,&self.workbench.layer_note,None).and_then(|_|r.reload());
+                    match result{Ok(())=>self.review_error.clear(),Err(e)=>self.review_error=e.to_string()}
+                }
+            });
+            if !r.layer_notice.is_empty(){Self::accessible_status(ui,"annotation-error",&r.layer_notice,true);}
+            if r.dirty{ui.small("Labels below refer to saved source bindings. Save the draft to check changes.");}
+            {
+                    let layers=r.layer_cache.clone();
+                    if layers.len()>100{ui.label(format!("Showing 100 of {} labels. The CLI layers report includes all labels.",layers.len()));}
+                    egui::ScrollArea::vertical().id_salt("annotation-layers").max_height(180.).show(ui,|ui|{
+                        for layer in layers.into_iter().take(100){
+                            ui.horizontal_wrapped(|ui|{
+                                ui.label(format!("Block {} · {} · {} · {}",layer.assignment.block+1,layer.assignment.kind.name(),layer.assignment.label,layer.status));
+                                if ui.add_enabled(editable,egui::Button::new("Remove label")).clicked(){
+                                    match crate::layers::remove(&r.project,&r.page,&layer.assignment.id).and_then(|_|r.reload()) {Ok(())=>self.review_error.clear(),Err(e)=>self.review_error=e.to_string()}
+                                }
+                                if !layer.confirmed() && ui.add_enabled(editable,egui::Button::new("Reconfirm on selected block")).clicked(){
+                                    match crate::layers::reconfirm(&r.project,&r.page,&layer.assignment.id,r.selected).and_then(|_|r.reload()) {Ok(())=>self.review_error.clear(),Err(e)=>self.review_error=e.to_string()}
+                                }
+                            });
+                        }
+                    });
+            }
+        });
+    }
+    fn review_shortcut(action: ReviewAction) -> egui::KeyboardShortcut {
+        egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND,
+            match action {
+                ReviewAction::Save => egui::Key::S,
+                ReviewAction::Approve => egui::Key::Enter,
+                ReviewAction::NextIssue => egui::Key::J,
+                ReviewAction::Defer => egui::Key::D,
+            },
+        )
+    }
+    pub(super) fn review_action_label(ctx: &egui::Context, action: ReviewAction) -> String {
+        let name = match action {
+            ReviewAction::Save => "Save draft",
+            ReviewAction::Approve => "Save & mark reviewed",
+            ReviewAction::NextIssue => "Next issue",
+            ReviewAction::Defer => "Defer selected issue",
+        };
+        format!(
+            "{name} · {}",
+            ctx.format_shortcut(&Self::review_shortcut(action))
+        )
+    }
+    pub(super) fn review_action(
+        &mut self,
+        r: &mut Review,
+        action: ReviewAction,
+        ctx: &egui::Context,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.worker.is_none(),
+            Fault::new("NG500", "Wait for the current task before reviewing")
+        );
+        anyhow::ensure!(
+            !r.raw_open,
+            Fault::new(
+                "NG500",
+                "Apply page JSON and close its editor before reviewing"
+            )
+        );
+        match action {
+            ReviewAction::Save => r.save(false),
+            ReviewAction::Approve => {
+                r.save(true)?;
+                if r.auto_advance && r.index + 1 < r.project.manifest.pages.len() {
+                    r.navigate(r.index + 1, 0, ctx).map_err(|e| {
+                        Fault::new(
+                            "NG500",
+                            format!("Page approval was saved. The next page could not open: {e}"),
+                        )
+                    })?;
+                }
+                Ok(())
+            }
+            ReviewAction::NextIssue => r.next_issue(ctx),
+            ReviewAction::Defer => r.defer_selected(ctx),
+        }
+    }
+    pub(super) fn review_shortcut_controls(
+        &self,
+        r: &Review,
+        ui: &mut egui::Ui,
+    ) -> Option<ReviewAction> {
+        let response = ui
+            .scope_builder(
+                egui::UiBuilder::new().scope_id(egui::Id::unique("review-keyboard-scope")),
+                |ui| ui.button("Keyboard review · focus here for shortcuts"),
+            )
+            .inner;
+        if response.clicked() {
+            response.request_focus();
+        }
+        let ctx = ui.ctx();
+        let can_use = response.has_focus()
+            && ui.is_enabled()
+            && !ctx.text_edit_focused()
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.top_layer_id() == Some(ui.layer_id())
+            && self.worker.is_none()
+            && !r.raw_open
+            && !self.advanced
+            && !self.experience.open
+            && !self.studio.open
+            && self.studio.pending.is_none()
+            && !self.workbench.open
+            && !self.workbench.palette;
+        response.on_hover_text("Tab or click to focus this button. Shortcuts run only with this button focused, no other tools open, and page JSON closed. Tab to an editor to type normally.");
+        if can_use {
+            for action in [
+                ReviewAction::Save,
+                ReviewAction::Approve,
+                ReviewAction::NextIssue,
+                ReviewAction::Defer,
+            ] {
+                if ctx.input_mut(|i| {
+                    let shortcut = Self::review_shortcut(action);
+                    i.events.iter().any(|event| {
+                        matches!(event,
+                            egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. }
+                            if *key == shortcut.logical_key && !modifiers.alt && !modifiers.shift
+                                && modifiers.matches_logically(shortcut.modifiers)
+                        )
+                    }) && i.consume_shortcut(&shortcut)
+                }) {
+                    return Some(action);
+                }
+            }
+        }
+        None
+    }
+    pub(super) fn repeated_review_activation(ctx: &egui::Context) -> bool {
+        ctx.input(|i| {
+            i.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Enter | egui::Key::Space,
+                        pressed: true,
+                        repeat: true,
+                        ..
+                    }
+                )
+            })
+        })
+    }
     fn export_tools(&mut self, w: &mut Workbench, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let Some((project, dirty)) = self.review.as_ref().map(|r| (r.project.clone(), r.dirty))
+        let Some((project, dirty)) = self
+            .review
+            .as_ref()
+            .map(|r| (r.project.clone(), r.dirty || r.raw_open))
         else {
             ui.label("Open a project or finish a conversion first.");
             return;
@@ -292,9 +612,11 @@ impl Desktop {
         ui.label("Preview literal replacements across the project. Applying selected rules creates one undoable revision and preserves reader evidence.");
         ui.horizontal(|ui| {
             ui.label("Find");
-            ui.add(egui::TextEdit::singleline(&mut w.find).char_limit(1000));
+            ui.add(egui::TextEdit::singleline(&mut w.find).char_limit(1000))
+                .accessible_name("Correction rule: exact text to find");
             ui.label("Replace");
-            ui.add(egui::TextEdit::singleline(&mut w.replace).char_limit(1000));
+            ui.add(egui::TextEdit::singleline(&mut w.replace).char_limit(1000))
+                .accessible_name("Correction rule: replacement text");
         });
         if ui
             .add_enabled(
@@ -581,7 +903,8 @@ impl Desktop {
                 .desired_rows(2)
                 .char_limit(8000)
                 .hint_text("Optional context for this region"),
-        );
+        )
+        .accessible_name("Optional recognition context for the selected source region");
         ui.small("Reader files and memory admission are verified in the worker. One reader supplies additional evidence, not independent consensus; confirmed text is not silently replaced.");
         if ui
             .add_enabled(
@@ -626,7 +949,8 @@ impl Desktop {
             });
         ui.horizontal(|ui| {
             ui.label("CPU cores to leave available");
-            ui.add(egui::DragValue::new(&mut w.reserved_cores).range(0..=511));
+            ui.add(egui::DragValue::new(&mut w.reserved_cores).range(0..=511))
+                .accessible_name("CPU cores to leave available for other applications");
         });
         if ui
             .add_enabled(
@@ -752,6 +1076,7 @@ impl Desktop {
             .char_limit(2048)
             .hint_text("Paste a private-update bearer token")
             .show(ui);
+        output.response = output.response.accessible_name("Private-update bearer token. Masked input; stored only after choosing Store token in Windows.");
         output.state.clear_undoer();
         output.state.store(ctx, output.response.id);
         if ui
@@ -863,7 +1188,7 @@ impl Desktop {
     }
     pub(super) fn history_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            let can_use = !r.dirty && self.worker.is_none();
+            let can_use = !r.dirty && !r.raw_open && self.worker.is_none();
             if ui
                 .add_enabled(can_use, egui::Button::new("Undo revision"))
                 .clicked()
@@ -882,7 +1207,8 @@ impl Desktop {
                 egui::TextEdit::singleline(&mut r.revision_name)
                     .hint_text("Name the next saved revision")
                     .desired_width(210.),
-            );
+            )
+            .accessible_name("Name the next saved review revision");
             ui.checkbox(&mut r.heatmap, "Disagreement overlay");
             ui.add(egui::Slider::new(&mut r.zoom, 0.5..=4.).text("Source zoom"));
         });
@@ -899,7 +1225,7 @@ impl Desktop {
                                     Err(e) => self.review_error=e.to_string(),
                                 }
                             }
-                            if ui.add_enabled(!r.dirty,egui::Button::new("Restore")).clicked() {
+                            if ui.add_enabled(!r.dirty && !r.raw_open && self.worker.is_none(),egui::Button::new("Restore")).clicked() {
                                 match crate::review::restore(&r.project,revision.id).and_then(|_| r.reload()) {
                                     Ok(()) => self.review_error.clear(), Err(e)=>self.review_error=e.to_string(),
                                 }
@@ -912,29 +1238,73 @@ impl Desktop {
         });
     }
     pub(super) fn issue_controls(&mut self, r: &mut Review, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(format!("Review queue · {} suggestions",r.issues.len())).show(ui,|ui| {
-            ui.small("Totals, number conflicts and uncertain regions are ranked by impact. Suggestions never rewrite a value.");
-            if !r.issue_notice.is_empty(){ui.colored_label(Color32::from_rgb(241,187,111),&r.issue_notice);}
-            for notice in r.issues.iter().filter(|i|i.page==0){ui.colored_label(Color32::from_rgb(241,187,111),&notice.message);}
-            let count=r.issues.iter().filter(|i|i.page>0).count();let pages=count.div_ceil(100).max(1);r.issue_page=r.issue_page.min(pages-1);
-            ui.horizontal(|ui|{
-                if ui.add_enabled(r.issue_page>0,egui::Button::new("Previous issues")).clicked(){r.issue_page-=1;}
-                ui.small(format!("{} / {pages}",r.issue_page+1));
-                if ui.add_enabled(r.issue_page+1<pages,egui::Button::new("Next issues")).clicked(){r.issue_page+=1;}
-            });
-            let mut chosen=None;
-            for issue in r.issues.iter().filter(|i|i.page>0).skip(r.issue_page*100).take(100) {
-                let label=format!("P{} · page {} · {}",issue.priority,issue.page,issue.message);
-                if ui.add_enabled(!r.dirty,egui::Button::new(label)).clicked() { chosen=Some((issue.page,issue.block)); }
-            }
-            if let Some((page,block))=chosen
-                && let Some(index)=r.project.manifest.pages.iter().position(|n| *n==page) {
-                    match Review::load(r.project.clone(),index,ui.ctx()) {
-                        Ok(mut next) => {next.selected=block; *r=next;},
-                        Err(e) => self.review_error=e.to_string(),
+        let count = r.issues.iter().filter(|i| i.page > 0).count();
+        egui::CollapsingHeader::new(format!("Review queue · {count} suggestions · {} deferred", r.deferred_issues.len()))
+            .show(ui, |ui| {
+                ui.small("Suggestions never rewrite values. Deferrals last only for this open project session; all issues and source overlays remain visible. Next issue skips deferred items and wraps through the ranked queue.");
+                if !r.issue_notice.is_empty() {
+                    ui.colored_label(Color32::from_rgb(241, 187, 111), &r.issue_notice);
+                }
+                for notice in r.issues.iter().filter(|i| i.page == 0) {
+                    ui.colored_label(Color32::from_rgb(241, 187, 111), &notice.message);
+                }
+                let can_use = !r.dirty && !r.raw_open && self.worker.is_none();
+                ui.horizontal_wrapped(|ui| {
+                    for action in [ReviewAction::NextIssue, ReviewAction::Defer] {
+                        let available = can_use && match action {
+                            ReviewAction::Defer => r.selected_issue().is_some(),
+                            _ => r.issues.iter().any(|i| i.page > 0 && !r.deferred_issues.contains(&i.id)),
+                        };
+                        if ui.add_enabled(available, egui::Button::new(Self::review_action_label(ui.ctx(), action))).clicked() {
+                            match self.review_action(r, action, ui.ctx()) {
+                                Ok(()) => self.review_error.clear(),
+                                Err(e) => self.review_error = e.to_string(),
+                            }
+                        }
                     }
-            }
-        });
+                    if ui.add_enabled(!r.deferred_issues.is_empty(), egui::Button::new("Reset session deferrals")).clicked() {
+                        r.deferred_issues.clear();
+                        r.active_issue = None;
+                    }
+                });
+                if let Some(issue) = r.selected_issue() {
+                    ui.strong(format!("Selected: {}", issue.message));
+                    if let (Some(row), Some(col)) = (issue.row, issue.col) {
+                        ui.small(format!("Table row {}, column {}", row + 1, col + 1));
+                    }
+                    ui.label(&issue.reading);
+                    for alternative in &issue.alternatives {
+                        ui.small(format!("Reader alternative: {alternative}"));
+                    }
+                }
+                let pages = count.div_ceil(100).max(1);
+                r.issue_page = r.issue_page.min(pages - 1);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(r.issue_page > 0, egui::Button::new("Previous issues")).clicked() { r.issue_page -= 1; }
+                    ui.small(format!("{} / {pages}", r.issue_page + 1));
+                    if ui.add_enabled(r.issue_page + 1 < pages, egui::Button::new("Next issues")).clicked() { r.issue_page += 1; }
+                });
+                let mut chosen = None;
+                let mut toggled = None;
+                for issue in r.issues.iter().filter(|i| i.page > 0).skip(r.issue_page * 100).take(100) {
+                    let deferred = r.deferred_issues.contains(&issue.id);
+                    ui.horizontal_wrapped(|ui| {
+                        let label = format!("{}P{} · page {} · {}", if deferred { "Deferred · " } else { "" }, issue.priority, issue.page, issue.message);
+                        if ui.add_enabled(can_use, egui::Button::new(label)).clicked() { chosen = Some(issue.id.clone()); }
+                        if ui.add_enabled(can_use, egui::Button::new(if deferred { "Restore issue" } else { "Defer issue" })).clicked() { toggled = Some((issue.id.clone(), deferred)); }
+                    });
+                }
+                if let Some((id, was_deferred)) = toggled {
+                    if was_deferred { r.deferred_issues.remove(&id); }
+                    else { r.deferred_issues.insert(id); }
+                }
+                if let Some(id) = chosen {
+                    match r.open_issue(&id, ui.ctx()) {
+                        Ok(()) => self.review_error.clear(),
+                        Err(e) => self.review_error = e.to_string(),
+                    }
+                }
+            });
     }
     pub fn tools_open(&mut self, tab: usize) {
         self.workbench.open = true;
@@ -945,6 +1315,7 @@ impl Desktop {
         self.workbench.poll();
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) {
             self.workbench.palette = true;
+            self.workbench.palette_focus = true;
         }
         if self.workbench.palette {
             let mut open = true;
@@ -952,10 +1323,16 @@ impl Desktop {
                 .open(&mut open)
                 .default_width(440.)
                 .show(ctx, |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.workbench.palette_query)
-                            .hint_text("Find an action…"),
-                    );
+                    let search = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.workbench.palette_query)
+                                .hint_text("Find an action…"),
+                        )
+                        .accessible_name("Command palette: find an action");
+                    if self.workbench.palette_focus {
+                        search.request_focus();
+                        self.workbench.palette_focus = false;
+                    }
                     let query = self.workbench.palette_query.to_lowercase();
                     for (id, label) in [
                         "Import scans · Ctrl+O",
@@ -1015,7 +1392,7 @@ impl Desktop {
                     0=>{
                         ui.label("Names, folders, tags and pending review across your recent projects. Search runs only in these project folders.");
                         ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut w.query);
+                            ui.text_edit_singleline(&mut w.query).accessible_name("Filter projects or search recognized text");
                             if ui.add_enabled(w.rx.is_none(),egui::Button::new("Filter projects")).clicked(){let roots=self.state.recent.clone();let query=w.query.clone();w.task(ctx,move||Ok(Report::Catalog(crate::projects::catalog(&roots,&crate::projects::Filter{query,..Default::default()})?)));}
                             if ui.add_enabled(w.rx.is_none()&&!w.query.trim().is_empty(),egui::Button::new("Search recognized text")).clicked(){let roots=self.state.recent.clone();let query=w.query.clone();w.task(ctx,move||Ok(Report::Search(crate::projects::search(&roots,&query,100)?)));}
                             if ui.add_enabled(w.rx.is_none(),egui::Button::new("Find duplicates")).clicked(){let roots=self.state.recent.clone();w.task(ctx,move||Ok(Report::Text(serde_json::to_string_pretty(&crate::projects::duplicates(&roots)?)?)));}
@@ -1037,7 +1414,7 @@ impl Desktop {
                                 if ui.button("Attach local reference").clicked() && let Some(path)=rfd::FileDialog::new().pick_file(){let p=r.project.clone();let label=path.file_name().unwrap_or_default().to_string_lossy().into_owned();w.task(ctx,move||Ok(Report::Text(serde_json::to_string_pretty(&crate::projects::attach_reference(&p,&path,&label,"background",&Control::default())?)?)));}
                             });
                             ui.label("Attached references are background context, separate from transcription evidence. They stay on this PC.");
-                            if !w.metadata.is_empty(){ui.add(egui::TextEdit::multiline(&mut w.metadata).code_editor().desired_rows(12).desired_width(f32::INFINITY));if ui.add_enabled(self.worker.is_none(),egui::Button::new("Validate and save project details")).clicked(){match serde_json::from_str(&w.metadata).map_err(anyhow::Error::from).and_then(|m|crate::projects::save_metadata(&r.project,&m)){Ok(())=>w.report="Project details saved.".into(),Err(e)=>w.report=e.to_string()}}}
+                            if !w.metadata.is_empty(){ui.add(egui::TextEdit::multiline(&mut w.metadata).code_editor().desired_rows(12).desired_width(f32::INFINITY)).accessible_name("Project details JSON. Validate and save to apply changes.");if ui.add_enabled(self.worker.is_none(),egui::Button::new("Validate and save project details")).clicked(){match serde_json::from_str(&w.metadata).map_err(anyhow::Error::from).and_then(|m|crate::projects::save_metadata(&r.project,&m)){Ok(())=>w.report="Project details saved.".into(),Err(e)=>w.report=e.to_string()}}}
                         }else{ui.label("Open a project to inspect recovery or attach references.");}
                         self.region_reread_tools(&mut w,ui,ctx);
                     }
@@ -1062,7 +1439,7 @@ impl Desktop {
                         self.credential_tools(&mut w,ui,ctx);
                     }
                 }
-                if !w.report.is_empty(){ui.separator();ui.add(egui::TextEdit::multiline(&mut w.report).desired_rows(10).desired_width(f32::INFINITY));}
+                if !w.report.is_empty(){ui.separator();Self::accessible_status(ui,"workbench-task-result","Local tool result is available below.",false);ui.add(egui::TextEdit::multiline(&mut w.report).desired_rows(10).desired_width(f32::INFINITY)).accessible_name("Local tool result details");}
             });
         });
         w.open = open;
@@ -1075,14 +1452,9 @@ impl Desktop {
             && let Some((page, block)) = target
             && let Some(r) = &mut self.review
             && let Some(index) = r.project.manifest.pages.iter().position(|n| *n == page)
+            && let Err(e) = r.navigate(index, block, ctx)
         {
-            match Review::load(r.project.clone(), index, ctx) {
-                Ok(mut next) => {
-                    next.selected = block;
-                    self.review = Some(next);
-                }
-                Err(e) => self.notice = e.to_string(),
-            }
+            self.notice = e.to_string();
         }
     }
 }

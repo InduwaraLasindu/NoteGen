@@ -6,8 +6,11 @@ use zeroize::Zeroizing;
 
 pub const SERVICE: &str = "NoteGen.PrivateUpdates";
 pub const ACCOUNT: &str = "github.com/InduwaraLasindu/NoteGen";
-const LATEST: &str = "/repos/InduwaraLasindu/NoteGen/releases/latest";
-const ASSET_PREFIX: &str = "/repos/InduwaraLasindu/NoteGen/releases/assets/";
+pub const PUBLISHER_LATEST_URL: &str =
+    "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/latest";
+pub const PUBLISHER_RELEASES_URL: &str =
+    "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases?per_page=20";
+const ASSET_PREFIX: &str = "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/";
 
 /// Deliberately implements neither Debug, Display, Clone nor Serialize.
 pub struct Secret(Zeroizing<Vec<u8>>);
@@ -117,20 +120,15 @@ fn store_error(error: StoreError) -> anyhow::Error {
     }).into()
 }
 pub fn publisher_url(url: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    url.scheme() == "https"
-        && url.host_str() == Some("api.github.com")
-        && url.port_or_known_default() == Some(443)
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && (url.path() == LATEST
-            || url.path().strip_prefix(ASSET_PREFIX).is_some_and(|id| {
-                !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())
-            }))
+    // Compare the exact approved spelling before any credential-store access.
+    // URL normalization must not broaden access to queries, siblings or dot segments.
+    publisher_metadata_url(url)
+        || url.strip_prefix(ASSET_PREFIX).is_some_and(|id| {
+            !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+pub fn publisher_metadata_url(url: &str) -> bool {
+    matches!(url, PUBLISHER_LATEST_URL | PUBLISHER_RELEASES_URL)
 }
 
 #[derive(Default)]

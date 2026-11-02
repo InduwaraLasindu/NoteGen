@@ -275,6 +275,7 @@ pub fn export(project: &Project, target: &Path, options: &Options, c: &Control) 
     let mut missing = BTreeSet::new();
     let mut pixels = 0u64;
     let mut characters = 0usize;
+    let mut manual_annotations = 0usize;
     for n in &project.manifest.pages {
         c.check()?;
         let source = project.load(*n)?;
@@ -307,6 +308,31 @@ pub fn export(project: &Project, target: &Path, options: &Options, c: &Control) 
             Some(PdfPoints::new(width)),
             Some(PdfPoints::new(height)),
         )?;
+        // Preserve human labels as source-bound annotations without changing source pixels or text.
+        for layer in crate::layers::report(&source)? {
+            c.check()?;
+            manual_annotations += 1;
+            anyhow::ensure!(
+                manual_annotations <= 10_000,
+                Fault::new(
+                    "NG400",
+                    "PDF exceeds 10,000 manual annotation labels; export fewer pages"
+                )
+            );
+            note(
+                &mut page,
+                rect(
+                    &layer.source_region.clone().unwrap_or_else(BoxRect::full),
+                    width,
+                    height,
+                ),
+                &layer.caption(),
+            )?;
+            report.marked_regions += 1;
+            if !layer.confirmed() {
+                warning(&mut report, *n, None, &layer.caption());
+            }
+        }
         let mut full_page_marked = false;
         let marks_before = report.marked_regions;
         for (index, b) in source.content.blocks.iter().enumerate() {

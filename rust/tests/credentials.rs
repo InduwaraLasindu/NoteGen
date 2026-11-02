@@ -95,6 +95,10 @@ fn rejected_urls_never_touch_the_credential_backend() {
         "https://api.github.com/repos/Other/Repository/releases/latest",
         "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/latest?token=secret",
         "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/latest#fragment",
+        "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases?per_page=20&token=secret",
+        "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases?per_page=100",
+        "https://api.github.com/repos/Other/Repo/releases?per_page=20",
+        "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases?per_page=20#fragment",
         "https://github.com/InduwaraLasindu/NoteGen/releases/latest",
         "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/not-an-id",
         "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/",
@@ -105,6 +109,32 @@ fn rejected_urls_never_touch_the_credential_backend() {
         assert!(store.get_for_publisher(bad).is_err());
     }
     assert!(state.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn preview_metadata_has_one_exact_approved_url() {
+    let (store, state) = fixture(true);
+    store.set(Secret::new(TOKEN.into()).unwrap()).unwrap();
+    assert!(publisher_metadata_url(PUBLISHER_RELEASES_URL));
+    assert!(
+        store
+            .get_for_publisher(PUBLISHER_RELEASES_URL)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|name| **name == "read")
+            .count(),
+        1
+    );
+    assert!(!publisher_metadata_url(
+        "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/321"
+    ));
 }
 #[test]
 fn numeric_publisher_assets_are_allowed_but_suffixes_and_encoded_segments_are_not() {

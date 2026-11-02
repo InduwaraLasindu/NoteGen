@@ -300,6 +300,37 @@ pub enum Action {
     Issues {
         project: PathBuf,
     },
+    /// Inspect human-assigned annotation layers and stale source bindings.
+    Layers {
+        project: PathBuf,
+        page: usize,
+    },
+    /// Label a source block (zero-based index), retaining all recognized content.
+    SetLayer {
+        project: PathBuf,
+        page: usize,
+        block: usize,
+        #[arg(value_parser=["original_text","highlight","marginal_note","stamp","teacher_correction","other"])]
+        kind: String,
+        #[arg(long, default_value = "")]
+        label: String,
+        #[arg(long, default_value = "")]
+        note: String,
+        #[arg(long)]
+        id: Option<String>,
+    },
+    RemoveLayer {
+        project: PathBuf,
+        page: usize,
+        id: String,
+    },
+    /// Explicitly bind an existing label to a selected current block.
+    ReconfirmLayer {
+        project: PathBuf,
+        page: usize,
+        id: String,
+        block: usize,
+    },
     PreviewRule {
         project: PathBuf,
         rule: PathBuf,
@@ -903,6 +934,52 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
                 .collect::<Vec<_>>(),
         ),
         Action::Issues { project } => print(review::issues(&Project::read(project)?)?),
+        Action::Layers { project, page } => print(notegen::layers::report(
+            &Project::read(project)?.load(page)?,
+        )?),
+        Action::SetLayer {
+            project,
+            page,
+            block,
+            kind,
+            label,
+            note,
+            id,
+        } => {
+            let project = Project::read(project)?;
+            let expected = project.load(page)?;
+            print(notegen::layers::set(
+                &project,
+                &expected,
+                block,
+                serde_json::from_value(serde_json::Value::String(kind))?,
+                &label,
+                &note,
+                id.as_deref(),
+            )?)
+        }
+        Action::RemoveLayer { project, page, id } => {
+            let project = Project::read(project)?;
+            print(notegen::layers::remove(
+                &project,
+                &project.load(page)?,
+                &id,
+            )?)
+        }
+        Action::ReconfirmLayer {
+            project,
+            page,
+            id,
+            block,
+        } => {
+            let project = Project::read(project)?;
+            print(notegen::layers::reconfirm(
+                &project,
+                &project.load(page)?,
+                &id,
+                block,
+            )?)
+        }
         Action::PreviewRule {
             project,
             rule,

@@ -15,6 +15,7 @@ pub mod hardware;
 pub mod hardware_trials;
 pub mod inputs;
 pub mod languages;
+pub mod layers;
 pub mod localization;
 pub mod maintenance;
 pub mod models;
