@@ -190,18 +190,16 @@ impl Desktop {
             if ui
                 .add_enabled(can_use, egui::Button::new("Undo revision"))
                 .clicked()
+                && let Err(e) = r.history_action(false)
             {
-                if let Err(e) = r.history_action(false) {
-                    self.review_error = e.to_string();
-                }
+                self.review_error = e.to_string();
             }
             if ui
                 .add_enabled(can_use, egui::Button::new("Redo revision"))
                 .clicked()
+                && let Err(e) = r.history_action(true)
             {
-                if let Err(e) = r.history_action(true) {
-                    self.review_error = e.to_string();
-                }
+                self.review_error = e.to_string();
             }
             ui.add(
                 egui::TextEdit::singleline(&mut r.revision_name)
@@ -244,13 +242,12 @@ impl Desktop {
                 let label=format!("P{} · page {} · {}",issue.priority,issue.page,issue.message);
                 if ui.add_enabled(!r.dirty,egui::Button::new(label)).clicked() { chosen=Some((issue.page,issue.block)); }
             }
-            if let Some((page,block))=chosen {
-                if let Some(index)=r.project.manifest.pages.iter().position(|n| *n==page) {
+            if let Some((page,block))=chosen
+                && let Some(index)=r.project.manifest.pages.iter().position(|n| *n==page) {
                     match Review::load(r.project.clone(),index,ui.ctx()) {
                         Ok(mut next) => {next.selected=block; *r=next;},
                         Err(e) => self.review_error=e.to_string(),
                     }
-                }
             }
         });
     }
@@ -383,19 +380,18 @@ impl Desktop {
         {
             self.notice = e.to_string();
         }
-        if let Some((path, target)) = jump {
-            if self.open_review(path, ctx)
-                && let Some((page, block)) = target
-                && let Some(r) = &mut self.review
-                && let Some(index) = r.project.manifest.pages.iter().position(|n| *n == page)
-            {
-                match Review::load(r.project.clone(), index, ctx) {
-                    Ok(mut next) => {
-                        next.selected = block;
-                        self.review = Some(next);
-                    }
-                    Err(e) => self.notice = e.to_string(),
+        if let Some((path, target)) = jump
+            && self.open_review(path, ctx)
+            && let Some((page, block)) = target
+            && let Some(r) = &mut self.review
+            && let Some(index) = r.project.manifest.pages.iter().position(|n| *n == page)
+        {
+            match Review::load(r.project.clone(), index, ctx) {
+                Ok(mut next) => {
+                    next.selected = block;
+                    self.review = Some(next);
                 }
+                Err(e) => self.notice = e.to_string(),
             }
         }
     }

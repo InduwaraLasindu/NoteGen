@@ -257,9 +257,9 @@ pub fn apply(project: &Project, qs: &[Question], answers: &[Answer]) -> Result<u
             project.manifest.pages.contains(&q.page),
             Fault::new("NG630", "Clarification page is outside this project")
         );
-        if !pages.contains_key(&q.page) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(q.page) {
             let before = project.load(q.page)?;
-            pages.insert(q.page, (before.clone(), before));
+            entry.insert((before.clone(), before));
         }
         let (before, p) = pages
             .get_mut(&q.page)

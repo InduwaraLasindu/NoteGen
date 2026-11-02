@@ -491,9 +491,9 @@ pub fn apply(
             f.status == "changed",
             fault("Selected Word correction has a conflict or no change")
         );
-        if !pages.contains_key(&f.page) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(f.page) {
             let before = p.load(f.page)?;
-            pages.insert(f.page, (before.clone(), before));
+            entry.insert((before.clone(), before));
         }
         let (_, after) = pages
             .get_mut(&f.page)

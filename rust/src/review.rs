@@ -1059,15 +1059,12 @@ pub fn apply_rule(p: &Project, preview: &RulePreview, label: &str) -> Result<u64
     );
     let mut changes = BTreeMap::new();
     for m in &preview.matches {
-        if !changes.contains_key(&m.page) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = changes.entry(m.page) {
             let before = p.load(m.page)?;
-            changes.insert(
-                m.page,
-                Change {
-                    after: before.clone(),
-                    before,
-                },
-            );
+            entry.insert(Change {
+                after: before.clone(),
+                before,
+            });
         }
         let c = changes
             .get_mut(&m.page)

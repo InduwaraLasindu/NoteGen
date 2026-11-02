@@ -1719,11 +1719,10 @@ impl Desktop {
                             if response.drag_stopped() && let Some(region)=r.crop.take(){self.prepare_teach(&r,region,ctx);r.crop_start=None;r.crop_mode=false;}
                         }
                         for(i,b)in r.page.content.blocks.iter().enumerate(){
-                            if r.heatmap && r.issues.iter().any(|issue| issue.page==r.page.page && issue.block==i) {
-                                if let Some(b)=&b.bbox {
+                            if r.heatmap && r.issues.iter().any(|issue| issue.page==r.page.page && issue.block==i)
+                                && let Some(b)=&b.bbox {
                                     let area=egui::Rect::from_min_max(rect.min+Vec2::new(b.left*rect.width(),b.top*rect.height()),rect.min+Vec2::new(b.right*rect.width(),b.bottom*rect.height()));
                                     ui.painter().rect_filled(area,2,Color32::from_rgba_unmultiplied(255,150,70,45));
-                                }
                             }
                             if let Some(b)=&b.bbox{
                                 let region=egui::Rect::from_min_max(egui::pos2(rect.left()+b.left*rect.width(),rect.top()+b.top*rect.height()),egui::pos2(rect.left()+b.right*rect.width(),rect.top()+b.bottom*rect.height()));

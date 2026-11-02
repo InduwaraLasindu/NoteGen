@@ -6,8 +6,83 @@ use notegen::{
 use serde::Serialize;
 use std::path::PathBuf;
 
+#[derive(serde::Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct SupportRequest {
+    activity: Vec<PathBuf>,
+    documents: Vec<PathBuf>,
+    options: notegen::diagnostics::SupportOptions,
+}
+impl SupportRequest {
+    fn input<'a>(&'a self, s: &'a Settings) -> notegen::diagnostics::SupportInput<'a> {
+        notegen::diagnostics::SupportInput {
+            settings: s,
+            activity: &self.activity,
+            documents: &self.documents,
+            options: &self.options,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Action {
+    ExportPdf {
+        project: PathBuf,
+        #[arg(long)]
+        options: Option<PathBuf>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    ProjectChecks {
+        project: PathBuf,
+        #[arg(value_parser=["scripts","recurring","references","consistency","technical"])]
+        kind: String,
+    },
+    ApplyRecurring {
+        project: PathBuf,
+        selections: PathBuf,
+        #[arg(value_parser=["keep","remove"])]
+        action: String,
+    },
+    SupportPreview {
+        request: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    InspectSupport {
+        request: PathBuf,
+        name: String,
+    },
+    ExportSupport {
+        request: PathBuf,
+        preview: PathBuf,
+        selections: PathBuf,
+        #[arg(long)]
+        preview_token: String,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    Troubleshoot {
+        code: String,
+    },
+    RepairPreview {
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    RepairAssets {
+        preview: PathBuf,
+        selections: PathBuf,
+        #[arg(long)]
+        preview_token: String,
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+    },
     RegionRead {
         project: PathBuf,
         request: PathBuf,
@@ -301,6 +376,108 @@ fn format(value: &str) -> Result<exports::Format> {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::ExportPdf {
+            project,
+            options,
+            output,
+        } => {
+            let options = if let Some(path) = options {
+                read_json(&path, 100_000)?
+            } else {
+                Default::default()
+            };
+            print(notegen::searchable_pdf::export(
+                &Project::read(project)?,
+                &output,
+                &options,
+                c,
+            )?)
+        }
+        Action::ProjectChecks { project, kind } => {
+            let p = Project::read(project)?;
+            match kind.as_str() {
+                "scripts" => print(notegen::document_tools::script_hints(&p, None, c)?),
+                "recurring" => print(notegen::document_tools::recurring_elements(&p, c)?),
+                "references" => print(notegen::document_tools::reference_links(&p, c)?),
+                "consistency" => print(notegen::document_tools::consistency_suggestions(&p, c)?),
+                _ => print(notegen::document_tools::technical_checks(&p, c)?),
+            }
+        }
+        Action::ApplyRecurring {
+            project,
+            selections,
+            action,
+        } => print(notegen::document_tools::apply_recurring(
+            &Project::read(project)?,
+            &read_json::<Vec<String>>(&selections, 1_000_000)?,
+            serde_json::from_value(serde_json::Value::String(action))?,
+            c,
+        )?),
+        Action::SupportPreview { request, output } => {
+            let r: SupportRequest = read_json(&request, 1_000_000)?;
+            let p = notegen::diagnostics::support_preview(&r.input(s), c)?;
+            protected_json(&output, &p)?;
+            print(p)
+        }
+        Action::InspectSupport { request, name } => {
+            let r: SupportRequest = read_json(&request, 1_000_000)?;
+            let bytes = notegen::diagnostics::inspect_support_file(&r.input(s), &name, c)?;
+            println!("{}", String::from_utf8(bytes)?);
+            Ok(())
+        }
+        Action::ExportSupport {
+            request,
+            preview,
+            selections,
+            preview_token,
+            output,
+        } => {
+            let r: SupportRequest = read_json(&request, 1_000_000)?;
+            notegen::diagnostics::export_support(
+                &r.input(s),
+                &read_json(&preview, 1_000_000)?,
+                &preview_token,
+                &read_json::<Vec<String>>(&selections, 1_000_000)?,
+                &output,
+                c,
+            )
+        }
+        Action::Troubleshoot { code } => print(notegen::diagnostics::troubleshoot(&code)),
+        Action::RepairPreview {
+            models,
+            runtime,
+            output,
+        } => {
+            let input = notegen::diagnostics::RepairInput {
+                settings: s,
+                model_ids: &models,
+                runtime_backend: runtime.as_deref(),
+            };
+            let p = notegen::diagnostics::repair_preview(&input, c)?;
+            protected_json(&output, &p)?;
+            print(p)
+        }
+        Action::RepairAssets {
+            preview,
+            selections,
+            preview_token,
+            models,
+            runtime,
+        } => {
+            let input = notegen::diagnostics::RepairInput {
+                settings: s,
+                model_ids: &models,
+                runtime_backend: runtime.as_deref(),
+            };
+            print(notegen::diagnostics::repair_selected(
+                &input,
+                &read_json(&preview, 1_000_000)?,
+                &preview_token,
+                &read_json::<Vec<String>>(&selections, 1_000_000)?,
+                c,
+                &Activity::default(),
+            )?)
+        }
         Action::RegionRead { project, request } => print(notegen::pipeline::reread_region(
             &Project::read(project)?,
             &read_json(&request, 100_000)?,

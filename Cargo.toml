@@ -147,3 +147,15 @@ path = "rust/tests/scan_tools.rs"
 name = "context_history"
 path = "rust/tests/context_history.rs"
 
+[[test]]
+name = "diagnostics"
+path = "rust/tests/diagnostics.rs"
+
+[[test]]
+name = "document_tools"
+path = "rust/tests/document_tools.rs"
+
+[[test]]
+name = "searchable_pdf"
+path = "rust/tests/searchable_pdf.rs"
+

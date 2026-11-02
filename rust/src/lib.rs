@@ -3,6 +3,8 @@ pub mod bundles;
 pub mod consensus;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+pub mod diagnostics;
+pub mod document_tools;
 pub mod evaluation;
 pub mod exports;
 pub mod fontpack;
@@ -24,6 +26,7 @@ pub mod roundtrip;
 pub mod runtime;
 pub mod scan;
 pub mod scan_tools;
+pub mod searchable_pdf;
 pub mod settings_help;
 pub mod setup;
 pub mod storage;
