@@ -106,6 +106,11 @@ fn options() -> Options {
 #[test]
 fn native_searchable_export_has_source_pages_unicode_embedded_font_and_grounded_text() {
     let f = fixture();
+    let original = fs::read(f.project.page_path(1)).unwrap();
+    assert_eq!(
+        f.project.load(1).unwrap().content.blocks[0].text,
+        "Search 1250 Ω é"
+    );
     let report =
         searchable_pdf::export(&f.project, &f.output, &options(), &Control::default()).unwrap();
     assert_eq!(report.pages, 2);
@@ -117,10 +122,33 @@ fn native_searchable_export_has_source_pages_unicode_embedded_font_and_grounded_
     let document = engine.load_pdf_from_file(&f.output, None).unwrap();
     assert_eq!(document.pages().len(), 2);
     let page = document.pages().get(0).unwrap();
-    let text = page.text().unwrap().all();
-    assert!(text.contains("Search 1250"), "{text:?}");
-    assert!(text.contains('Ω'), "{text:?}");
-    assert!(text.contains('é'), "{text:?}");
+    let native_text = page.text().unwrap();
+    let text = native_text.all();
+    // Fonts can map the same space glyph to U+0020 or U+00A0 on extraction.
+    // Compare the full text after whitespace normalization; all other characters stay exact.
+    assert_eq!(
+        text.split_whitespace().collect::<Vec<_>>().join(" "),
+        "Search 1250 Ω é",
+        "{text:?}"
+    );
+    for needle in ["1250", "Ω", "é"] {
+        let search = native_text
+            .search(needle, &PdfSearchOptions::new().match_case(true))
+            .unwrap();
+        assert!(
+            search.find_next().is_some(),
+            "PDFium could not find {needle:?}"
+        );
+        assert!(
+            search.find_next().is_none(),
+            "PDFium found duplicate {needle:?}"
+        );
+    }
+    let changed_number = native_text
+        .search("1251", &PdfSearchOptions::new())
+        .unwrap();
+    assert!(changed_number.find_next().is_none());
+    assert_eq!(fs::read(f.project.page_path(1)).unwrap(), original);
     let mut texts = 0;
     let mut images = 0;
     for object in page.objects().iter() {

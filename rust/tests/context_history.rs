@@ -318,58 +318,147 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     unused_listener.set_nonblocking(true).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let mut request = serde_json::Value::Null;
-        for _ in 0..2 {
-            let start = Instant::now();
-            let mut socket = loop {
-                match listener.accept() {
-                    Ok((socket, _)) => break socket,
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            && start.elapsed() < Duration::from_secs(15) =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5))
-                    }
-                    Err(e) => panic!("Region protocol request missing: {e}"),
-                }
-            };
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut headers = vec![];
-            let mut one = [0];
-            while socket.read_exact(&mut one).is_ok() {
-                headers.push(one[0]);
-                assert!(headers.len() < 16000);
-                if headers.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let headers = String::from_utf8(headers).unwrap();
-            let size = headers
-                .lines()
-                .find_map(|l| {
-                    l.to_lowercase()
-                        .strip_prefix("content-length:")
-                        .and_then(|n| n.trim().parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            assert!(size < 1_000_000);
-            let mut body = vec![0; size];
-            socket.read_exact(&mut body).unwrap();
-            let response = if headers.starts_with("GET ") {
-                serde_json::json!({"data":[{"id":"region-reader"}]}).to_string()
-            } else {
-                request = serde_json::from_slice(&body).unwrap();
-                let content=serde_json::json!({"blocks":[{"kind":"text","text":"Alternative 155","box":{"left":0,"top":0,"right":1,"bottom":1}}],"warnings":[],"summary":"Source crop"}).to_string();
-                serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}).to_string()
-            };
-            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let endpoint = format!("http://{address}");
+    type Captured = (usize, Vec<serde_json::Value>);
+    struct RegionMock {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        worker: Option<std::thread::JoinHandle<Captured>>,
+    }
+    impl RegionMock {
+        fn finish(mut self) -> Captured {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            self.worker
+                .take()
+                .unwrap()
+                .join()
+                .expect("Region HTTP mock failed")
         }
-        request
-    });
+    }
+    impl Drop for RegionMock {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
+    let server = RegionMock {
+        stop,
+        worker: Some(std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut identities = 0;
+            let mut completions = vec![];
+            let mut connections = 0;
+            while !stopping.load(std::sync::atomic::Ordering::Acquire) {
+                assert!(
+                    Instant::now() < deadline,
+                    "Region protocol request deadline exceeded"
+                );
+                let mut socket = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(e) => panic!("Region protocol accept failed: {e}"),
+                };
+                connections += 1;
+                assert!(
+                    connections <= 16,
+                    "Too many region protocol transport connections"
+                );
+                // Winsock accepted sockets inherit listener properties. Reads
+                // below are blocking with explicit deadlines, unlike accept().
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut headers = vec![];
+                let mut one = [0];
+                loop {
+                    assert!(
+                        Instant::now() < deadline,
+                        "Region protocol header deadline exceeded"
+                    );
+                    match socket.read_exact(&mut one) {
+                        Ok(()) => headers.push(one[0]),
+                        Err(e)
+                            if headers.is_empty()
+                                && matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::UnexpectedEof
+                                        | std::io::ErrorKind::ConnectionReset
+                                        | std::io::ErrorKind::ConnectionAborted
+                                ) =>
+                        {
+                            break;
+                        }
+                        Err(e) => panic!("Incomplete region HTTP headers: {e}"),
+                    }
+                    assert!(headers.len() < 16000);
+                    if headers.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                // TCP connections are not HTTP requests: a transport may close a
+                // speculative connection before writing any headers, notably on Windows.
+                if headers.is_empty() {
+                    continue;
+                }
+                let headers = String::from_utf8(headers).unwrap();
+                let request_line = headers.lines().next().unwrap();
+                let size = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|n| n.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                assert!(size < 1_000_000);
+                let response = match request_line {
+                    "GET /v1/models HTTP/1.1" => {
+                        assert_eq!(size, 0);
+                        identities += 1;
+                        assert!(
+                            identities <= 4,
+                            "Unexpected repeated model identity requests"
+                        );
+                        serde_json::json!({"data":[{"id":"region-reader"}]}).to_string()
+                    }
+                    "POST /v1/chat/completions HTTP/1.1" => {
+                        assert!(
+                            identities > 0,
+                            "Completion preceded registered-reader identity verification"
+                        );
+                        assert!(size > 0, "Completion request has no JSON body");
+                        let mut body = vec![0; size];
+                        socket.read_exact(&mut body).unwrap();
+                        completions.push(serde_json::from_slice(&body).unwrap());
+                        assert_eq!(
+                            completions.len(),
+                            1,
+                            "More than one region completion was requested"
+                        );
+                        let content=serde_json::json!({"blocks":[{"kind":"text","text":"Alternative 155","box":{"left":0,"top":0,"right":1,"bottom":1}}],"warnings":[],"summary":"Source crop"}).to_string();
+                        serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}).to_string()
+                    }
+                    other => panic!("Unexpected region HTTP request: {other}"),
+                };
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+            }
+            (identities, completions)
+        })),
+    };
+    // Exercise an empty transport explicitly on every OS, rather than relying
+    // on the client's platform-specific connection behavior to reproduce it.
+    drop(std::net::TcpStream::connect(address).unwrap());
     let mut settings = Settings {
         models_dir: p.root.join("models"),
         backend: Backend::Cpu,
@@ -401,15 +490,18 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
         context: "User crop topic".into(),
         task: "handwriting".into(),
     };
-    pipeline::reread_region(
+    let result = pipeline::reread_region(
         p,
         &request,
         &settings,
         &Control::default(),
         &Activity::default(),
-    )
-    .unwrap();
-    let raw = server.join().unwrap();
+    );
+    let (identities, mut completions) = server.finish();
+    result.unwrap();
+    assert!(identities >= 1);
+    assert_eq!(completions.len(), 1);
+    let raw = completions.pop().unwrap();
     assert_eq!(
         unused_listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
