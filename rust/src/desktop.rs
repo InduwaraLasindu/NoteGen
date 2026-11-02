@@ -1748,7 +1748,7 @@ impl Desktop {
         let mut reorder = None;
         let mut action = None;
         let review_bounds = ctx.content_rect().shrink(8.);
-        egui::Window::new("Review & correct").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).max_height(review_bounds.height()).constrain_to(review_bounds).vscroll(true).resizable(true).show(ctx,|ui|{
+        egui::Window::new("Review & correct").id(egui::Id::unique("notegen-review-window")).fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).max_height(review_bounds.height()).constrain_to(review_bounds).vscroll(true).resizable(true).show(ctx,|ui|{
             if self.worker.is_some(){ui.disable();}
             let content_top = ui.cursor().top();
             ui.horizontal_wrapped(|ui|{
@@ -2784,7 +2784,7 @@ mod acceptance {
             }
             let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
             let window = ctx
-                .memory(|memory| memory.area_rect(egui::Id::unique("Review & correct")))
+                .memory(|memory| memory.area_rect(egui::Id::unique("notegen-review-window")))
                 .unwrap();
             let save = visible_review_button(&tree, "Save draft", viewport, window);
             visible_review_button(&tree, "Save & mark reviewed", viewport, window);
@@ -2886,7 +2886,7 @@ mod acceptance {
         }
         let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
         let window = ctx
-            .memory(|memory| memory.area_rect(egui::Id::unique("Review & correct")))
+            .memory(|memory| memory.area_rect(egui::Id::unique("notegen-review-window")))
             .unwrap();
         visible_review_button(&tree, "Save draft", viewport, window);
         visible_review_button(&tree, "Save & mark reviewed", viewport, window);

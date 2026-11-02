@@ -61,9 +61,12 @@ jobs:
       - run: cargo fmt --all --check
         id: format
       - run: cargo clippy --locked --all-features --all-targets --keep-going -j 2 -- -D warnings
+      - name: Review window interaction and viewport acceptance
+        id: review_layout
+        run: cargo test --locked --all-features --lib desktop::acceptance:: -j 2
       - name: All Rust tests and real raster-PDF OCR
         id: first_tests
-        if: ${{ !cancelled() && steps.format.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.review_layout.outcome == 'success' }}
         run: cargo test --locked --all-features --all-targets --no-fail-fast -j 2
       - name: Repeat the complete suite with serial test execution
         if: ${{ !cancelled() && steps.first_tests.outcome == 'success' }}
