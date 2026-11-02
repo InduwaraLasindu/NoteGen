@@ -278,50 +278,55 @@ pub fn scan(
             report.waiting_stable.push(filename);
             continue;
         }
-        if state
-            .imported
-            .get(&filename)
-            .is_some_and(|r| r.bytes == bytes && r.modified_nanos == modified)
-        {
+        // Copy/restore tools may preserve both length and modification time.
+        // Revalidate stable bytes rather than treating metadata or a cached hash as identity.
+        let sha = match hash_file(&path, c) {
+            Ok(sha) => sha,
+            Err(error) => {
+                c.check()?;
+                report.rejected.push(RejectedFile {
+                    filename,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let after = match signature(&path) {
+            Ok(value) => value,
+            Err(error) => {
+                report.rejected.push(RejectedFile {
+                    filename,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if after != (bytes, modified) {
+            *observation = Observation {
+                bytes: after.0,
+                modified_nanos: after.1,
+                stable_since: now,
+                sha256: None,
+            };
+            report.waiting_stable.push(filename);
             continue;
         }
-        let sha = if let Some(sha) = &observation.sha256 {
-            sha.clone()
-        } else {
-            let sha = match hash_file(&path, c) {
-                Ok(sha) => sha,
-                Err(error) => {
-                    c.check()?;
-                    report.rejected.push(RejectedFile {
-                        filename,
-                        reason: error.to_string(),
-                    });
-                    continue;
-                }
-            };
-            let after = match signature(&path) {
-                Ok(value) => value,
-                Err(error) => {
-                    report.rejected.push(RejectedFile {
-                        filename,
-                        reason: error.to_string(),
-                    });
-                    continue;
-                }
-            };
-            if after != (bytes, modified) {
-                *observation = Observation {
-                    bytes: after.0,
-                    modified_nanos: after.1,
-                    stable_since: now,
-                    sha256: None,
-                };
+        if observation.sha256.as_ref().is_some_and(|old| old != &sha) {
+            observation.stable_since = now;
+            observation.sha256 = Some(sha.clone());
+            if config.stable_seconds > 0 {
                 report.waiting_stable.push(filename);
                 continue;
             }
-            observation.sha256 = Some(sha.clone());
-            sha
-        };
+        }
+        observation.sha256 = Some(sha.clone());
+        if state
+            .imported
+            .get(&filename)
+            .is_some_and(|r| r.sha256 == sha && r.bytes == bytes && r.modified_nanos == modified)
+        {
+            continue;
+        }
         let duplicate = state.imported.values().find(|r| r.sha256 == sha).cloned();
         if (duplicate.is_some() || offered.contains(&sha))
             && config.duplicate_policy == DuplicatePolicy::Skip

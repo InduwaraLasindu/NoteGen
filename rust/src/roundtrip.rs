@@ -243,6 +243,17 @@ fn text(n: roxmltree::Node<'_, '_>) -> Result<String> {
                 fault("Word correction field is too large")
             );
             result.push('\t');
+        } else if named(node, "noBreakHyphen") || named(node, "softHyphen") {
+            let hyphen = if named(node, "noBreakHyphen") {
+                '\u{2011}'
+            } else {
+                '\u{00ad}'
+            };
+            anyhow::ensure!(
+                result.len().saturating_add(hyphen.len_utf8()) <= 120000,
+                fault("Word correction field is too large")
+            );
+            result.push(hyphen);
         } else if named(node, "br") || named(node, "cr") {
             anyhow::ensure!(
                 result.len() < 120000,
@@ -619,6 +630,8 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
                 "tbl",
                 "drawing",
                 "object",
+                "sym",
+                "fldSimple",
                 "instrText",
                 "ins",
                 "del",
@@ -645,7 +658,17 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
             })
             .collect();
         let value = if format == Some("omml") {
-            if math.len() == 1 {
+            // An equation control is not an arbitrary mixed-content container. Parsing only
+            // oMath would silently discard ordinary Word text (for example appended units).
+            let extra_text = math.len() == 1
+                && content.descendants().any(|node| {
+                    !node.ancestors().any(|ancestor| ancestor == math[0])
+                        && (named(node, "t") && node.text().is_some_and(|text| !text.is_empty())
+                            || ["tab", "br", "cr", "noBreakHyphen", "softHyphen"]
+                                .iter()
+                                .any(|name| named(node, name)))
+                });
+            if math.len() == 1 && !extra_text {
                 match crate::equations::from_omml(math[0]) {
                     Ok(value) => value,
                     Err(_) => {
@@ -655,7 +678,7 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
                 }
             } else {
                 invalid.insert(key.to_string());
-                "[missing or repeated Word equation]".into()
+                "[missing, repeated or mixed-content Word equation]".into()
             }
         } else {
             if !math.is_empty() {

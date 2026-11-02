@@ -86,6 +86,88 @@ fn changed_files_restart_stability_and_stale_candidates_cannot_be_recorded() {
     );
 }
 #[test]
+fn preserved_size_and_mtime_never_hide_changed_imported_content_under_either_policy() {
+    for policy in [DuplicatePolicy::Skip, DuplicatePolicy::NewRevision] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(dir.path());
+        config.duplicate_policy = policy;
+        let path = dir.path().join("page.png");
+        fs::write(&path, b"AAAA").unwrap();
+        let mut state = WatchState::default();
+        let c = Control::default();
+        watch::scan(&config, &mut state, 0, &c).unwrap();
+        let original = watch::scan(&config, &mut state, 3, &c)
+            .unwrap()
+            .ready
+            .remove(0);
+        watch::record_import(&config, &mut state, &original, "original", 3, &c).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, b"BBBB").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), original.bytes);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let changed = watch::scan(&config, &mut state, 4, &c).unwrap();
+        assert!(changed.ready.is_empty());
+        assert_eq!(changed.waiting_stable, ["page.png"]);
+        assert_eq!(state.imported["page.png"].sha256, original.sha256);
+        assert!(
+            watch::scan(&config, &mut state, 6, &c)
+                .unwrap()
+                .ready
+                .is_empty()
+        );
+        let replacement = watch::scan(&config, &mut state, 7, &c)
+            .unwrap()
+            .ready
+            .remove(0);
+        assert_ne!(replacement.sha256, original.sha256);
+        assert!(watch::record_import(&config, &mut state, &original, "stale", 7, &c).is_err());
+        watch::record_import(&config, &mut state, &replacement, "replacement", 7, &c).unwrap();
+        assert_eq!(state.imported["page.png"].project_id, "replacement");
+        assert!(
+            watch::scan(&config, &mut state, 8, &c)
+                .unwrap()
+                .ready
+                .is_empty()
+        );
+    }
+}
+#[test]
+fn unimported_ready_candidates_are_rehashed_when_metadata_is_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = WatchConfig {
+        stable_seconds: 0,
+        ..config(dir.path())
+    };
+    let path = dir.path().join("page.pdf");
+    fs::write(&path, b"AAAA").unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut state = WatchState::default();
+    let c = Control::default();
+    let original = watch::scan(&config, &mut state, 0, &c)
+        .unwrap()
+        .ready
+        .remove(0);
+    fs::write(&path, b"BBBB").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    let replacement = watch::scan(&config, &mut state, 1, &c)
+        .unwrap()
+        .ready
+        .remove(0);
+    assert_ne!(replacement.sha256, original.sha256);
+    assert!(state.imported.is_empty());
+}
+#[test]
 fn duplicate_content_policy_skips_or_admits_an_explicit_new_revision_under_another_name() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(dir.path());

@@ -24,7 +24,7 @@ Project details are editable, validated JSON. Attach local references as backgro
 
 Word uses semantic styles, source controls and a correction baseline. Markdown, HTML and LaTeX retain source references and uncertainty annotations. Excel stores recognized cell values as literal text, including leading zeros and formula-like strings, and includes a review sheet. Traceability JSON records every block and cell, candidate evidence and the actual available source region. Individual cell coordinates are not invented when only a table box exists.
 
-All exporters protect existing filenames. Source links refer to files in the project; keep the project available when following them. Sharing an export and its referenced source is a separate, explicit action.
+All exporters protect existing filenames. Text, spreadsheet and traceability exports require a destination outside the source project's data folder, so a new file cannot shadow a checkpoint. Code blocks retain literal Markdown text and explicit LaTeX spacing; LaTeX tabs use eight-column stops. Source links refer to files in the project; keep the project available when following them. Sharing an export and its referenced source is a separate, explicit action.
 
 ## CLI
 
@@ -88,6 +88,8 @@ The new folder retains `original.png`, `corrected.png` and a hashed `relationshi
 
 Export Word from the current project, edit its source-tagged fields, then select **Inspect corrected Word document** in the export workbench. Select the changed fields to import. Missing controls, changed structure, stale previews and simultaneous project edits become conflicts. Importing creates one undoable revision; source recognition remains intact.
 
+Word's nonbreaking and soft hyphens are retained. Font-specific symbols, cached simple fields and text added outside an editable equation become conflicts instead of partially imported corrections.
+
 Editable Office Math supports groups, fractions, subscripts/superscripts, roots, common Greek/operators, text runs and basic matrices. Unsupported LaTeX remains visible as literal source with a review caption. This is a bounded grammar, not a general TeX engine. Word style profiles are available with `tools word-styles`.
 
 ## Watched folders
@@ -103,6 +105,8 @@ notegen-cli --cancel-file stop-watch tools watch watch.json watch-state.json out
 ```
 
 Files must remain stable across polls. Only successful conversions receive an import receipt; failed files retain checkpoints and use bounded retry backoff. `new_revision` permits separate identical-content imports. `--once` processes only files already stable during that poll.
+
+Stable candidates are rehashed even when their size and modification time stay unchanged. This detects content replaced by tools that preserve file metadata.
 
 ## Retention-managed sessions
 
@@ -130,3 +134,5 @@ The privacy workbench exposes reversible application resource profiles and Windo
 `hardware-trial` benchmarks a copied source page on explicitly selected compatible devices. Reports separate measured duration, sampled memory, review flags and optional groundtruth scorecards. VRAM can be unavailable; sampled highwater excludes startup spikes. A physical multi-GPU run is not implied by ordinary tests.
 
 Support exports begin with `support-preview` and an explicit request file. The default includes only an allowlisted settings/build summary. Activity opt-in retains safe counters/codes rather than raw messages; document attachments require a separate content opt-in. Inspect exact files with `inspect-support`, then select files and supply the preview token to `export-support`. Repair and cleanup also require fresh, explicit selection previews. Cleanup targets only known verified runtime ZIP caches, protecting project/writer/model/rollback data.
+
+Repair retains the captured damaged file in an adjacent `.notegen-repair-recovery-…` folder. A concurrent replacement is preserved, and a conflict identifies the recovery path. A stopped repair can leave that folder for manual restoration; inspect it before deleting anything.

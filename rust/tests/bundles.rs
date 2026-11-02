@@ -104,6 +104,58 @@ fn offline_preview_lists_exact_bytes_hashes_and_excludes_private_settings_paths_
     assert_eq!(checked.total_bytes, preview.total_bytes);
 }
 #[test]
+fn valid_registration_metadata_is_bounded_before_preview_or_bundle_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = fixture(&dir.path().join("source"));
+    let template = notegen::runtime::inventory(&settings.models_dir)
+        .unwrap()
+        .remove(0);
+    let mut selected = vec![];
+    for index in 0..20 {
+        let mut model = template.clone();
+        model.id = format!("metadata-reader-{index}");
+        model.source = "s".repeat(60_000);
+        models::validate_model(&model).unwrap();
+        models::save_custom(&settings.models_dir, model.clone(), &Control::default()).unwrap();
+        assert!(
+            fs::metadata(
+                settings
+                    .models_dir
+                    .join(format!("{}.notegen.json", model.id))
+            )
+            .unwrap()
+            .len()
+                < 100_000
+        );
+        selected.push(model.id);
+    }
+    // A supported subset round-trips without discarding any valid registration metadata.
+    let supported = dir.path().join("supported.zip");
+    bundles::export(
+        &settings,
+        &selected[..10],
+        None,
+        &supported,
+        &Control::default(),
+    )
+    .unwrap();
+    let inspected = bundles::inspect(&supported, &Control::default()).unwrap();
+    assert_eq!(inspected.readers.len(), 10);
+    assert!(
+        inspected
+            .readers
+            .iter()
+            .all(|reader| reader.model.source.len() == 60_000)
+    );
+    // Every descriptor is individually valid, but the combined canonical manifest exceeds1MB.
+    let error = bundles::preview(&settings, &selected, None, &Control::default()).unwrap_err();
+    assert!(error.to_string().contains("inventory exceeds 1 MB"));
+    let too_large = dir.path().join("too-large.zip");
+    assert!(bundles::export(&settings, &selected, None, &too_large, &Control::default()).is_err());
+    assert!(!too_large.exists());
+    assert!(bundles::inspect(&supported, &Control::default()).is_ok());
+}
+#[test]
 fn offline_import_isolated_registry_activates_only_via_returned_settings_and_keeps_old_versions() {
     let dir = tempfile::tempdir().unwrap();
     let source = fixture(&dir.path().join("source"));

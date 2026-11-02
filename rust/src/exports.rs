@@ -295,6 +295,25 @@ fn markdown(text: &str) -> String {
     }
     out
 }
+fn markdown_code(text: &str) -> String {
+    // A fence longer than every source run cannot be closed by source text,
+    // including a hostile line containing a complete Markdown fence.
+    let mut longest = 0;
+    let mut run = 0;
+    for byte in text.bytes() {
+        if byte == b'`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!(
+        "{fence}\n{text}{}{fence}\n",
+        if text.ends_with('\n') { "" } else { "\n" }
+    )
+}
 fn latex(text: &str) -> String {
     text.chars()
         .map(|ch| match ch {
@@ -313,6 +332,32 @@ fn latex(text: &str) -> String {
             _ => ch.to_string(),
         })
         .collect()
+}
+fn latex_code(text: &str) -> String {
+    // Do not use verbatim: source can contain its terminating command. Keep
+    // ordinary TeX escaping, and emit spacing explicitly so TeX cannot collapse
+    // indentation, repeated spaces or blank lines. Tabs use eight-column stops.
+    let mut out = String::from("\\begingroup\\ttfamily\\raggedright\n");
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.split_terminator('\n') {
+        out.push_str("\\noindent\\strut{}");
+        let mut column = 0;
+        for ch in line.chars() {
+            if matches!(ch, ' ' | '\t') {
+                let spaces = if ch == '\t' { 8 - column % 8 } else { 1 };
+                for _ in 0..spaces {
+                    out.push_str("\\hspace*{\\fontdimen2\\font}");
+                }
+                column += spaces;
+            } else {
+                out.push_str(&latex(&ch.to_string()));
+                column += 1;
+            }
+        }
+        out.push_str("\\par\n");
+    }
+    out.push_str("\\endgroup\n");
+    out
 }
 fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Control) -> Result<()> {
     match format {
@@ -465,6 +510,8 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                             latex(&b.description),
                             latex(&b.interpretation)
                         )?;
+                    } else if b.kind == "code" {
+                        write!(out, "{}", latex_code(&b.text))?;
                     } else if b.kind == "heading" {
                         writeln!(out, "\\subsection*{{{}}}", latex(&b.text))?;
                     } else {
@@ -509,6 +556,8 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                             markdown(&b.description),
                             markdown(&b.interpretation)
                         )?;
+                    } else if b.kind == "code" {
+                        writeln!(out, "{}", markdown_code(&b.text))?;
                     } else {
                         writeln!(
                             out,
@@ -557,6 +606,7 @@ fn inline_cell(reference: &str, value: &str, style: usize) -> Result<String> {
     );
     // SpreadsheetML reserves _xHHHH_ escape sequences inside strings. Protect
     // literal sequences and encode XML-forbidden controls without losing data.
+    // CR also needs encoding because XML normalizes raw CR/CRLF to LF.
     let mut escaped = String::new();
     for (index, ch) in value.char_indices() {
         let suffix = &value.as_bytes()[index..];
@@ -567,7 +617,8 @@ fn inline_cell(reference: &str, value: &str, style: usize) -> Result<String> {
             && suffix[6] == b'_'
         {
             escaped.push_str("_x005F_");
-        } else if (ch < ' ' && !matches!(ch, '\t' | '\n' | '\r'))
+        } else if ch == '\r'
+            || (ch < ' ' && !matches!(ch, '\t' | '\n'))
             || matches!(ch, '\u{fffe}' | '\u{ffff}')
         {
             escaped.push_str(&format!("_x{:04X}_", ch as u32));
@@ -900,7 +951,47 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
     Ok(())
 }
 
-/// Export atomically, without replacing any existing output (including raced creations).
+fn output_parent(project: &Project, target: &Path) -> Result<std::path::PathBuf> {
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // Resolve aliases before creating directories or files. Resolving the nearest
+    // existing ancestor also handles a new nested destination without touching it.
+    let mut ancestor = std::path::absolute(parent)?;
+    let mut missing = vec![];
+    while !ancestor.exists() {
+        missing.push(
+            ancestor
+                .file_name()
+                .ok_or_else(|| Fault::new("NG401", "Cannot resolve export output folder"))?
+                .to_os_string(),
+        );
+        anyhow::ensure!(
+            ancestor.pop(),
+            Fault::new("NG401", "Cannot resolve export output folder")
+        );
+    }
+    let mut resolved = ancestor.canonicalize()?;
+    anyhow::ensure!(
+        resolved.is_dir(),
+        Fault::new("NG401", "Choose an export output folder")
+    );
+    for name in missing.into_iter().rev() {
+        resolved.push(name);
+    }
+    anyhow::ensure!(
+        !resolved.starts_with(project.root.canonicalize()?),
+        Fault::new(
+            "NG401",
+            "Choose an export destination outside the source project data folder"
+        )
+    );
+    Ok(resolved)
+}
+
+/// Export atomically outside project data, without replacing any existing output
+/// (including raced creations). New files cannot shadow checkpoint/control files.
 pub fn export(project: &Project, target: &Path, format: Format, c: &Control) -> Result<()> {
     let operation = || -> Result<()> {
         c.check()?;
@@ -914,12 +1005,17 @@ pub fn export(project: &Project, target: &Path, format: Format, c: &Control) -> 
             !target.exists(),
             Fault::new("NG401", "Output already exists")
         );
-        let parent = target
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        fs::create_dir_all(parent)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        let parent = output_parent(project, target)?;
+        fs::create_dir_all(&parent)?;
+        // Recheck newly created parents and use their resolved path for both the
+        // temporary file and final commit, rather than the caller's alias path.
+        let parent = output_parent(project, &parent.join("export"))?;
+        let target = parent.join(
+            target
+                .file_name()
+                .ok_or_else(|| Fault::new("NG401", "Choose an export filename"))?,
+        );
+        let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
         match format {
             Format::Spreadsheet => spreadsheet(project, tmp.as_file_mut(), c)?,
             Format::Traceability => {
@@ -930,7 +1026,7 @@ pub fn export(project: &Project, target: &Path, format: Format, c: &Control) -> 
         c.check()?;
         tmp.flush()?;
         tmp.as_file().sync_all()?;
-        tmp.persist_noclobber(target)
+        tmp.persist_noclobber(&target)
             .map_err(|_| Fault::new("NG401", "Output collision or unavailable output folder"))?;
         Ok(())
     };

@@ -17,6 +17,7 @@ use std::{
 };
 
 const MAX_BYTES: u64 = 200_000_000_000;
+const MAX_INVENTORY_BYTES: u64 = 1_000_000;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
@@ -113,7 +114,7 @@ fn build_inventory(
     ids: &[String],
     runtime: Option<&str>,
     c: &Control,
-) -> Result<(Inventory, BTreeMap<String, PathBuf>)> {
+) -> Result<(Inventory, BTreeMap<String, PathBuf>, Vec<u8>)> {
     c.check()?;
     let ids = ids.iter().collect::<BTreeSet<_>>();
     anyhow::ensure!(
@@ -202,7 +203,15 @@ fn build_inventory(
     inventory.files.sort_by(|a, b| a.path.cmp(&b.path));
     inventory.total_bytes = inventory.files.iter().map(|f| f.bytes).sum();
     validate(&inventory)?;
-    Ok((inventory, paths))
+    let metadata = serde_json::to_vec_pretty(&inventory)?;
+    anyhow::ensure!(
+        metadata.len() as u64 <= MAX_INVENTORY_BYTES,
+        Fault::new(
+            "NG650",
+            "Offline inventory exceeds 1 MB; select fewer readers or shorten registration metadata"
+        )
+    );
+    Ok((inventory, paths, metadata))
 }
 pub fn preview(
     settings: &Settings,
@@ -349,7 +358,7 @@ pub fn export(
             .is_some_and(|e| e.eq_ignore_ascii_case("zip")),
         Fault::new("NG650", "Choose a .zip offline bundle")
     );
-    let (inventory, paths) = build_inventory(settings, ids, runtime, c)?;
+    let (inventory, paths, metadata) = build_inventory(settings, ids, runtime, c)?;
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -361,7 +370,7 @@ pub fn export(
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
         zip.start_file("inventory.json", options)?;
-        zip.write_all(&serde_json::to_vec_pretty(&inventory)?)?;
+        zip.write_all(&metadata)?;
         for asset in &inventory.files {
             c.check()?;
             let path = &paths[&asset.path];
@@ -421,12 +430,14 @@ fn read_inventory(zip: &mut zip::ZipArchive<fs::File>, c: &Control) -> Result<In
     let mut bytes = vec![];
     let entry = zip.by_name("inventory.json")?;
     anyhow::ensure!(
-        entry.size() <= 1_000_000,
+        entry.size() <= MAX_INVENTORY_BYTES,
         Fault::new("NG650", "Offline inventory too large")
     );
-    entry.take(1_000_001).read_to_end(&mut bytes)?;
+    entry
+        .take(MAX_INVENTORY_BYTES + 1)
+        .read_to_end(&mut bytes)?;
     anyhow::ensure!(
-        bytes.len() <= 1_000_000,
+        bytes.len() as u64 <= MAX_INVENTORY_BYTES,
         Fault::new("NG650", "Offline inventory too large")
     );
     let inventory: Inventory = serde_json::from_slice(&bytes)?;

@@ -622,7 +622,7 @@ pub fn repair_preview(input: &RepairInput<'_>, c: &Control) -> Result<RepairPrev
     }
     let notes=vec!["Repairs only compiled-pinned model weight/projector files and verified runtime download archives. Custom readers and registrations are not rewritten.".into(),
         "Runtime archive repair does not activate or verify extracted runtime binaries; use verified runtime installation afterward.".into(),
-        "A damaged file is retained beside a repaired file for recovery. Healthy selected files need no download.".into()];
+        "A damaged file is retained in a uniquely named adjacent .notegen-repair-recovery-* directory. Healthy selected files need no download.".into()];
     let binding = assets
         .iter()
         .map(|(key, a)| (key, a.path.to_string_lossy().to_string()))
@@ -634,6 +634,149 @@ pub fn repair_preview(input: &RepairInput<'_>, c: &Control) -> Result<RepairPrev
         notes,
         token,
     })
+}
+fn repair_hash(reader: impl Read, expected_bytes: u64, c: &Control) -> Result<String> {
+    let mut reader = reader.take(expected_bytes.saturating_add(1));
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        c.check()?;
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes.saturating_add(count as u64);
+        anyhow::ensure!(
+            bytes <= expected_bytes,
+            Fault::new("NG730", "Captured repair target grew after preview")
+        );
+        hash.update(&buffer[..count]);
+    }
+    anyhow::ensure!(
+        bytes == expected_bytes,
+        Fault::new("NG730", "Captured repair target shrank after preview")
+    );
+    Ok(hex::encode(hash.finalize()))
+}
+/// Owns the exact directory entry removed from a repair target. The recovery directory is
+/// persistent before the rename: cancellation, errors and unwinding must never delete it.
+struct CapturedRepair {
+    target: PathBuf,
+    original: PathBuf,
+    directory: PathBuf,
+    restore: bool,
+}
+impl CapturedRepair {
+    fn capture(target: &Path) -> Result<Self> {
+        let filename = target
+            .file_name()
+            .ok_or_else(|| Fault::new("NG730", "Repair target has no filename"))?;
+        let parent = target
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let directory = tempfile::Builder::new()
+            .prefix(".notegen-repair-recovery-")
+            .tempdir_in(parent)?
+            .keep();
+        let original = directory.join(filename);
+        if let Err(error) = fs::rename(target, &original) {
+            let _ = fs::remove_dir(&directory);
+            return Err(error.into());
+        }
+        Ok(Self {
+            target: target.into(),
+            original,
+            directory,
+            restore: true,
+        })
+    }
+    fn verify(&self, expected: &RepairFile, c: &Control) -> Result<()> {
+        c.check()?;
+        plain_path(&self.original)?;
+        let metadata = fs::metadata(&self.original)?;
+        anyhow::ensure!(
+            metadata.is_file() && Some(metadata.len()) == expected.current_bytes,
+            Fault::new("NG730", "Captured repair target changed after preview")
+        );
+        let hash = repair_hash(fs::File::open(&self.original)?, metadata.len(), c)?;
+        anyhow::ensure!(
+            expected.current_sha256.as_ref() == Some(&hash),
+            Fault::new("NG730", "Captured repair target changed after preview")
+        );
+        c.check()?;
+        Ok(())
+    }
+    fn restore(&mut self) -> std::io::Result<()> {
+        if !self.restore {
+            return Ok(());
+        }
+        let mut original = tempfile::TempPath::try_from_path(&self.original)?;
+        // An unsuccessful no-clobber restore must leave the captured original in place.
+        original.disable_cleanup(true);
+        original
+            .persist_noclobber(&self.target)
+            .map_err(|error| error.error)?;
+        self.restore = false;
+        let _ = fs::remove_dir(&self.directory);
+        Ok(())
+    }
+    fn publish(
+        mut self,
+        staged: tempfile::TempPath,
+        expected: &RepairFile,
+        c: &Control,
+    ) -> Result<PathBuf> {
+        let result: Result<PathBuf> = (|| {
+            self.verify(expected, c)?;
+            c.check()?;
+            plain_path(&self.target)?;
+            // The captured entry, rather than a pathname checked before a long copy,
+            // is the backup. A newly created target always wins over this repair.
+            staged
+                .persist_noclobber(&self.target)
+                .map_err(|error| error.error)?;
+            self.restore = false;
+            Ok(self.original.clone())
+        })();
+        match result {
+            Ok(backup) => Ok(backup),
+            Err(error) => match self.restore() {
+                Ok(()) => Err(error),
+                Err(restore_error) => {
+                    self.restore = false;
+                    Err(error.context(format!(
+                        "Repair did not replace the current target; captured original retained at {} (restore failed: {restore_error})",
+                        self.original.display()
+                    )))
+                }
+            },
+        }
+    }
+}
+impl Drop for CapturedRepair {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+fn publish_repair(
+    staged: tempfile::TempPath,
+    target: &Path,
+    expected: &RepairFile,
+    c: &Control,
+) -> Result<Option<PathBuf>> {
+    c.check()?;
+    plain_path(target)?;
+    if expected.health == AssetHealth::Missing {
+        staged
+            .persist_noclobber(target)
+            .map_err(|error| error.error)?;
+        return Ok(None);
+    }
+    CapturedRepair::capture(target)?
+        .publish(staged, expected, c)
+        .map(Some)
 }
 /// Downloads to a fresh staging directory and preserves registrations and damaged originals.
 pub fn repair_selected(
@@ -707,60 +850,17 @@ pub fn repair_selected(
                 && hash_file(&staged, c)? == asset.download.sha256,
             Fault::new("NG730", "Downloaded repair failed publisher verification")
         );
-        c.check()?;
-        plain_path(&asset.path)?;
-        // Recheck the target after a potentially long download before moving it.
-        if let Some(hash) = &info.current_sha256 {
-            anyhow::ensure!(
-                asset.path.is_file() && hash_file(&asset.path, c)? == *hash,
-                Fault::new("NG730", "Repair target changed during download")
-            );
-        } else {
-            anyhow::ensure!(
-                !asset.path.exists(),
-                Fault::new("NG730", "Repair target appeared during download")
-            );
-        }
-        if asset.path.exists() {
-            let b = parent.join(format!(
-                "{}.damaged-{}",
-                asset.path.file_name().unwrap().to_string_lossy(),
-                &info.current_sha256.as_ref().unwrap()[..12]
-            ));
-            anyhow::ensure!(
-                !b.exists(),
-                Fault::new(
-                    "NG730",
-                    "A damaged-file backup already exists; inspect it before another repair"
-                )
-            );
-            let mut original = fs::File::open(&asset.path)?;
-            let mut backup = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&b)?;
-            std::io::copy(&mut original, &mut backup)?;
-            backup.sync_all()?;
-            anyhow::ensure!(
-                hash_file(&b, c)? == *info.current_sha256.as_ref().unwrap(),
-                Fault::new("NG730", "Damaged-file backup changed while copying")
-            );
-        }
-        // Replacement is on the same filesystem; the original remains in place if rename fails.
-        if info.health == AssetHealth::Missing {
-            staged.persist_noclobber(&asset.path).map_err(|e| e.error)?;
-        } else {
-            staged.persist(&asset.path).map_err(|e| e.error)?;
-        }
+        let backup = publish_repair(staged, &asset.path, info, c)?;
         repaired.push(key.clone());
-        log.emit(
-            "repair",
-            format!("Repaired verified asset {key}; registrations preserved"),
-            0,
-            repaired.len(),
-            selected.len(),
-            "",
-        );
+        let message = if let Some(path) = backup {
+            format!(
+                "Repaired verified asset {key}; registrations preserved; damaged original retained at {}",
+                path.display()
+            )
+        } else {
+            format!("Repaired verified asset {key}; registrations preserved")
+        };
+        log.emit("repair", message, 0, repaired.len(), selected.len(), "");
     }
     Ok(repaired)
 }
@@ -768,6 +868,165 @@ pub fn repair_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn repair_file(original: &[u8]) -> RepairFile {
+        RepairFile {
+            key: "test/asset".into(),
+            expected_bytes: 8,
+            expected_sha256: digest(b"verified"),
+            current_bytes: Some(original.len() as u64),
+            current_sha256: Some(digest(original)),
+            health: AssetHealth::Corrupt,
+        }
+    }
+    fn staged_repair(root: &Path) -> tempfile::TempPath {
+        let mut file = tempfile::NamedTempFile::new_in(root).unwrap();
+        file.write_all(b"verified").unwrap();
+        file.as_file().sync_all().unwrap();
+        file.into_temp_path()
+    }
+    #[test]
+    fn repair_publish_retains_exact_original_and_commits_verified_file() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("weights.gguf");
+        fs::write(&target, b"damaged").unwrap();
+        let backup = publish_repair(
+            staged_repair(root.path()),
+            &target,
+            &repair_file(b"damaged"),
+            &Control::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"verified");
+        assert_eq!(fs::read(&backup).unwrap(), b"damaged");
+        assert_eq!(backup.parent().unwrap().parent(), Some(root.path()));
+    }
+    #[test]
+    fn repair_rejects_replacement_before_capture_and_restores_its_exact_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("weights.gguf");
+        fs::write(&target, b"damaged").unwrap();
+        let expected = repair_file(b"damaged");
+        let mut concurrent = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        concurrent.write_all(b"changed").unwrap();
+        concurrent.persist(&target).unwrap();
+        assert!(
+            publish_repair(
+                staged_repair(root.path()),
+                &target,
+                &expected,
+                &Control::default()
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"changed");
+    }
+    #[test]
+    fn repair_never_overwrites_a_target_created_after_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("weights.gguf");
+        fs::write(&target, b"damaged").unwrap();
+        let captured = CapturedRepair::capture(&target).unwrap();
+        let backup = captured.original.clone();
+        fs::write(&target, b"concurrent replacement").unwrap();
+        let error = captured
+            .publish(
+                staged_repair(root.path()),
+                &repair_file(b"damaged"),
+                &Control::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains(&backup.display().to_string()));
+        assert_eq!(fs::read(&target).unwrap(), b"concurrent replacement");
+        assert_eq!(fs::read(&backup).unwrap(), b"damaged");
+    }
+    #[test]
+    fn repair_cancellation_after_capture_restores_without_consulting_cancelled_control() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("weights.gguf");
+        fs::write(&target, b"damaged").unwrap();
+        let captured = CapturedRepair::capture(&target).unwrap();
+        let directory = captured.directory.clone();
+        let c = Control::default();
+        c.cancelled.store(true, Ordering::Relaxed);
+        let error = captured
+            .publish(staged_repair(root.path()), &repair_file(b"damaged"), &c)
+            .unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG900");
+        assert_eq!(fs::read(&target).unwrap(), b"damaged");
+        assert!(!directory.exists());
+    }
+    #[test]
+    fn repair_cancelled_after_capture_keeps_concurrent_target_and_recovery_original() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("weights.gguf");
+        fs::write(&target, b"damaged").unwrap();
+        let captured = CapturedRepair::capture(&target).unwrap();
+        let backup = captured.original.clone();
+        fs::write(&target, b"concurrent replacement").unwrap();
+        let c = Control::default();
+        c.cancelled.store(true, Ordering::Relaxed);
+        let error = captured
+            .publish(staged_repair(root.path()), &repair_file(b"damaged"), &c)
+            .unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG900");
+        assert!(error.to_string().contains(&backup.display().to_string()));
+        assert_eq!(fs::read(&target).unwrap(), b"concurrent replacement");
+        assert_eq!(fs::read(&backup).unwrap(), b"damaged");
+    }
+    #[test]
+    fn repair_unwind_keeps_original_even_when_the_target_is_recreated() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("weights.gguf");
+        fs::write(&target, b"damaged").unwrap();
+        let captured = CapturedRepair::capture(&target).unwrap();
+        let backup = captured.original.clone();
+        let unwind = std::panic::catch_unwind(move || {
+            let captured_guard = captured;
+            fs::write(&captured_guard.target, b"concurrent replacement").unwrap();
+            panic!("injected failure after capture");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"concurrent replacement");
+        assert_eq!(fs::read(&backup).unwrap(), b"damaged");
+    }
+    #[test]
+    fn missing_repair_never_overwrites_an_appearing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("weights.gguf");
+        let expected = RepairFile {
+            current_bytes: None,
+            current_sha256: None,
+            health: AssetHealth::Missing,
+            ..repair_file(b"")
+        };
+        fs::write(&target, b"appeared").unwrap();
+        assert!(
+            publish_repair(
+                staged_repair(root.path()),
+                &target,
+                &expected,
+                &Control::default()
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"appeared");
+    }
+    #[test]
+    fn repair_hash_bounds_growing_readers_and_preserves_cancellation() {
+        let c = Control::default();
+        let error = repair_hash(std::io::repeat(b'x'), 17, &c).unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG730");
+        assert_eq!(
+            repair_hash(std::io::Cursor::new(b"known"), 5, &c).unwrap(),
+            digest(b"known")
+        );
+        c.cancelled.store(true, Ordering::Relaxed);
+        let error = repair_hash(std::io::repeat(b'x'), u64::MAX, &c).unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG900");
+    }
     struct FullDisk(std::io::Cursor<Vec<u8>>);
     impl Write for FullDisk {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {

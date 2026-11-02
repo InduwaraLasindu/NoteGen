@@ -120,6 +120,39 @@ fn markdown_preserves_prose_hyphens_but_escapes_indented_list_markers() {
     assert!(text.contains("page-level location only: no measured source box"));
 }
 #[test]
+fn markdown_code_preserves_literal_indentation_and_contains_hostile_fences() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let mut page = p.load(1).unwrap();
+    page.content.blocks = vec![Block {
+        kind: "code".into(),
+        text: "    f(x)\n\tvalue = `_x_` & '<tag>'\n```\n<script>bad()</script>\n``````\n# literal heading\n".into(),
+        ..Default::default()
+    }];
+    p.save(&page).unwrap();
+    let target = dir.path().join("code.md");
+    exports::export(&p, &target, Format::Markdown, &Control::default()).unwrap();
+    let text = fs::read_to_string(target).unwrap();
+    let expected = "```````\n    f(x)\n\tvalue = `_x_` & '<tag>'\n```\n<script>bad()</script>\n``````\n# literal heading\n```````\n";
+    assert!(
+        text.contains(expected),
+        "Source code must remain literal inside an unbreakable fence: {text}"
+    );
+    assert_eq!(text.matches("```````").count(), 2);
+    assert!(!text.contains("f\\(x\\)"));
+
+    // A source without a final newline still gets a distinct closing fence.
+    page.content.blocks[0].text = "  return 42;".into();
+    p.save(&page).unwrap();
+    let target = dir.path().join("no-final-newline.md");
+    exports::export(&p, &target, Format::Markdown, &Control::default()).unwrap();
+    assert!(
+        fs::read_to_string(target)
+            .unwrap()
+            .contains("```\n  return 42;\n```\n")
+    );
+}
+#[test]
 fn html_is_semantic_unicode_and_escaped() {
     let dir = tempfile::tempdir().unwrap();
     let p = fixture(dir.path());
@@ -154,6 +187,60 @@ fn latex_escapes_commands_math_and_source_percent_signs() {
     assert!(text.contains("\\begin{longtable}{ll}"));
     assert!(text.contains("සිංහල தமிழ் العربية"));
     assert!(text.ends_with("\\end{document}\n"));
+}
+#[test]
+fn latex_code_retains_spaces_tabs_blank_lines_and_escapes_termination_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let mut page = p.load(1).unwrap();
+    page.content.blocks = vec![Block {
+        kind: "code".into(),
+        text: "  f(x)\r\n\tvalue  =  1\n\n\\end{verbatim}\\input{secret} % $ ^ _ # & { }".into(),
+        ..Default::default()
+    }];
+    p.save(&page).unwrap();
+    let target = dir.path().join("code.tex");
+    exports::export(&p, &target, Format::Latex, &Control::default()).unwrap();
+    let text = fs::read_to_string(target).unwrap();
+    let code = text
+        .split_once("\\begingroup\\ttfamily\\raggedright\n")
+        .unwrap()
+        .1
+        .split_once("\\endgroup\n")
+        .unwrap()
+        .0;
+    assert!(code.starts_with(
+        "\\noindent\\strut{}\\hspace*{\\fontdimen2\\font}\\hspace*{\\fontdimen2\\font}f(x)\\par\n"
+    ));
+    assert!(code.contains(concat!(
+        "\\noindent\\strut{}",
+        "\\hspace*{\\fontdimen2\\font}\\hspace*{\\fontdimen2\\font}",
+        "\\hspace*{\\fontdimen2\\font}\\hspace*{\\fontdimen2\\font}",
+        "\\hspace*{\\fontdimen2\\font}\\hspace*{\\fontdimen2\\font}",
+        "\\hspace*{\\fontdimen2\\font}\\hspace*{\\fontdimen2\\font}value",
+        "\\hspace*{\\fontdimen2\\font}\\hspace*{\\fontdimen2\\font}=",
+        "\\hspace*{\\fontdimen2\\font}\\hspace*{\\fontdimen2\\font}1\\par\n",
+        "\\noindent\\strut{}\\par\n"
+    )));
+    assert_eq!(code.matches("\\noindent\\strut{}").count(), 4);
+    assert_eq!(code.matches("\\par\n").count(), 4);
+    assert!(code.contains("\\textbackslash{}end\\{verbatim\\}\\textbackslash{}input\\{secret\\}"));
+    for escaped in [
+        "\\%",
+        "\\$",
+        "\\textasciicircum{}",
+        "\\_",
+        "\\#",
+        "\\&",
+        "\\{",
+        "\\}",
+    ] {
+        assert!(code.contains(escaped));
+    }
+    assert!(!text.contains("\\begin{verbatim}"));
+    assert!(!text.contains("\\end{verbatim}"));
+    assert!(!text.contains("\\input{secret}"));
+    assert!(!code.contains('\r'));
 }
 #[test]
 fn spreadsheet_is_real_ooxml_with_text_values_sources_and_uncertainty() {
@@ -266,6 +353,111 @@ fn export_protects_existing_files_rejects_wrong_extensions_and_respects_cancella
     }
 }
 #[test]
+fn exports_cannot_create_checkpoint_overlays_or_other_files_inside_project_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let mut page = p.load(1).unwrap();
+    page.edited = false;
+    p.save(&page).unwrap();
+    fs::remove_file(p.root.join("page-00001.edits.json")).unwrap();
+    let content_before = serde_json::to_value(&page.content).unwrap();
+    let before = fs::read_dir(&p.root)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), fs::read(entry.path()).unwrap())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let inside_alias = p.root.join("..").join(p.root.file_name().unwrap());
+    for target in [
+        p.root.join("page-00001.edits.json"),
+        inside_alias.join("page-00001.edits.json"),
+        p.root.join("uncreated/subfolder/project.json"),
+    ] {
+        let error =
+            exports::export(&p, &target, Format::Traceability, &Control::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside the source project data folder")
+        );
+        assert!(!target.exists());
+        assert_eq!(
+            serde_json::to_value(p.load(1).unwrap().content).unwrap(),
+            content_before
+        );
+    }
+    for format in [
+        Format::Markdown,
+        Format::Html,
+        Format::Latex,
+        Format::Spreadsheet,
+    ] {
+        let target = p.root.join(format!("notes.{}", format.extension()));
+        assert!(exports::export(&p, &target, format, &Control::default()).is_err());
+        assert!(!target.exists());
+    }
+    let after = fs::read_dir(&p.root)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), fs::read(entry.path()).unwrap())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        before, after,
+        "Rejected exports must not mutate project data or create directories"
+    );
+    let target = dir.path().join("new-external-folder/notes.json");
+    exports::export(&p, &target, Format::Traceability, &Control::default()).unwrap();
+    let trace: exports::Traceability = serde_json::from_slice(&fs::read(target).unwrap()).unwrap();
+    assert_eq!(trace.pages[0].blocks[0].text, page.content.blocks[0].text);
+    assert_eq!(
+        serde_json::to_value(p.load(1).unwrap().content).unwrap(),
+        content_before
+    );
+    let reopened = Project::read(p.root.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.load(1).unwrap().content).unwrap(),
+        content_before
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn export_rejects_symlink_alias_into_project_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&p.root, &alias).unwrap();
+    let target = alias.join("new/subfolder/shadow.json");
+    assert!(exports::export(&p, &target, Format::Traceability, &Control::default()).is_err());
+    assert!(!p.root.join("new").exists());
+    p.load(1).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn export_rejects_case_alias_into_project_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let alias = dir.path().join(
+        p.root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_ascii_uppercase(),
+    );
+    if !alias.is_dir() {
+        // A directory explicitly configured as case-sensitive has no such alias.
+        return;
+    }
+    let target = alias.join("new/subfolder/shadow.json");
+    assert!(exports::export(&p, &target, Format::Traceability, &Control::default()).is_err());
+    assert!(!p.root.join("new").exists());
+    p.load(1).unwrap();
+}
+#[test]
 fn empty_projects_export_valid_documents_and_empty_spreadsheet() {
     let dir = tempfile::tempdir().unwrap();
     let mut p = fixture(dir.path());
@@ -340,6 +532,35 @@ fn spreadsheet_preserves_literal_ooxml_escapes_and_xml_forbidden_controls() {
     let sheet = entry(&mut zip, "xl/worksheets/sheet2.xml");
     assert!(sheet.contains("_x005F_x0041__x0000_"));
     roxmltree::Document::parse(&sheet).unwrap();
+}
+
+#[test]
+fn spreadsheet_encodes_carriage_returns_before_xml_normalization() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path());
+    let mut page = p.load(1).unwrap();
+    page.content.blocks[1].rows[1][1] = "left\rright\r\nnext\nlast_x000D_".into();
+    p.save(&page).unwrap();
+    let target = dir.path().join("line-endings.xlsx");
+    exports::export(&p, &target, Format::Spreadsheet, &Control::default()).unwrap();
+    let mut zip = zip::ZipArchive::new(fs::File::open(target).unwrap()).unwrap();
+    for part in ["xl/worksheets/sheet2.xml", "xl/worksheets/sheet1.xml"] {
+        let sheet = entry(&mut zip, part);
+        let document = roxmltree::Document::parse(&sheet).unwrap();
+        assert!(
+            document
+                .descendants()
+                .any(|node| node.tag_name().name() == "t"
+                    && node.text() == Some("left_x000D_right_x000D_\nnext\nlast_x005F_x000D_"))
+        );
+        assert!(!sheet.contains('\r'));
+    }
+    let trace: exports::Traceability =
+        serde_json::from_str(&entry(&mut zip, "notegen/traceability.json")).unwrap();
+    assert_eq!(
+        trace.pages[0].blocks[1].cells[3].value,
+        "left\rright\r\nnext\nlast_x000D_"
+    );
 }
 
 #[test]

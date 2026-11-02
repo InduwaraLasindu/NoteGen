@@ -81,6 +81,9 @@ fn rewrite(input: &Path, output: &Path, mut change: impl FnMut(&str, &[u8]) -> V
     out.finish().unwrap();
 }
 fn replace_control(xml: &str, key: &str, text: &str) -> String {
+    replace_control_content(xml, key, &word::paragraph(text, "Normal"))
+}
+fn replace_control_content(xml: &str, key: &str, content_xml: &str) -> String {
     let parsed = roxmltree::Document::parse(xml).unwrap();
     let tag = parsed
         .descendants()
@@ -100,10 +103,7 @@ fn replace_control(xml: &str, key: &str, text: &str) -> String {
     let mut result = xml.to_string();
     result.replace_range(
         content.range(),
-        &format!(
-            "<w:sdtContent>{}</w:sdtContent>",
-            word::paragraph(text, "Normal")
-        ),
+        &format!("<w:sdtContent>{content_xml}</w:sdtContent>"),
     );
     result
 }
@@ -524,6 +524,159 @@ fn right_to_left_paragraphs_and_tables_preserve_number_text() {
     assert!(xml.contains("123.45"));
     let preview = roundtrip::preview(p, &output, &Control::default()).unwrap();
     assert!(preview.fields.iter().all(|f| f.status == "unchanged"));
+}
+#[test]
+fn word_hyphen_elements_import_losslessly_and_remain_undoable() {
+    let f = fixture();
+    let output = f.document.parent().unwrap().join("word-hyphens.docx");
+    rewrite(&f.document, &output, |part, bytes| {
+        if part != "word/document.xml" {
+            return bytes.to_vec();
+        }
+        replace_control_content(
+            std::str::from_utf8(bytes).unwrap(),
+            "ng:p1:b0:text",
+            "<w:p><w:r><w:t>non</w:t><w:noBreakHyphen/><w:t>breaking and soft</w:t><w:softHyphen/><w:t>hyphen</w:t></w:r></w:p>",
+        )
+        .into_bytes()
+    });
+    let preview = roundtrip::preview(&f.project, &output, &Control::default()).unwrap();
+    let field = preview
+        .fields
+        .iter()
+        .find(|field| field.tag == "ng:p1:b0:text")
+        .unwrap();
+    let expected = "non\u{2011}breaking and soft\u{00ad}hyphen";
+    assert_eq!(field.status, "changed");
+    assert_eq!(field.imported.as_deref(), Some(expected));
+    roundtrip::apply(
+        &f.project,
+        &output,
+        &preview,
+        std::slice::from_ref(&field.tag),
+        "Lossless Word hyphens",
+        &Control::default(),
+    )
+    .unwrap();
+    assert_eq!(f.project.load(1).unwrap().content.blocks[0].text, expected);
+    assert_eq!(
+        f.project.load(2).unwrap().content.blocks[0].text,
+        "Original paragraph 2"
+    );
+    review::undo(&f.project).unwrap();
+    assert_eq!(
+        f.project.load(1).unwrap().content.blocks[0].text,
+        "Original paragraph 1"
+    );
+}
+#[test]
+fn font_specific_symbols_and_cached_simple_fields_are_not_imported_as_partial_text() {
+    let f = fixture();
+    let before = fs::read(f.project.page_path(1)).unwrap();
+    for (name, markup) in [
+        (
+            "symbol",
+            "<w:r><w:t>Alpha</w:t><w:sym w:font=\"Symbol\" w:char=\"F061\"/><w:t>Beta</w:t></w:r>",
+        ),
+        (
+            "field",
+            "<w:fldSimple w:instr=\"DATE\"><w:r><w:t>Cached date</w:t></w:r></w:fldSimple>",
+        ),
+    ] {
+        let output = f.document.parent().unwrap().join(format!("{name}.docx"));
+        rewrite(&f.document, &output, |part, bytes| {
+            if part != "word/document.xml" {
+                return bytes.to_vec();
+            }
+            replace_control_content(
+                std::str::from_utf8(bytes).unwrap(),
+                "ng:p1:b0:text",
+                &format!("<w:p>{markup}</w:p>"),
+            )
+            .into_bytes()
+        });
+        let preview = roundtrip::preview(&f.project, &output, &Control::default()).unwrap();
+        let field = preview
+            .fields
+            .iter()
+            .find(|field| field.tag == "ng:p1:b0:text")
+            .unwrap();
+        assert_eq!(field.status, "structural_conflict", "{name}");
+        assert!(
+            roundtrip::apply(
+                &f.project,
+                &output,
+                &preview,
+                std::slice::from_ref(&field.tag),
+                "Unsupported Word content",
+                &Control::default(),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(f.project.page_path(1)).unwrap(), before);
+        assert!(!f.project.root.join("page-00001.edits.json").exists());
+    }
+}
+#[test]
+fn ordinary_text_added_beside_an_equation_is_an_explicit_conflict() {
+    let f = fixture();
+    let mut page = f.project.load(1).unwrap();
+    page.content.blocks[0].kind = "equation".into();
+    page.content.blocks[0].text = "x^2".into();
+    f.project.save(&page).unwrap();
+    let original = f.document.parent().unwrap().join("equation.docx");
+    word::export(&f.project, &original, &Control::default()).unwrap();
+    let before = fs::read(f.project.page_path(1)).unwrap();
+    for (name, addition) in [
+        ("units", "<w:r><w:t xml:space=\"preserve\"> m/s</w:t></w:r>"),
+        (
+            "symbol",
+            "<w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r>",
+        ),
+        ("hyphen", "<w:r><w:noBreakHyphen/></w:r>"),
+    ] {
+        let output = f
+            .document
+            .parent()
+            .unwrap()
+            .join(format!("equation-{name}.docx"));
+        rewrite(&original, &output, |part, bytes| {
+            if part != "word/document.xml" {
+                return bytes.to_vec();
+            }
+            let xml = std::str::from_utf8(bytes).unwrap();
+            // Also change the supported equation: importing only that change would
+            // discard the added units/symbol rather than merely miss a no-op edit.
+            let xml = xml.replacen(
+                "<m:t xml:space=\"preserve\">2</m:t>",
+                "<m:t xml:space=\"preserve\">3</m:t>",
+                1,
+            );
+            assert!(xml.contains("</m:oMath>"));
+            xml.replacen("</m:oMath>", &format!("</m:oMath>{addition}"), 1)
+                .into_bytes()
+        });
+        let preview = roundtrip::preview(&f.project, &output, &Control::default()).unwrap();
+        let field = preview
+            .fields
+            .iter()
+            .find(|field| field.tag == "ng:p1:b0:text")
+            .unwrap();
+        assert_eq!(field.status, "structural_conflict", "{name}");
+        assert!(
+            roundtrip::apply(
+                &f.project,
+                &output,
+                &preview,
+                std::slice::from_ref(&field.tag),
+                "Mixed equation",
+                &Control::default(),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(f.project.page_path(1)).unwrap(), before);
+        assert!(!f.project.root.join("page-00001.edits.json").exists());
+    }
 }
 #[test]
 fn source_figure_observation_and_interpretation_can_be_corrected_separately() {

@@ -4,7 +4,12 @@ use notegen::{
     storage::{self, Activity, Control},
     types::*,
 };
-use std::{fs, io::Read, path::PathBuf, sync::atomic::Ordering};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::PathBuf,
+    sync::atomic::Ordering,
+};
 
 #[test]
 fn default_summary_excludes_private_fields_and_ignores_unselected_sources() {
@@ -426,4 +431,46 @@ fn repair_requires_supported_unique_pins_and_respects_storage_failures() {
     );
     assert!(path.is_dir());
     let _ = storage::fingerprint(&p).unwrap();
+}
+#[test]
+fn repair_rejects_same_size_atomic_replacement_without_touching_it_or_registrations() {
+    let root = tempfile::tempdir().unwrap();
+    let s = repair_settings(root.path());
+    let ids = vec!["lighton3-1b".into()];
+    let (_, pin) = setup::pinned(&ids[0]).unwrap();
+    let version = s.models_dir.join("versions/lighton3-1b").join(pin.revision);
+    fs::create_dir_all(&version).unwrap();
+    let target = version.join("weights.gguf");
+    fs::write(&target, b"damaged original").unwrap();
+    let registration = s.models_dir.join("lighton3-1b.notegen.json");
+    fs::write(&registration, b"REGISTRATION_PRESERVED").unwrap();
+    let input = RepairInput {
+        settings: &s,
+        model_ids: &ids,
+        runtime_backend: None,
+    };
+    let c = Control::default();
+    let preview = repair_preview(&input, &c).unwrap();
+    let mut replacement = tempfile::NamedTempFile::new_in(&version).unwrap();
+    replacement.write_all(b"concurrent bytes").unwrap();
+    replacement.persist(&target).unwrap();
+    let error = repair_selected(
+        &input,
+        &preview,
+        &preview.token,
+        &["model/lighton3-1b/weights".into()],
+        &c,
+        &Activity::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG730");
+    assert_eq!(fs::read(&target).unwrap(), b"concurrent bytes");
+    assert_eq!(fs::read(&registration).unwrap(), b"REGISTRATION_PRESERVED");
+    assert!(fs::read_dir(&version).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".notegen-repair-")
+    }));
 }
