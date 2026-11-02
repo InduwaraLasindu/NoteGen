@@ -43,6 +43,8 @@ pub(crate) struct BaselineField {
     block: usize,
     field: String,
     text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,12 +98,26 @@ pub(crate) fn tagged(
         block,
         field: field.into(),
         text: clean(text),
+        format: None,
     });
     format!(
         "<w:sdt><w:sdtPr><w:alias w:val=\"NoteGen source page {page}, block {}\"/><w:tag w:val=\"{}\"/><w:id w:val=\"{id}\"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>",
         block + 1,
         crate::word::xml(&tag)
     )
+}
+pub(crate) fn tagged_equation(
+    b: &mut Baseline,
+    page: usize,
+    block: usize,
+    source: &str,
+    content: &str,
+) -> String {
+    let result = tagged(b, page, block, "text", source, content);
+    if let Some(field) = b.fields.last_mut() {
+        field.format = Some("omml".into());
+    }
+    result
 }
 fn parse(xml: &str) -> Result<roxmltree::Document<'_>> {
     Ok(roxmltree::Document::parse_with_options(
@@ -349,10 +365,18 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
                 && f.tag == format!("ng:p{}:b{}:{}", f.page, f.block, f.field)
                 && exported.insert(f.tag.clone())
                 && f.text.len() <= 120000
-                && allowed,
+                && allowed
+                && f.format.as_deref().is_none_or(|format| format == "omml"
+                    && saved.kind == "equation"
+                    && f.field == "text"),
             fault("Invalid or duplicate Word baseline control")
         );
     }
+    let formats: BTreeMap<_, _> = b
+        .fields
+        .iter()
+        .map(|f| (f.tag.as_str(), f.format.as_deref()))
+        .collect();
     let mut actual = BTreeMap::new();
     let mut invalid = BTreeSet::new();
     for node in doc.descendants().filter(|n| named(*n, "sdt")) {
@@ -382,7 +406,34 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
         }) {
             invalid.insert(key.to_string());
         }
-        let value = clean(&text(content));
+        let format = formats.get(key).copied().flatten();
+        let math: Vec<_> = content
+            .descendants()
+            .filter(|n| {
+                n.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/officeDocument/2006/math")
+                    && n.tag_name().name() == "oMath"
+            })
+            .collect();
+        let value = if format == Some("omml") {
+            if math.len() == 1 {
+                match crate::equations::from_omml(math[0]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        invalid.insert(key.to_string());
+                        "[unsupported edited Word equation]".into()
+                    }
+                }
+            } else {
+                invalid.insert(key.to_string());
+                "[missing or repeated Word equation]".into()
+            }
+        } else {
+            if !math.is_empty() {
+                invalid.insert(key.to_string());
+            }
+            clean(&text(content))
+        };
         anyhow::ensure!(
             value.len() <= 120000,
             fault("Word correction field is too large")
@@ -421,6 +472,16 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
             .map(clean)
             .unwrap_or_default();
         let imported = actual.get(&field.tag).cloned();
+        let baseline_comparison = if field.format.as_deref() == Some("omml") {
+            crate::equations::canonical(&field.text)?
+        } else {
+            field.text.clone()
+        };
+        let current_comparison = if field.format.as_deref() == Some("omml") {
+            crate::equations::canonical(&current).unwrap_or_else(|_| current.clone())
+        } else {
+            current.clone()
+        };
         let (status, message) = if layout_changed
             || shape_changed
             || invalid.contains(&field.tag)
@@ -430,14 +491,14 @@ pub fn preview(p: &Project, input: &Path, c: &Control) -> Result<Preview> {
                 "structural_conflict",
                 "Source controls, block geometry or Word structure changed. Review manually.",
             )
-        } else if imported.as_ref() == Some(&field.text) {
+        } else if imported.as_ref() == Some(&baseline_comparison) {
             ("unchanged", "No Word correction to import.")
-        } else if imported.as_ref() == Some(&current) {
+        } else if imported.as_ref() == Some(&current_comparison) {
             (
                 "already_applied",
                 "This correction is already present in the project.",
             )
-        } else if current != field.text {
+        } else if current_comparison != baseline_comparison {
             (
                 "conflict",
                 "Both Word and the project changed this field. Compare against the source before resolving.",

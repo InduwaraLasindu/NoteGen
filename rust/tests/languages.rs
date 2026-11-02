@@ -84,10 +84,10 @@ fn cancellation_and_invalid_destinations_fail_before_download() {
     assert_eq!(fs::read(file).unwrap(), b"preserve");
 }
 #[test]
+#[ignore = "Requires NOTEGEN_LANGUAGE_EVIDENCE with actual publisher files; not a language accuracy benchmark"]
 fn optional_actual_pinned_files_match_all_lengths_and_checksums() {
-    let Some(root) = std::env::var_os("NOTEGEN_LANGUAGE_EVIDENCE") else {
-        return;
-    };
+    let root = std::env::var_os("NOTEGEN_LANGUAGE_EVIDENCE")
+        .expect("Set NOTEGEN_LANGUAGE_EVIDENCE to the verified resource folder");
     let root = std::path::Path::new(&root);
     let p = plan(
         root,

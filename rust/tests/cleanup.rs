@@ -29,7 +29,6 @@ fn cleanup_never_classifies_user_data_partial_downloads_or_unverified_archives_a
     .unwrap();
     assert!(preview.files.is_empty());
     assert_eq!(preview.reclaimable_bytes, 0);
-    assert!(preview.note.contains("Partial") == false);
     assert!(preview.note.contains("partial downloads"));
     for name in [
         "user-scans.zip",

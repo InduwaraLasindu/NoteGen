@@ -58,6 +58,11 @@ fn fixture() -> Fixture {
             image.put_pixel(x, y, image::Rgb([20, 100, 180]));
         }
     }
+    for y in 20..40 {
+        for x in 30..50 {
+            image.put_pixel(x, y, image::Rgb([180, 20, 60]));
+        }
+    }
     for n in [1, 2] {
         image.save(project.image(n)).unwrap();
         project
@@ -147,6 +152,7 @@ fn native_searchable_export_has_source_pages_unicode_embedded_font_and_grounded_
         .to_rgb8();
     assert_eq!(rendered.get_pixel(120, 160), f.image.get_pixel(120, 160));
     assert_eq!(rendered.get_pixel(20, 20), f.image.get_pixel(20, 20));
+    assert_eq!(rendered.get_pixel(40, 30), f.image.get_pixel(40, 30));
 }
 #[test]
 fn uncertainty_annotations_are_visible_metadata_and_preserve_the_source_image() {
@@ -297,4 +303,133 @@ fn figure_interpretations_do_not_enter_the_source_transcription_layer() {
             .iter()
             .any(|w| w.message.contains("interpretations"))
     );
+}
+#[test]
+fn preserved_project_pdf_has_a_visible_warning_cover_without_obscuring_source_pages() {
+    let f = fixture();
+    fs::write(
+        f.project.root.join("input-invalidated.json"),
+        br#"{"reason":"Input changed"}"#,
+    )
+    .unwrap();
+    let mut selected = options();
+    selected.mark_uncertain = false;
+    let report =
+        searchable_pdf::export(&f.project, &f.output, &selected, &Control::default()).unwrap();
+    assert!(report.source_invalidated);
+    assert_eq!(report.warning_pages, 1);
+    assert_eq!(report.pages, 3);
+    let engine = pdfium();
+    let document = engine.load_pdf_from_file(&f.output, None).unwrap();
+    assert_eq!(document.pages().len(), 3);
+    let cover = document.pages().get(0).unwrap();
+    let warning = cover.text().unwrap().all();
+    assert!(
+        warning.contains(notegen::word::INVALIDATED_SOURCE_WARNING),
+        "{warning:?}"
+    );
+    assert!(warning.contains("Verify every following source page"));
+    assert!(
+        cover
+            .objects()
+            .iter()
+            .filter_map(|o| o.as_text_object().map(|t| t.is_visible()))
+            .all(|visible| visible)
+    );
+    let page = document.pages().get(1).unwrap();
+    assert!(page.objects().iter().any(|o| {
+        o.as_image_object()
+            .is_some_and(|image| image.get_raw_image().unwrap().to_rgb8() == f.image)
+    }));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("manual recovery export"))
+    );
+}
+fn font_with_permissions(bits: u16) -> Vec<u8> {
+    let mut bytes = fs::read(searchable_pdf::default_font().unwrap()).unwrap();
+    let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+    let (index, record) = face
+        .raw_face()
+        .table_records
+        .into_iter()
+        .enumerate()
+        .find(|(_, record)| record.tag == ttf_parser::Tag::from_bytes(b"OS/2"))
+        .unwrap();
+    let mut table =
+        bytes[record.offset as usize..(record.offset + record.length) as usize].to_vec();
+    table.resize(100, 0);
+    table[0..2].copy_from_slice(&3u16.to_be_bytes());
+    table[8..10].copy_from_slice(&bits.to_be_bytes());
+    let offset = bytes.len().div_ceil(4) * 4;
+    bytes.resize(offset, 0);
+    let checksum = table.chunks(4).fold(0u32, |sum, chunk| {
+        sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()))
+    });
+    bytes.extend_from_slice(&table);
+    let table_record = 12 + index * 16;
+    bytes[table_record + 4..table_record + 8].copy_from_slice(&checksum.to_be_bytes());
+    bytes[table_record + 8..table_record + 12].copy_from_slice(&(offset as u32).to_be_bytes());
+    bytes[table_record + 12..table_record + 16]
+        .copy_from_slice(&(table.len() as u32).to_be_bytes());
+    bytes
+}
+#[test]
+fn font_metadata_rejects_restricted_bitmap_only_and_ambiguous_embedding_permissions() {
+    for bits in [0x0002, 0x0200, 0x0006] {
+        let bytes = font_with_permissions(bits);
+        assert!(
+            searchable_pdf::font_embedding(&bytes).is_err(),
+            "accepted fsType {bits:x}"
+        );
+        let f = fixture();
+        let font = f.project.root.join("restricted.ttf");
+        fs::write(&font, bytes).unwrap();
+        let mut selected = options();
+        selected.font = Some(font);
+        let original = fs::read(f.project.page_path(1)).unwrap();
+        assert!(
+            searchable_pdf::export(&f.project, &f.output, &selected, &Control::default()).is_err()
+        );
+        assert!(!f.output.exists());
+        assert_eq!(fs::read(f.project.page_path(1)).unwrap(), original);
+    }
+    assert!(searchable_pdf::font_embedding(b"invalid font").is_err());
+    assert!(
+        searchable_pdf::font_embedding(&font_with_permissions(0x0008))
+            .unwrap()
+            .subsetting_allowed
+    );
+    assert!(
+        !searchable_pdf::font_embedding(&font_with_permissions(0x0108))
+            .unwrap()
+            .subsetting_allowed
+    );
+}
+#[test]
+fn a_no_subsetting_font_is_either_verified_complete_in_the_saved_pdf_or_withheld() {
+    let f = fixture();
+    let bytes = font_with_permissions(0x0108);
+    let font = f.project.root.join("complete-only.ttf");
+    fs::write(&font, &bytes).unwrap();
+    let mut selected = options();
+    selected.font = Some(font);
+    match searchable_pdf::export(&f.project, &f.output, &selected, &Control::default()) {
+        Ok(report) => {
+            assert!(!report.font_embedding.subsetting_allowed);
+            let engine = pdfium();
+            let document = engine.load_pdf_from_file(&f.output, None).unwrap();
+            for page in document.pages().iter() {
+                for object in page.objects().iter() {
+                    if let Some(text) = object.as_text_object() {
+                        assert!(text.font().is_embedded().unwrap());
+                        assert_eq!(text.font().data().unwrap(), bytes);
+                    }
+                }
+            }
+        }
+        Err(_) => assert!(!f.output.exists()),
+    }
 }

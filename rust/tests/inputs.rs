@@ -2,6 +2,25 @@ use notegen::{inputs, storage::Control};
 use std::{fs, sync::atomic::Ordering};
 
 #[test]
+fn ocr_resource_flag_precedes_tesseract_config_files() {
+    let s = notegen::types::Settings {
+        tessdata_dir: "folder with spaces".into(),
+        ..Default::default()
+    };
+    let args = notegen::scan::ocr_args(&["scan.png".into(), "stdout".into(), "tsv".into()], &s);
+    assert_eq!(
+        args,
+        vec![
+            "scan.png",
+            "stdout",
+            "--tessdata-dir",
+            "folder with spaces",
+            "tsv"
+        ]
+    );
+}
+
+#[test]
 fn real_native_ocr_image_folder_conversion_and_resume() {
     use ab_glyph::FontArc;
     use notegen::{pipeline, storage::Activity, types::*};
@@ -61,6 +80,43 @@ fn real_native_ocr_image_folder_conversion_and_resume() {
             Some(folder.canonicalize().unwrap())
         );
     }
+    let first = folder.join("001.png");
+    let original = fs::read(&first).unwrap();
+    let altered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let changed = altered.clone();
+    let path = first.clone();
+    let log = Activity {
+        path: None,
+        callback: Some(std::sync::Arc::new(move |event| {
+            if event.stage == "export" && !changed.swap(true, Ordering::Relaxed) {
+                fs::write(&path, b"changed during conversion").unwrap();
+            }
+        })),
+    };
+    let withheld = d.path().join("withheld.docx");
+    let error = pipeline::convert(&folder, &withheld, &s, &Control::default(), &log).unwrap_err();
+    assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG100");
+    assert!(!withheld.exists());
+    assert!(altered.load(Ordering::Relaxed));
+    fs::write(&first, original).unwrap();
+    let retried = pipeline::convert(
+        &folder,
+        &d.path().join("fresh.docx"),
+        &s,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    assert!(
+        retried
+            .project
+            .root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("-retry-")
+    );
+    assert!(!retried.project.root.join("input-invalidated.json").exists());
 }
 
 #[test]

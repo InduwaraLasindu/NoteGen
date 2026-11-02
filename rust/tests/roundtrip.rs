@@ -607,3 +607,23 @@ fn cancelled_import_does_not_create_a_revision() {
     assert!(roundtrip::preview(&f.project, &input, &control).is_err());
     assert!(review::timeline(&f.project).unwrap().revisions.is_empty());
 }
+#[test]
+fn manual_recovery_word_export_conspicuously_labels_unverified_source_without_blocking_edits() {
+    let f = fixture();
+    fs::write(
+        f.project.root.join("input-invalidated.json"),
+        br#"{"reason":"Input changed during conversion"}"#,
+    )
+    .unwrap();
+    let output = f.document.parent().unwrap().join("recovery.docx");
+    let original = fs::read(f.project.page_path(1)).unwrap();
+    word::export(&f.project, &output, &Control::default()).unwrap();
+    let xml = text_part(&output, "word/document.xml");
+    assert!(xml.contains(word::INVALIDATED_SOURCE_WARNING));
+    assert!(xml.contains("UNVERIFIED SOURCE"));
+    assert!(xml.contains("manual recovery export"));
+    assert!(xml.contains("w:color w:val=\"C62828\""));
+    let preview = roundtrip::preview(&f.project, &output, &Control::default()).unwrap();
+    assert!(preview.fields.iter().all(|f| f.status == "unchanged"));
+    assert_eq!(fs::read(f.project.page_path(1)).unwrap(), original);
+}

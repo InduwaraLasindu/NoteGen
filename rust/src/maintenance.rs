@@ -58,9 +58,9 @@ fn metadata(url: &str, c: &Control) -> Result<Value> {
     let mut bytes = vec![];
     let mut request = client.get(url);
     if url == APP
-        && let Ok(token) = std::env::var("NOTEGEN_GITHUB_TOKEN")
+        && let Some(token) = models::publisher_update_token(url)?
     {
-        request = request.bearer_auth(token);
+        request = request.bearer_auth(token.expose_secret());
     }
     request
         .send()?
@@ -383,7 +383,7 @@ pub fn download_app(release: &AppRelease, c: &Control, log: &Activity) -> Result
     let root = PathBuf::from("updates");
     fs::create_dir_all(&root)?;
     let path = root.join(&release.asset.file);
-    let url = if release.asset_id > 0 && std::env::var_os("NOTEGEN_GITHUB_TOKEN").is_some() {
+    let url = if release.asset_id > 0 && models::has_publisher_update_credential()? {
         format!(
             "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/{}",
             release.asset_id

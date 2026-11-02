@@ -31,6 +31,12 @@ pub fn convert(
 ) -> Result<Completed> {
     let begun = Instant::now();
     s.validate()?;
+    let language_digest = if s.tessdata_dir.as_os_str().is_empty() {
+        String::new()
+    } else {
+        crate::languages::verify_selection(&s.tessdata_dir, &s.languages, c)?;
+        fingerprint(&(s.languages.clone(), include_str!("../languages.json")))?
+    };
     let mut effective = s.clone();
     let writer_digest = if s.preset != Preset::Fast && s.writer.use_examples {
         crate::writers::digest(&s.writer.root, s.writer.id.as_deref())?
@@ -157,6 +163,7 @@ pub fn convert(
         2,
         recognition_settings(s),
         &writer_digest,
+        &language_digest,
         (plan.image_edge, plan.context, plan.dpi, plan.image_tokens),
         &plan
             .models
@@ -179,12 +186,28 @@ pub fn convert(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let root = parent.join(".notegen").join(format!(
+    let base_root = parent.join(".notegen").join(format!(
         "{}-{}-{}",
         source.file_stem().unwrap_or_default().to_string_lossy(),
         &input[..10],
         &key[..10]
     ));
+    let mut root = base_root.clone();
+    let mut attempt = 0;
+    while root.join("input-invalidated.json").exists() {
+        attempt += 1;
+        anyhow::ensure!(
+            attempt <= 100,
+            Fault::new(
+                "NG500",
+                "Too many invalidated checkpoints; choose a new output folder"
+            )
+        );
+        root = base_root.with_file_name(format!(
+            "{}-retry-{attempt}",
+            base_root.file_name().unwrap().to_string_lossy()
+        ));
+    }
     fs::create_dir_all(&root)?;
     let log = Activity {
         path: Some(root.join("activity.jsonl")),
@@ -836,6 +859,20 @@ pub fn convert(
         Work::new(Phase::Export, 0, 1, 2000, true),
         "Writing Word document",
     );
+    let verified_input = crate::inputs::hash(source, c);
+    if !verified_input
+        .as_ref()
+        .is_ok_and(|digest| digest == &project.manifest.input_sha256)
+    {
+        if c.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            c.check()?;
+        }
+        atomic_json(
+            &root.join("input-invalidated.json"),
+            &serde_json::json!({"expected":project.manifest.input_sha256,"observed":verified_input.ok(),"reason":"Source changed or became unavailable during conversion; checkpoints must not be reused."}),
+        )?;
+        return Err(Fault::new("NG100","Source changed or became unavailable during conversion. Export was withheld. Retry uses fresh checkpoints; previous evidence is preserved for inspection.").into());
+    }
     word::export(&project, output, c)?;
     log.work(
         Work::new(Phase::Export, 1, 1, 2000, false),

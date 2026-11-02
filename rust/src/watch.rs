@@ -195,6 +195,7 @@ pub fn scan(
         });
     }
     let mut report = ScanReport::default();
+    let mut offered = BTreeSet::new();
     let mut present = BTreeSet::new();
     let mut entries = fs::read_dir(&root)?.collect::<std::io::Result<Vec<_>>>()?;
     anyhow::ensure!(
@@ -208,6 +209,14 @@ pub fn scan(
     for entry in entries {
         c.check()?;
         let filename = entry.file_name().to_string_lossy().to_string();
+        if entry.file_name().to_str().is_none() {
+            report.rejected.push(RejectedFile {
+                filename,
+                reason: "Filename cannot be represented as Unicode; rename it before importing"
+                    .into(),
+            });
+            continue;
+        }
         let path = entry.path();
         let kind = entry.file_type()?;
         if kind.is_dir() {
@@ -279,8 +288,27 @@ pub fn scan(
         let sha = if let Some(sha) = &observation.sha256 {
             sha.clone()
         } else {
-            let sha = hash_file(&path, c)?;
-            let after = signature(&path)?;
+            let sha = match hash_file(&path, c) {
+                Ok(sha) => sha,
+                Err(error) => {
+                    c.check()?;
+                    report.rejected.push(RejectedFile {
+                        filename,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let after = match signature(&path) {
+                Ok(value) => value,
+                Err(error) => {
+                    report.rejected.push(RejectedFile {
+                        filename,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             if after != (bytes, modified) {
                 *observation = Observation {
                     bytes: after.0,
@@ -295,10 +323,13 @@ pub fn scan(
             sha
         };
         let duplicate = state.imported.values().find(|r| r.sha256 == sha).cloned();
-        if duplicate.is_some() && config.duplicate_policy == DuplicatePolicy::Skip {
+        if (duplicate.is_some() || offered.contains(&sha))
+            && config.duplicate_policy == DuplicatePolicy::Skip
+        {
             report.skipped_duplicates.push(filename);
             continue;
         }
+        offered.insert(sha.clone());
         report.ready.push(ImportCandidate {
             path,
             filename: filename.clone(),
@@ -333,6 +364,18 @@ pub fn record_import(
     );
     let root = folder(config)?;
     bind(state, &root)?;
+    anyhow::ensure!(
+        candidate.bytes <= config.max_file_bytes
+            && candidate
+                .path
+                .extension()
+                .and_then(|v| v.to_str())
+                .is_some_and(|v| config.extensions.iter().any(|e| e.eq_ignore_ascii_case(v))),
+        Fault::new(
+            "NG500",
+            "Watch import rules changed after the candidate preview"
+        )
+    );
     no_links(&candidate.path)?;
     anyhow::ensure!(
         candidate.path.canonicalize()?.parent() == Some(root.as_path())
@@ -363,7 +406,8 @@ pub fn record_import(
     );
     anyhow::ensure!(
         signature(&candidate.path)? == (candidate.bytes, candidate.modified_nanos)
-            && hash_file(&candidate.path, c)? == candidate.sha256,
+            && hash_file(&candidate.path, c)? == candidate.sha256
+            && signature(&candidate.path)? == (candidate.bytes, candidate.modified_nanos),
         Fault::new(
             "NG500",
             "Watched file changed after queue preview; it was not marked imported"

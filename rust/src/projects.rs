@@ -473,11 +473,11 @@ pub struct RecoveryReport {
 }
 pub fn recovery(p: &Project) -> Result<RecoveryReport> {
     let m = metadata(p)?;
-    let input_state = match &m.source {
+    let mut input_state = match &m.source {
         None => "Original input path was not recorded; select the matching input to resume.".into(),
         Some(path) => {
-            if path.is_file() {
-                if hash_file(path, &Control::default())? == p.manifest.input_sha256 {
+            if path.is_file() || path.is_dir() {
+                if crate::inputs::hash(path, &Control::default())? == p.manifest.input_sha256 {
                     "Original input matches the project checksum.".into()
                 } else {
                     "Original input changed; select the original file or create a new project."
@@ -488,6 +488,10 @@ pub fn recovery(p: &Project) -> Result<RecoveryReport> {
             }
         }
     };
+    let invalidated = p.root.join("input-invalidated.json").is_file();
+    if invalidated {
+        input_state="Source changed during conversion. These checkpoints are preserved for inspection and cannot be reused; retry conversion for fresh evidence.".into();
+    }
     let mut report = RecoveryReport {
         project: p.root.clone(),
         input_state,
@@ -503,51 +507,59 @@ pub fn recovery(p: &Project) -> Result<RecoveryReport> {
         let source_image = p.image(*n).is_file();
         let loaded = page_safe(p, *n).and_then(|_| p.load(*n));
         let error = loaded.as_ref().err().map(ToString::to_string);
-        let (state, reusable, next_action) = match loaded {
-            Ok(page) => {
-                report.completed += 1;
-                if page.needs_review(p.manifest.settings.review_threshold) {
-                    report.pending_review += 1;
+        let (state, reusable, next_action) = if invalidated {
+            (
+                "source_invalidated",
+                false,
+                "Inspect preserved evidence. Retry conversion uses fresh checkpoints because the source changed during the previous run.",
+            )
+        } else {
+            match loaded {
+                Ok(page) => {
+                    report.completed += 1;
+                    if page.needs_review(p.manifest.settings.review_threshold) {
+                        report.pending_review += 1;
+                    }
+                    if !source_image {
+                        (
+                            "missing_source",
+                            true,
+                            "Recognition is retained. Restore or render the source image before visual review.",
+                        )
+                    } else if page.needs_review(p.manifest.settings.review_threshold) {
+                        (
+                            "pending_review",
+                            true,
+                            "Reuse the saved recognition and review flagged source regions.",
+                        )
+                    } else {
+                        (
+                            "complete",
+                            true,
+                            "Reuse the saved page; export can continue without another reader pass.",
+                        )
+                    }
                 }
-                if !source_image {
-                    (
-                        "missing_source",
-                        true,
-                        "Recognition is retained. Restore or render the source image before visual review.",
-                    )
-                } else if page.needs_review(p.manifest.settings.review_threshold) {
-                    (
-                        "pending_review",
-                        true,
-                        "Reuse the saved recognition and review flagged source regions.",
-                    )
-                } else {
-                    (
-                        "complete",
-                        true,
-                        "Reuse the saved page; export can continue without another reader pass.",
-                    )
-                }
-            }
-            Err(_) => {
-                if original_checkpoint || corrected_checkpoint {
-                    (
-                        "invalid_checkpoint",
-                        false,
-                        "A checkpoint is invalid. Preserve a copy, inspect the error and reconvert this page.",
-                    )
-                } else if source_image {
-                    (
-                        "recognition_pending",
-                        false,
-                        "Reuse the rendered image; recognition has not completed.",
-                    )
-                } else {
-                    (
-                        "render_pending",
-                        false,
-                        "Restore the matching input, render and recognize this page.",
-                    )
+                Err(_) => {
+                    if original_checkpoint || corrected_checkpoint {
+                        (
+                            "invalid_checkpoint",
+                            false,
+                            "A checkpoint is invalid. Preserve a copy, inspect the error and reconvert this page.",
+                        )
+                    } else if source_image {
+                        (
+                            "recognition_pending",
+                            false,
+                            "Reuse the rendered image; recognition has not completed.",
+                        )
+                    } else {
+                        (
+                            "render_pending",
+                            false,
+                            "Restore the matching input, render and recognize this page.",
+                        )
+                    }
                 }
             }
         };
@@ -598,8 +610,9 @@ pub fn save_template(output: &Path, name: &str, settings: &Settings) -> Result<(
     let mut portable = settings.clone();
     let defaults = Settings::default();
     portable.tesseract = defaults.tesseract;
+    portable.tessdata_dir = defaults.tessdata_dir;
     portable.pdfium = defaults.pdfium;
-    portable.server = defaults.server;
+    portable.server = "runtime/llama-server.exe".into();
     portable.models_dir = defaults.models_dir;
     portable.writer.root = defaults.writer.root;
     portable.writer.id = None;

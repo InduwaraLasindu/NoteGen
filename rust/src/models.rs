@@ -152,7 +152,11 @@ fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(30))
-        .user_agent("NoteGen/0.4 model manager")
+        .user_agent(concat!(
+            "NoteGen/",
+            env!("CARGO_PKG_VERSION"),
+            " model manager"
+        ))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             let u = attempt.url();
             let h = u.host_str().unwrap_or("");
@@ -169,6 +173,51 @@ fn client() -> Result<reqwest::blocking::Client> {
             }
         }))
         .build()?)
+}
+fn update_token_with(
+    url: &str,
+    read_native: impl FnOnce(&str) -> Result<Option<crate::credentials::Secret>>,
+    read_legacy: impl FnOnce() -> Result<Option<crate::credentials::Secret>>,
+) -> Result<Option<crate::credentials::Secret>> {
+    anyhow::ensure!(
+        crate::credentials::publisher_url(url),
+        Fault::new(
+            "NG750",
+            "Update credentials are restricted to the fixed publisher release API"
+        )
+    );
+    match read_native(url) {
+        Ok(Some(secret)) => Ok(Some(secret)),
+        Ok(None) => read_legacy(),
+        Err(native_error) => match read_legacy()? {
+            Some(secret) => Ok(Some(secret)),
+            None => Err(native_error),
+        },
+    }
+}
+/// Legacy environment access is limited to the same publisher boundary as the native store.
+pub(crate) fn publisher_update_token(url: &str) -> Result<Option<crate::credentials::Secret>> {
+    update_token_with(
+        url,
+        |url| crate::credentials::native().get_for_publisher(url),
+        || match std::env::var("NOTEGEN_GITHUB_TOKEN") {
+            Ok(token) => crate::credentials::Secret::new(token).map(Some),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(_) => Err(Fault::new(
+                "NG750",
+                "The legacy update credential has an invalid format",
+            )
+            .into()),
+        },
+    )
+}
+pub(crate) fn has_publisher_update_credential() -> Result<bool> {
+    let legacy_present = std::env::var_os("NOTEGEN_GITHUB_TOKEN").is_some();
+    match crate::credentials::native().status() {
+        Ok(status) => Ok(status.stored || legacy_present),
+        Err(_) if legacy_present => Ok(true),
+        Err(error) => Err(error),
+    }
 }
 pub fn parse_update(m: &Model, data: &Value) -> Result<Update> {
     let h = m
@@ -299,12 +348,10 @@ async fn download_async(
     let offset = part.metadata().map_or(0, |m| m.len());
     c.check()?;
     let mut request = client.get(url);
-    if url.starts_with("https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/") {
-        request = request
-            .header(reqwest::header::ACCEPT, "application/octet-stream")
-            .header(reqwest::header::USER_AGENT, "NoteGen/0.4");
-        if let Ok(token) = std::env::var("NOTEGEN_GITHUB_TOKEN") {
-            request = request.bearer_auth(token);
+    if crate::credentials::publisher_url(url) {
+        request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
+        if let Some(token) = publisher_update_token(url)? {
+            request = request.bearer_auth(token.expose_secret());
         }
     }
     if offset > 0 {
@@ -419,6 +466,7 @@ pub(crate) fn download(
     rt.block_on(async {
         let client = reqwest::Client::builder()
             .https_only(true)
+            .user_agent(concat!("NoteGen/",env!("CARGO_PKG_VERSION")," asset downloader"))
             .read_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(7200))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -545,6 +593,122 @@ pub fn rollback(dir: &Path, id: &str) -> Result<Model> {
 mod tests {
     use super::*;
     use std::{net::TcpListener, thread};
+    const PUBLISHER_URL: &str =
+        "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/latest";
+    fn synthetic_secret(label: &str) -> crate::credentials::Secret {
+        crate::credentials::Secret::new(format!("ghp_SYNTHETIC_ONLY_{label}_0123456789")).unwrap()
+    }
+    #[test]
+    fn native_update_credential_wins_without_reading_legacy_environment() {
+        let token = update_token_with(
+            PUBLISHER_URL,
+            |_| Ok(Some(synthetic_secret("native"))),
+            || panic!("Legacy reader must not run when native credential exists"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(token.expose_secret().contains("native"));
+    }
+    #[test]
+    fn missing_or_failed_native_store_can_use_explicit_legacy_credential() {
+        for native in [
+            Ok(None),
+            Err(Fault::new("NG750", "Synthetic native store unavailable").into()),
+        ] {
+            let token = update_token_with(
+                PUBLISHER_URL,
+                |_| native,
+                || Ok(Some(synthetic_secret("legacy"))),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(token.expose_secret().contains("legacy"));
+        }
+        assert!(
+            update_token_with(PUBLISHER_URL, |_| Ok(None), || Ok(None))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            update_token_with(
+                PUBLISHER_URL,
+                |_| Err(Fault::new("NG750", "Synthetic failure").into()),
+                || Ok(None)
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn other_publishers_cannot_trigger_native_or_legacy_credential_reads() {
+        for url in [
+            "https://huggingface.co/owner/model",
+            "https://api.github.com/repos/Other/Repo/releases/latest",
+            "https://api.github.com/repos/InduwaraLasindu/NoteGen/releases/assets/not-a-number",
+        ] {
+            assert!(
+                update_token_with(
+                    url,
+                    |_| panic!("Unexpected native credential read"),
+                    || panic!("Unexpected legacy credential read")
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn authorization_is_removed_when_redirect_changes_origin() {
+        fn capture(mut socket: std::net::TcpStream) -> String {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = vec![];
+            let mut buffer = [0u8; 1024];
+            while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buffer).unwrap();
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..n]);
+                assert!(bytes.len() < 16000);
+            }
+            String::from_utf8(bytes).unwrap()
+        }
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").unwrap();
+        let first_url = format!("http://{}", first.local_addr().unwrap());
+        let next = format!("http://{}", second.local_addr().unwrap());
+        let from = thread::spawn(move || {
+            let (mut socket, _) = first.accept().unwrap();
+            let request = capture(socket.try_clone().unwrap());
+            write!(socket,"HTTP/1.1 302 Found\r\nLocation: {next}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            request
+        });
+        let to = thread::spawn(move || {
+            let (mut socket, _) = second.accept().unwrap();
+            let request = capture(socket.try_clone().unwrap());
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            )
+            .unwrap();
+            request
+        });
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(first_url)
+            .bearer_auth("SYNTHETIC_REDIRECT_TEST_ONLY")
+            .send()
+            .unwrap();
+        assert!(response.status().is_success());
+        let initial = from.join().unwrap().to_ascii_lowercase();
+        let redirected = to.join().unwrap().to_ascii_lowercase();
+        assert!(initial.contains("authorization: bearer synthetic_redirect_test_only"));
+        assert!(!redirected.contains("authorization:"));
+        assert!(!redirected.contains("synthetic_redirect_test_only"));
+    }
     fn mock(body: Vec<u8>, range: Option<&str>) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());

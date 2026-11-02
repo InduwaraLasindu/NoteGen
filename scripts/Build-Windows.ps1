@@ -14,8 +14,12 @@ New-Item -ItemType Directory -Force $package,"$package/runtime","$package/runtim
 Copy-Item target/release/NoteGen.exe,target/release/notegen-cli.exe $package
 Copy-Item scripts/Setup-Runtime.ps1,scripts/Install-Models.ps1 "$package/scripts"
 Copy-Item rust/downloads.json "$package/assets/model-downloads.json"
+Copy-Item rust/languages.json "$package/assets/ocr-language-downloads.json"
 Copy-Item README.md,LICENSE,THIRD_PARTY_NOTICES.md $package
 Copy-Item docs/WINDOWS.md,docs/TESTING.md,docs/RUST_PLAN.md,docs/STUDIO.md,docs/RELEASE_0.4.0.md,docs/RELEASE_0.4.1.md "$package/docs"
+Copy-Item docs/WORKBENCH.md,docs/FEATURES_0.5.0.md "$package/docs"
+New-Item -ItemType Directory -Force "$package/docs/images" | Out-Null
+Copy-Item docs/images/notegen-banner.svg "$package/docs/images"
 $native=Join-Path (Get-Location) 'build/pdfium-rust'
 if(-not(Test-Path "$native/bin/pdfium.dll")){
  New-Item -ItemType Directory -Force $native | Out-Null
@@ -52,6 +56,10 @@ $records=foreach($p in $metadata.packages){
  "$($p.name) $($p.version) | $($p.license) | $($p.repository)"
 }
 $records | Set-Content "$package/licenses/RUST-DEPENDENCIES.txt" -Encoding utf8
+$commit=$env:GITHUB_SHA
+if(-not $commit){$commit=(& git rev-parse HEAD).Trim();if($LASTEXITCODE -ne 0){throw 'Cannot determine source commit for build provenance'}}
+& "$sourceRoot/scripts/Build-Provenance.ps1" -SourceCommit $commit -BinaryDirectory $package -OutputDirectory "$package/provenance"
+if($LASTEXITCODE -ne 0){throw 'Build provenance generation failed'}
 Push-Location $package
 try{
  & ./notegen-cli.exe self-test -o ./package-test.docx

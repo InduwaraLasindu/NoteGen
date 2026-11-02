@@ -11,6 +11,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub fn ocr_args(args: &[String], s: &Settings) -> Vec<String> {
+    let mut args = args.to_vec();
+    if !s.tessdata_dir.as_os_str().is_empty() {
+        args.splice(
+            2.min(args.len())..2.min(args.len()),
+            [
+                "--tessdata-dir".into(),
+                s.tessdata_dir.to_string_lossy().into_owned(),
+            ],
+        );
+    }
+    args
+}
 pub fn run(
     exe: &Path,
     args: &[String],
@@ -428,17 +441,23 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
     }
     let path = dir.path().join("ocr.png");
     gray.save(&path)?;
+    if !s.tessdata_dir.as_os_str().is_empty() {
+        crate::languages::verify_selection(&s.tessdata_dir, &s.languages, c)?;
+    }
     let (ok, text, _) = run_with_threads(
         &s.tesseract,
-        &[
-            path.to_string_lossy().into(),
-            "stdout".into(),
-            "-l".into(),
-            s.languages.clone(),
-            "--psm".into(),
-            "3".into(),
-            "tsv".into(),
-        ],
+        &ocr_args(
+            &[
+                path.to_string_lossy().into(),
+                "stdout".into(),
+                "-l".into(),
+                s.languages.clone(),
+                "--psm".into(),
+                "3".into(),
+                "tsv".into(),
+            ],
+            s,
+        ),
         Duration::from_secs(90),
         c,
         if s.cpu_threads == 0 {
@@ -521,12 +540,15 @@ pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImag
     im.thumbnail(1800, 1800).save(&p)?;
     let r = run_with_threads(
         &s.tesseract,
-        &[
-            p.to_string_lossy().into(),
-            "stdout".into(),
-            "--psm".into(),
-            "0".into(),
-        ],
+        &ocr_args(
+            &[
+                p.to_string_lossy().into(),
+                "stdout".into(),
+                "--psm".into(),
+                "0".into(),
+            ],
+            s,
+        ),
         Duration::from_secs(20),
         c,
         if s.cpu_threads == 0 {

@@ -66,6 +66,53 @@ pub struct Report {
     pub warnings: Vec<Warning>,
     pub omitted_warnings: usize,
     pub alignment: String,
+    pub source_invalidated: bool,
+    pub warning_pages: usize,
+    pub font_embedding: FontEmbedding,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FontEmbedding {
+    pub permission: String,
+    pub subsetting_allowed: bool,
+}
+/// Honor the font's own OS/2 embedding metadata before loading outline data into a PDF.
+pub fn font_embedding(data: &[u8]) -> Result<FontEmbedding> {
+    anyhow::ensure!(
+        data.len() <= 64_000_000,
+        Fault::new("NG400", "PDF font exceeds 64 MB")
+    );
+    let face = ttf_parser::Face::parse(data, 0)
+        .map_err(|_| Fault::new("NG400", "The selected TrueType font could not be parsed"))?;
+    let os2 = face.tables().os2.ok_or_else(|| {
+        Fault::new(
+            "NG400",
+            "Font embedding metadata is missing or invalid; choose another font",
+        )
+    })?;
+    let permission = os2.permissions().ok_or_else(|| {
+        Fault::new(
+            "NG400",
+            "Font embedding permission flags are ambiguous; choose another font",
+        )
+    })?;
+    anyhow::ensure!(
+        permission != ttf_parser::Permissions::Restricted,
+        Fault::new(
+            "NG400",
+            "The font's metadata restricts embedding; choose another font"
+        )
+    );
+    anyhow::ensure!(
+        os2.is_outline_embedding_allowed(),
+        Fault::new(
+            "NG400",
+            "The font's metadata permits bitmap-only embedding; searchable PDF requires permitted outlines"
+        )
+    );
+    Ok(FontEmbedding {
+        permission: format!("{permission:?}"),
+        subsetting_allowed: os2.is_subsetting_allowed(),
+    })
 }
 fn warning(report: &mut Report, page: usize, block: Option<usize>, message: &str) {
     if report.warnings.len() < 1000 {
@@ -168,6 +215,7 @@ pub fn export(project: &Project, target: &Path, options: &Options, c: &Control) 
         )
     );
     let bytes = fs::read(&font_path)?;
+    let embedding = font_embedding(&bytes)?;
     let coverage = FontArc::try_from_vec(bytes.clone())
         .map_err(|_| Fault::new("NG400", "The selected PDF font could not be read"))?;
     let pdfium = bind(&project.manifest.settings.pdfium)?;
@@ -175,7 +223,55 @@ pub fn export(project: &Project, target: &Path, options: &Options, c: &Control) 
     let font = document
         .fonts_mut()
         .load_true_type_from_bytes(&bytes, true)?;
-    let mut report=Report{pages:0,searchable_blocks:0,image_only_blocks:0,marked_regions:0,font:font_path,missing_glyphs:vec![],warnings:vec![],omitted_warnings:0,alignment:"Measured source block rectangles. Word and line coordinates are not inferred; selection within a multiline block is approximate.".into()};
+    if !embedding.subsetting_allowed {
+        let loaded = document
+            .fonts()
+            .get(font)
+            .ok_or_else(|| Fault::new("NG400", "Full font embedding could not be verified"))?;
+        anyhow::ensure!(
+            loaded.is_embedded()? && loaded.data()? == bytes,
+            Fault::new(
+                "NG400",
+                "The font forbids subsetting and full font embedding could not be verified; choose another font"
+            )
+        );
+    }
+    let invalidated = project.root.join("input-invalidated.json").is_file();
+    let mut report=Report{pages:0,searchable_blocks:0,image_only_blocks:0,marked_regions:0,font:font_path,missing_glyphs:vec![],warnings:vec![],omitted_warnings:0,alignment:"Measured source block rectangles. Word and line coordinates are not inferred; selection within a multiline block is approximate.".into(),source_invalidated:invalidated,warning_pages:0,font_embedding:embedding};
+    if invalidated {
+        let warning_font = document.fonts_mut().helvetica_bold();
+        let body_font = document.fonts_mut().helvetica();
+        let mut cover = document
+            .pages_mut()
+            .create_page_at_end(PdfPagePaperSize::a4())?;
+        let mut heading = cover.objects_mut().create_text_object(
+            PdfPoints::new(44.0),
+            PdfPoints::new(770.0),
+            crate::word::INVALIDATED_SOURCE_WARNING,
+            warning_font,
+            PdfPoints::new(16.0),
+        )?;
+        heading.set_fill_color(PdfColor::new(198, 40, 40, 255))?;
+        for (line, message) in [
+            "Manual recovery export of preserved recognition.",
+            "The input changed or became unavailable during conversion.",
+            "Verify every following source page against the original input.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            cover.objects_mut().create_text_object(
+                PdfPoints::new(44.0),
+                PdfPoints::new(730.0 - line as f32 * 22.0),
+                message,
+                body_font,
+                PdfPoints::new(12.0),
+            )?;
+        }
+        report.pages += 1;
+        report.warning_pages = 1;
+        warning(&mut report, 0, None, crate::word::RECOVERY_EXPORT_NOTICE);
+    }
     let mut missing = BTreeSet::new();
     let mut pixels = 0u64;
     let mut characters = 0usize;
@@ -356,6 +452,25 @@ pub fn export(project: &Project, target: &Path, options: &Options, c: &Control) 
     document.save_to_writer(temp.as_file_mut())?;
     temp.flush()?;
     temp.as_file().sync_all()?;
+    if !report.font_embedding.subsetting_allowed {
+        let verification = pdfium.load_pdf_from_file(temp.path(), None)?;
+        for index in report.warning_pages as i32..verification.pages().len() {
+            c.check()?;
+            let page = verification.pages().get(index)?;
+            for object in page.objects().iter() {
+                if let Some(text) = object.as_text_object() {
+                    let font = text.font();
+                    anyhow::ensure!(
+                        font.is_embedded()? && font.data()? == bytes,
+                        Fault::new(
+                            "NG400",
+                            "The font forbids subsetting and saved full font embedding could not be verified; choose another font"
+                        )
+                    );
+                }
+            }
+        }
+    }
     c.check()?;
     temp.persist_noclobber(target)
         .map_err(|_| Fault::new("NG401", "PDF output collision or unavailable output folder"))?;

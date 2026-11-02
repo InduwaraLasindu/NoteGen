@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
+pub const INVALIDATED_SOURCE_WARNING: &str = "WARNING: SOURCE CHANGED OR UNAVAILABLE";
+pub const RECOVERY_EXPORT_NOTICE: &str = "This manual recovery export contains preserved recognition. The input changed or became unavailable during conversion. Verify every page against the original source.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +122,7 @@ pub fn style_profile(project: &Project) -> Result<StyleProfile> {
         custom.validate()?;
         result.styles.extend(custom.styles);
     }
+    result.validate()?;
     Ok(result)
 }
 fn styles_xml(profile: &StyleProfile) -> String {
@@ -317,6 +320,11 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
     );
     let mut baseline = crate::roundtrip::baseline(project)?;
     let profile = style_profile(project)?;
+    let invalidated = project.root.join("input-invalidated.json").is_file();
+    if invalidated {
+        body.write_all(format!("<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:rPr><w:b/><w:color w:val=\"C62828\"/><w:sz w:val=\"28\"/></w:rPr><w:t>{}</w:t></w:r></w:p>",xml(INVALIDATED_SOURCE_WARNING)).as_bytes())?;
+        body.write_all(paragraph(RECOVERY_EXPORT_NOTICE, "Normal").as_bytes())?;
+    }
     for (index, n) in project.manifest.pages.iter().enumerate() {
         c.check()?;
         let page = project.load(*n)?;
@@ -335,6 +343,15 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
             )
             .as_bytes(),
         )?;
+        if invalidated {
+            body.write_all(
+                paragraph(
+                    "UNVERIFIED SOURCE — manual recovery export; check this source page.",
+                    "Caption",
+                )
+                .as_bytes(),
+            )?;
+        }
         if page.needs_review(project.manifest.settings.review_threshold) {
             body.write_all(
                 paragraph(
@@ -403,6 +420,49 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
                     media.push(path);
                 }
                 "figure" => {}
+                "equation" => {
+                    match crate::equations::convert(&b.text) {
+                        Ok(equation) => {
+                            let content = format!(
+                                "<w:p><w:pPr><w:pStyle w:val=\"Equation\"/></w:pPr>{}</w:p>",
+                                equation.omml
+                            );
+                            body.write_all(
+                                crate::roundtrip::tagged_equation(
+                                    &mut baseline,
+                                    *n,
+                                    block_index,
+                                    &b.text,
+                                    &content,
+                                )
+                                .as_bytes(),
+                            )?;
+                        }
+                        Err(error) => {
+                            body.write_all(
+                                crate::roundtrip::tagged(
+                                    &mut baseline,
+                                    *n,
+                                    block_index,
+                                    "text",
+                                    &b.text,
+                                    &paragraph(&b.text, "Equation"),
+                                )
+                                .as_bytes(),
+                            )?;
+                            body.write_all(paragraph(&format!("REVIEW EQUATION — {error}. Original source LaTeX is retained above."),"Caption").as_bytes())?;
+                        }
+                    }
+                    if b.uncertain {
+                        body.write_all(
+                            paragraph(
+                                "[uncertain] — verify this equation against its source region.",
+                                "Caption",
+                            )
+                            .as_bytes(),
+                        )?;
+                    }
+                }
                 _ => {
                     let style = match b.kind.as_str() {
                         "heading" => "Heading1",

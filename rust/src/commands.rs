@@ -26,6 +26,65 @@ impl SupportRequest {
 
 #[derive(Subcommand)]
 pub enum Action {
+    HardwareTrial {
+        project: PathBuf,
+        options: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    CredentialStatus,
+    RemoveCredential,
+    Watch {
+        config: PathBuf,
+        state: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long)]
+        once: bool,
+        #[arg(long)]
+        pause_file: Option<PathBuf>,
+    },
+    CleanupPreview {
+        #[arg(long)]
+        protect: Vec<PathBuf>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    CleanupApply {
+        selections: PathBuf,
+        #[arg(long)]
+        protect: Vec<PathBuf>,
+        #[arg(long)]
+        preview_token: String,
+    },
+    SuggestWriter {
+        image: PathBuf,
+        label: String,
+        #[arg(long)]
+        enable: bool,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    ConfirmWriter {
+        report: PathBuf,
+        writer: String,
+        #[arg(long)]
+        confirmation_token: String,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    LanguagePacks,
+    LanguagePlan {
+        directory: PathBuf,
+        #[arg(required = true)]
+        codes: Vec<String>,
+    },
+    InstallLanguages {
+        directory: PathBuf,
+        #[arg(required = true)]
+        codes: Vec<String>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     ExportPdf {
         project: PathBuf,
         #[arg(long)]
@@ -376,6 +435,115 @@ fn format(value: &str) -> Result<exports::Format> {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::HardwareTrial {
+            project,
+            options,
+            output,
+        } => {
+            let report = notegen::hardware_trials::run(
+                &Project::read(project)?,
+                &read_json(&options, 1_000_000)?,
+                s,
+                c,
+                &Activity::default(),
+            )?;
+            protected_json(&output, &report)?;
+            print(report)
+        }
+        Action::CredentialStatus => print(notegen::credentials::native().status()?),
+        Action::RemoveCredential => {
+            notegen::credentials::native().delete()?;
+            print(notegen::credentials::native().status()?)
+        }
+        Action::Watch {
+            config,
+            state,
+            output_dir,
+            once,
+            pause_file,
+        } => print(notegen::watch_service::run(
+            &config,
+            &state,
+            &output_dir,
+            s,
+            c,
+            &Activity::default(),
+            once,
+            pause_file.as_deref(),
+        )?),
+        Action::CleanupPreview { protect, output } => {
+            let preview = notegen::cleanup::preview(s, &protect, c)?;
+            protected_json(&output, &preview)?;
+            print(preview)
+        }
+        Action::CleanupApply {
+            selections,
+            protect,
+            preview_token,
+        } => print(notegen::cleanup::apply(
+            s,
+            &protect,
+            &read_json::<Vec<PathBuf>>(&selections, 1_000_000)?,
+            &preview_token,
+            c,
+        )?),
+        Action::SuggestWriter {
+            image,
+            label,
+            enable,
+            output,
+        } => {
+            let im = notegen::writers::open_image(&image, 40_000_000)?;
+            let report = notegen::profile_suggestions::suggest(
+                &s.writer.root,
+                &im,
+                Some(&label),
+                &notegen::profile_suggestions::SuggestOptions {
+                    enabled: enable,
+                    ..Default::default()
+                },
+                c,
+            )?;
+            protected_json(&output, &report)?;
+            print(report)
+        }
+        Action::ConfirmWriter {
+            report,
+            writer,
+            confirmation_token,
+            output,
+        } => {
+            let options = notegen::profile_suggestions::confirm(
+                &s.writer.root,
+                &read_json(&report, 1_000_000)?,
+                &writer,
+                &confirmation_token,
+                c,
+            )?;
+            let mut next = s.clone();
+            next.writer = options;
+            protected_json(&output, &next)
+        }
+        Action::LanguagePacks => print(notegen::languages::catalog()),
+        Action::LanguagePlan { directory, codes } => {
+            print(notegen::languages::plan(&directory, &codes, c)?)
+        }
+        Action::InstallLanguages {
+            directory,
+            codes,
+            output,
+        } => {
+            anyhow::ensure!(
+                !output.exists(),
+                Fault::new("NG401", "Settings output exists")
+            );
+            let report = notegen::languages::install(&directory, &codes, c, &Activity::default())?;
+            let mut next = s.clone();
+            next.tessdata_dir = directory.canonicalize()?;
+            next.languages = report.recognition_languages.clone();
+            protected_json(&output, &next)?;
+            print(report)
+        }
         Action::ExportPdf {
             project,
             options,

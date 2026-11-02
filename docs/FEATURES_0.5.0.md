@@ -15,10 +15,10 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 9 | Review undo and redo | Partial | Durable multi-step page/context undo/redo; learned profile examples use separate version/quarantine tools. |
 | 10 | Signed Windows releases | Excluded | Windows Authenticode signing excluded by user; installer remains unsigned. |
 | 11 | Automatic script detection | Partial | Recognized-Unicode script hints and manual OCR-language override; no image-based script classifier. |
-| 12 | Mixed-language recognition | Planned | Implementation remains. |
-| 13 | Multilingual resource packs | Planned | Implementation remains. |
+| 12 | Mixed-language recognition | Partial | Verified manually combined OCR languages in one pass; automatic paragraph routing remains. |
+| 13 | Multilingual resource packs | Implemented | Optional SHA256-pinned official English/Sinhala/Tamil/Arabic/Hebrew printed OCR packs with exact plan and install/verify. |
 | 14 | Right-to-left documents | Partial | Word RTL paragraphs/tables and mixed-direction text; corpus/native-language review remains. |
-| 15 | Editable mathematics | Planned | Implementation remains. |
+| 15 | Editable mathematics | Implemented | Editable OMML equations for a bounded LaTeX grammar; unsupported source stays literal with explicit review warnings. |
 | 16 | Scientific notation tools | Partial | Source-linked technical-notation suggestions; no specialized chemistry recognizer. |
 | 17 | Code transcription | Partial | Code kind and monospaced, whitespace-preserving Word/LaTeX output; handwriting code quality unmeasured. |
 | 18 | Reading-order editor | Implemented | Move recognized blocks in review, retain source boxes, save/undo reading order. |
@@ -50,12 +50,12 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 44 | Project templates | Implemented | Validated portable project-policy templates with private/device fields excluded. |
 | 45 | Queue priorities | Partial | Queue priorities and manual up/down ordering; urgent work starts between jobs, no stage preemption/dragging. |
 | 46 | Content-based duplicate detection | Partial | Content-hash duplicate groups across projects; automated reuse/comparison import flow remains. |
-| 47 | Watched import folders | Planned | Implementation remains. |
+| 47 | Watched import folders | Implemented | Sequential watched-folder CLI worker with stable files, explicit rules, pause/cancel, duplicate policy, success receipts and retry backoff. |
 | 48 | Batch image capture | Implemented | Filename-ordered mixed image folders become one page-ordered project. |
 | 49 | More input formats | Partial | PNG/JPEG and multipage 8-bit Gray/RGB/RGBA TIFF; other TIFF color/depth variants and HEIC are rejected. |
 | 50 | Recovery dashboard | Implemented | Recovery report distinguishes completed checkpoints, corrections, missing sources/images and actions. |
 | 51 | Example coverage coaching | Implemented | Active glyph/digit/condition coverage and concrete sample-coaching suggestions. |
-| 52 | Writer-profile suggestions | Planned | Implementation remains. |
+| 52 | Writer-profile suggestions | Implemented | Opt-in known-glyph profile suggestions; uncalibrated similarity and explicit token-bound confirmation, no automatic writer selection. |
 | 53 | Writer-specific evaluation | Partial | Versioned writer-separated held-out evaluation infrastructure; profile-specific real-data gain measurements remain. |
 | 54 | Confusion-pair exercises | Implemented | Focused confusion-pair prompts from confirmed active examples. |
 | 55 | Glossary suggestions | Implemented | Glossary suggestions from active confirmed labels; no automatic context changes. |
@@ -64,9 +64,9 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 58 | Selective profile sharing | Implemented | Selected-example sharing with explicit privacy options and token-bound preview. |
 | 59 | Richer handwriting fonts | Planned | Implementation remains. |
 | 60 | Font proof sheets | Implemented | Printable HTML proof sheets with embedded real TTF and missing-glyph warnings. |
-| 61 | Document-based hardware trials | Partial | One-page trial records time and quality/review separately; comparative document hardware trials remain. |
-| 62 | Multi-GPU benchmarking | Planned | Implementation remains. |
-| 63 | Measured memory budgets | Planned | Implementation remains. |
+| 61 | Document-based hardware trials | Implemented | Opt-in same-page copied-source hardware trials; measured times separated from optional groundtruth scores. |
+| 62 | Multi-GPU benchmarking | Partial | Comparable trials on actually discovered compatible devices; target multi-GPU measurements remain unperformed. |
+| 63 | Measured memory budgets | Partial | Sampled process RSS/NVIDIA VRAM highwater with unavailable/startup gaps explicit; not instantaneous peaks or automatic budgets. |
 | 64 | Power and thermal profiles | Implemented | Quiet/battery/balanced/throughput application-budget previews with apply/undo and clear limits. |
 | 65 | Resource sharing limits | Partial | Inference/OCR worker limits and memory admission reservations; not hard OS quotas. |
 | 66 | Bounded warm-reader reuse | Planned | Implementation remains. |
@@ -82,8 +82,8 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 76 | Canary update validation | Planned | Implementation remains. |
 | 77 | Per-project model pinning | Partial | Project fingerprints bind input/settings/models and reject mismatches; revision resolution/restoration UI remains. |
 | 78 | Update channels | Planned | Implementation remains. |
-| 79 | Safe storage cleanup | Planned | Implementation remains. |
-| 80 | Private-update credentials | Planned | Implementation remains. |
+| 79 | Safe storage cleanup | Implemented | Token-bound selected cleanup of verified known runtime ZIP caches; user data, active/pinned/rollback assets and unknown files protected. |
+| 80 | Private-update credentials | Implemented | Fixed-publisher Windows Credential Manager entry, masked UI, zeroizing secret, scoped retrieval and no secret serialization. |
 | 81 | Privacy dashboard | Partial | Privacy panel reports configured connections, update/lookup state and data locations; not OS connection monitoring. |
 | 82 | Encrypted workspaces | Planned | Implementation remains. |
 | 83 | Confidential session mode | Planned | Implementation remains. |
@@ -98,9 +98,9 @@ This ledger covers all 100 proposals. Implemented describes the concrete code pa
 | 92 | Screen-reader support | Planned | Native accessibility integration and Narrator audit remain. |
 | 93 | Readable-layout presets | Partial | Large/spacious/compact/high-contrast presets; full clipping audit at each viewport remains. |
 | 94 | Precision source magnifier | Partial | Keyboard-accessible source zoom, source bounds and disagreement markers; full-resolution synchronized magnifier remains. |
-| 95 | Interface localization | Planned | Implementation remains. |
+| 95 | Interface localization | Partial | English/Sinhala/Tamil core action labels independent from OCR; detailed help and native-speaker rendering audit remain. |
 | 96 | Semantic Word styling | Implemented | Configurable semantic Word styles for headings/lists/captions/equations/references/code. |
 | 97 | Additional text exports | Implemented | Markdown/HTML/LaTeX with escaping, source references and uncertainty. |
-| 98 | Searchable PDF export | Planned | Native source-preserving searchable PDF implementation and tests in progress. |
+| 98 | Searchable PDF export | Implemented | Original raster PDF pages with block-aligned searchable Unicode text, visible uncertainty and explicit image-only limits. |
 | 99 | Spreadsheet table export | Implemented | Real XLSX cells with literal values, source links, review sheet and merge warnings. |
 | 100 | Word correction round-trip | Implemented | Tagged Word correction preview/import, conflict detection and one-revision selected apply. |

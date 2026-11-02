@@ -1,6 +1,14 @@
 //! Searchable setting descriptions shared by the desktop and configuration guide.
 pub const GUIDE: &[(&str, &str)] = &[
     (
+        "tessdata_dir",
+        "Verified optional printed-OCR resource folder. Empty uses bundled/system Tesseract data. Interface language is independent.",
+    ),
+    (
+        "ui.locale",
+        "Language of core interface labels: en (English), si (Sinhala), ta (Tamil). Detailed help remains English; OCR language is configured separately.",
+    ),
+    (
         "preset",
         "Fast: printed OCR. Balanced: AI as needed. Accuracy: independent OCR and vision. Maximum: a third reader family and more checks.",
     ),

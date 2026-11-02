@@ -26,10 +26,22 @@ fn locale_codes_round_trip_and_unknown_labels_fall_back() {
 }
 #[test]
 fn interface_translation_does_not_modify_ocr_language_policy() {
-    let s = Settings::default();
-    for locale in locales() {
-        let _ = text(locale, "ocr_language");
-        assert_eq!(s.languages, "eng");
-    }
+    let mut s = Settings::default();
+    s.ui.locale = Locale::Ta;
+    s.languages = "sin+eng".into();
+    let restored: Settings = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+    assert_eq!(restored.ui.locale, Locale::Ta);
+    assert_eq!(restored.languages, "sin+eng");
     assert!(coverage_note().contains("Detailed help"));
+}
+#[test]
+fn old_settings_without_interface_locale_or_custom_tessdata_still_load() {
+    let mut old = serde_json::to_value(Settings::default()).unwrap();
+    old.as_object_mut().unwrap().remove("tessdata_dir");
+    old["ui"].as_object_mut().unwrap().remove("locale");
+    let restored: Settings = serde_json::from_value(old).unwrap();
+    restored.validate().unwrap();
+    assert_eq!(restored.ui.locale, Locale::En);
+    assert!(restored.tessdata_dir.as_os_str().is_empty());
+    assert_eq!(restored.languages, "eng");
 }

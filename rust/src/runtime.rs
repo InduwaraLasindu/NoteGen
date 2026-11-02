@@ -128,6 +128,12 @@ impl Drop for Server {
     }
 }
 impl Server {
+    /// The process owned by this managed reader, if any. External endpoints have no owned PID.
+    pub fn managed_pid(&self) -> Option<u32> {
+        self.child
+            .as_ref()
+            .and_then(|child| child.lock().ok().map(|child| child.id()))
+    }
     pub fn start(
         model: &Model,
         plan: &Plan,

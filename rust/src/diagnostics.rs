@@ -559,7 +559,7 @@ fn repair_assets(input: &RepairInput<'_>) -> Result<BTreeMap<String, RepairAsset
             assets.insert(
                 format!("runtime-archive/{}", download.file),
                 RepairAsset {
-                    path: std::path::absolute(&setup::runtime_root(input.settings))?
+                    path: std::path::absolute(setup::runtime_root(input.settings))?
                         .join("downloads")
                         .join(&download.file),
                     download,

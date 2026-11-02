@@ -207,6 +207,8 @@ impl Desktop {
                     0 => {
                         ui.add_enabled_ui(self.worker.is_none(),|ui| {
                             ui.heading("Recognition & Word output");
+                            egui::ComboBox::from_label(crate::localization::text(self.state.settings.ui.locale,"interface_language")).selected_text(self.state.settings.ui.locale.label()).show_ui(ui,|ui|{for locale in crate::localization::locales(){ui.selectable_value(&mut self.state.settings.ui.locale,locale,locale.label());}});
+                            ui.small(crate::localization::coverage_note());
                             egui::ComboBox::from_label("Quality").selected_text(format!("{:?}",self.state.settings.preset)).show_ui(ui,|ui| { for p in [Preset::Fast,Preset::Balanced,Preset::Accuracy,Preset::Maximum] { ui.selectable_value(&mut self.state.settings.preset,p,format!("{p:?}")); } }); help(ui,"preset");
                             ui.add_space(8.); ui.label("OCR languages"); ui.text_edit_singleline(&mut self.state.settings.languages); help(ui,"languages");
                             ui.checkbox(&mut self.state.settings.deskew,"Straighten tilted scans"); help(ui,"deskew");

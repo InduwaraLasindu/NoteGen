@@ -63,24 +63,33 @@ impl<'a> Parser<'a> {
                 '{' => {
                     depth += 1;
                     anyhow::ensure!(depth <= MAX_DEPTH, error("group nesting exceeds 32"));
-                    text.push(ch);
                 }
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
                         return Ok(text);
                     }
-                    text.push(ch);
                 }
                 '\\' => {
+                    if self.input[self.pos..].starts_with("textbackslash{}") {
+                        self.pos += "textbackslash{}".len();
+                        text.push('\\');
+                        continue;
+                    }
                     let escaped = self.next().ok_or_else(|| error("trailing escape"))?;
                     anyhow::ensure!(
-                        ['{', '}', '\\', '&', '%', '$', '_', '#', ' '].contains(&escaped),
+                        ['{', '}', '&', '%', '$', '_', '#', ' '].contains(&escaped),
                         error("unsupported escape in text argument")
                     );
                     text.push(escaped);
                 }
-                _ => text.push(ch),
+                _ => {
+                    anyhow::ensure!(
+                        !ch.is_control(),
+                        error("multiline/control text arguments are unsupported")
+                    );
+                    text.push(ch);
+                }
             }
         }
         Err(error("unclosed braced argument"))
@@ -103,8 +112,11 @@ impl<'a> Parser<'a> {
         }
         if name.is_empty() {
             let symbol = self.next().ok_or_else(|| error("trailing backslash"))?;
+            if [',', ';', '!'].contains(&symbol) {
+                return self.counted(Node::Run(String::new(), false));
+            }
             anyhow::ensure!(
-                ['{', '}', '_', '%', '$', '#', '&', '\\', ' '].contains(&symbol),
+                ['{', '}', '_', '%', '$', '#', '&', ' '].contains(&symbol),
                 error("unsupported escaped symbol")
             );
             return self.counted(Node::Run(symbol.to_string(), false));
@@ -144,7 +156,7 @@ impl<'a> Parser<'a> {
                     let (nodes, end) = index.expression(depth + 1, false)?;
                     anyhow::ensure!(end == End::Input, error("invalid root index"));
                     self.nodes += index.nodes;
-                    Some(nodes)
+                    (!nodes.is_empty()).then_some(nodes)
                 } else {
                     None
                 };
@@ -188,27 +200,9 @@ impl<'a> Parser<'a> {
                 );
                 self.counted(Node::Matrix(environment, rows))
             }
-            "left" | "right" => {
-                self.ws();
-                let delimiter = if self.peek() == Some('\\') {
-                    self.next();
-                    self.next().ok_or_else(|| error("missing delimiter"))?
-                } else {
-                    self.next().ok_or_else(|| error("missing delimiter"))?
-                };
-                anyhow::ensure!(
-                    ['(', ')', '[', ']', '{', '}', '|', '.'].contains(&delimiter),
-                    error("unsupported delimiter")
-                );
-                self.counted(Node::Run(
-                    if delimiter == '.' {
-                        String::new()
-                    } else {
-                        delimiter.to_string()
-                    },
-                    false,
-                ))
-            }
+            "left" | "right" => Err(error(
+                "scalable left/right delimiters are unsupported; use literal parentheses or a bracketed matrix",
+            )),
             "," | ";" | "!" | "quad" | "qquad" => self.counted(Node::Run(String::new(), false)),
             _ => {
                 let symbol = match name.as_str() {
@@ -216,8 +210,8 @@ impl<'a> Parser<'a> {
                     "beta" => "β",
                     "gamma" => "γ",
                     "delta" => "δ",
-                    "epsilon" => "ε",
-                    "varepsilon" => "ϵ",
+                    "epsilon" => "ϵ",
+                    "varepsilon" => "ε",
                     "zeta" => "ζ",
                     "eta" => "η",
                     "theta" => "θ",
@@ -277,6 +271,7 @@ impl<'a> Parser<'a> {
                     "forall" => "∀",
                     "exists" => "∃",
                     "emptyset" => "∅",
+                    "backslash" => "\\",
                     "sin" => "sin",
                     "cos" => "cos",
                     "tan" => "tan",
@@ -352,7 +347,10 @@ impl<'a> Parser<'a> {
                 out.push(self.counted(Node::Script(base, sub, sup))?);
                 continue;
             }
-            out.push(self.atom(depth)?);
+            let atom = self.atom(depth)?;
+            if !matches!(&atom,Node::Run(text,_)if text.is_empty()) {
+                out.push(atom);
+            }
         }
     }
 }
@@ -391,7 +389,11 @@ fn parse(input: &str) -> Result<Vec<Node>> {
 fn escaped_text(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
-        if ['{', '}', '\\', '&', '%', '$', '_', '#'].contains(&ch) {
+        if ch == '\\' {
+            out.push_str("\\textbackslash{}");
+            continue;
+        }
+        if ['{', '}', '&', '%', '$', '_', '#'].contains(&ch) {
             out.push('\\');
         }
         out.push(ch);
@@ -410,7 +412,11 @@ fn canonical_nodes(nodes: &[Node]) -> String {
             out.push_str(&format!("\\text{{{}}}", escaped_text(&normal)));
             normal.clear();
         }
-        out.push_str(&canonical_node(node));
+        if let Node::Group(body) = node {
+            out.push_str(&canonical_nodes(body));
+        } else {
+            out.push_str(&canonical_node(node));
+        }
     }
     if !normal.is_empty() {
         out.push_str(&format!("\\text{{{}}}", escaped_text(&normal)));
@@ -423,7 +429,15 @@ fn canonical_node(node: &Node) -> String {
             if *normal {
                 format!("\\text{{{}}}", escaped_text(text))
             } else {
-                escaped_text(text)
+                text.chars()
+                    .map(|c| {
+                        if c == '\\' {
+                            "\\backslash ".into()
+                        } else {
+                            escaped_text(&c.to_string())
+                        }
+                    })
+                    .collect()
             }
         }
         Node::Group(body) => format!("{{{}}}", canonical_nodes(body)),
@@ -550,7 +564,9 @@ pub fn convert(input: &str) -> Result<Rendered> {
 fn math(n: roxmltree::Node<'_, '_>, name: &str) -> bool {
     n.tag_name().namespace() == Some(M) && n.tag_name().name() == name
 }
-fn children(n: roxmltree::Node<'_, '_>) -> impl Iterator<Item = roxmltree::Node<'_, '_>> {
+fn children<'a, 'input>(
+    n: roxmltree::Node<'a, 'input>,
+) -> impl Iterator<Item = roxmltree::Node<'a, 'input>> {
     n.children().filter(|n| n.is_element())
 }
 fn part<'a, 'b>(n: roxmltree::Node<'a, 'b>, name: &str) -> Result<roxmltree::Node<'a, 'b>> {
@@ -563,9 +579,17 @@ fn part<'a, 'b>(n: roxmltree::Node<'a, 'b>, name: &str) -> Result<roxmltree::Nod
 }
 fn from_nodes(n: roxmltree::Node<'_, '_>, depth: usize, count: &mut usize) -> Result<Vec<Node>> {
     children(n)
-        .filter(|n| !matches!(n.tag_name().name(), "argPr" | "ctrlPr"))
+        .filter(|n| !math(*n, "argPr") && !math(*n, "ctrlPr"))
         .map(|n| from_node(n, depth + 1, count))
         .collect()
+}
+fn only(n: roxmltree::Node<'_, '_>, allowed: &[&str]) -> Result<()> {
+    anyhow::ensure!(
+        children(n).all(|child| child.tag_name().namespace() == Some(M)
+            && (allowed.contains(&child.tag_name().name()) || math(child, "ctrlPr"))),
+        error("unsupported Word equation structure")
+    );
+    Ok(())
 }
 fn from_node(n: roxmltree::Node<'_, '_>, depth: usize, count: &mut usize) -> Result<Node> {
     *count += 1;
@@ -594,8 +618,12 @@ fn from_node(n: roxmltree::Node<'_, '_>, depth: usize, count: &mut usize) -> Res
             });
             Ok(Node::Run(text, normal))
         }
-        "box" => Ok(Node::Group(from_nodes(part(n, "e")?, depth, count)?)),
+        "box" => {
+            only(n, &["boxPr", "e"])?;
+            Ok(Node::Group(from_nodes(part(n, "e")?, depth, count)?))
+        }
         "f" => {
+            only(n, &["fPr", "num", "den"])?;
             if let Some(style) = n.descendants().find(|n| math(*n, "type")) {
                 anyhow::ensure!(
                     style.attribute((M, "val")).is_none_or(|v| v == "bar"),
@@ -608,13 +636,38 @@ fn from_node(n: roxmltree::Node<'_, '_>, depth: usize, count: &mut usize) -> Res
             ))
         }
         "rad" => {
+            only(n, &["radPr", "deg", "e"])?;
             let degree = from_nodes(part(n, "deg")?, depth, count)?;
+            if children(n)
+                .find(|child| math(*child, "radPr"))
+                .is_some_and(|properties| {
+                    children(properties).any(|child| {
+                        math(child, "degHide")
+                            && child
+                                .attribute((M, "val"))
+                                .is_none_or(|v| ["1", "true", "on"].contains(&v))
+                    })
+                })
+            {
+                anyhow::ensure!(
+                    degree.is_empty(),
+                    error("a hidden nonempty root degree is unsupported")
+                );
+            }
             Ok(Node::Root(
                 (!degree.is_empty()).then_some(degree),
                 from_nodes(part(n, "e")?, depth, count)?,
             ))
         }
         "sSub" | "sSup" | "sSubSup" => {
+            only(
+                n,
+                match n.tag_name().name() {
+                    "sSub" => &["sSubPr", "e", "sub"],
+                    "sSup" => &["sSupPr", "e", "sup"],
+                    _ => &["sSubSupPr", "e", "sub", "sup"],
+                },
+            )?;
             let base = from_nodes(part(n, "e")?, depth, count)?;
             let base = if base.len() == 1 {
                 base.into_iter()
@@ -660,6 +713,7 @@ fn from_node(n: roxmltree::Node<'_, '_>, depth: usize, count: &mut usize) -> Res
             Ok(Node::Matrix("matrix".into(), rows))
         }
         "d" => {
+            only(n, &["dPr", "e"])?;
             let properties = part(n, "dPr")?;
             let begin = part(properties, "begChr")?
                 .attribute((M, "val"))
@@ -698,7 +752,7 @@ pub fn from_omml(node: roxmltree::Node<'_, '_>) -> Result<String> {
     anyhow::ensure!(!nodes.is_empty(), error("empty Office Math equation"));
     let result = canonical_nodes(&nodes);
     anyhow::ensure!(
-        result.len() <= 16000,
+        !result.trim().is_empty() && result.len() <= 16000,
         error("Word equation source exceeds 16,000 bytes")
     );
     Ok(result)

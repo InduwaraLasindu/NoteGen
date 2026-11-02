@@ -32,9 +32,9 @@ path = "rust/tests/engine.rs"
 
 [dev-dependencies]
 imageproc = { version = "0.25", default-features = false }
-ttf-parser = "0.25"
 
 [dependencies]
+ttf-parser = "0.25"
 ab_glyph = "0.2"
 anyhow = "1"
 thiserror = "2"
@@ -42,6 +42,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 hex = "0.4"
+zeroize = "=1.9.1"
 sysinfo = "0.37"
 csv = "1"
 strsim = "0.11"
@@ -62,6 +63,9 @@ pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfi
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.37", optional = true, default-features = false, features = ["default_fonts", "glow", "wgpu", "x11", "wayland", "persistence", "system_fonts", "links", "clipboard"] }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 
 # Keep CI and local development within modest disk budgets. Assertions and
 # overflow checks remain enabled; production optimization is unchanged.
@@ -158,4 +162,36 @@ path = "rust/tests/document_tools.rs"
 [[test]]
 name = "searchable_pdf"
 path = "rust/tests/searchable_pdf.rs"
+
+[[test]]
+name = "watch"
+path = "rust/tests/watch.rs"
+
+[[test]]
+name = "cleanup"
+path = "rust/tests/cleanup.rs"
+
+[[test]]
+name = "languages"
+path = "rust/tests/languages.rs"
+
+[[test]]
+name = "localization"
+path = "rust/tests/localization.rs"
+
+[[test]]
+name = "equations"
+path = "rust/tests/equations.rs"
+
+[[test]]
+name = "profile_suggestions"
+path = "rust/tests/profile_suggestions.rs"
+
+[[test]]
+name = "credentials"
+path = "rust/tests/credentials.rs"
+
+[[test]]
+name = "hardware_trials"
+path = "rust/tests/hardware_trials.rs"
 

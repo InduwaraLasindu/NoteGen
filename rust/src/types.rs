@@ -121,6 +121,7 @@ pub struct Settings {
     pub allow_cpu_offload: bool,
     pub require_acceleration: bool,
     pub tesseract: PathBuf,
+    pub tessdata_dir: PathBuf,
     pub pdfium: PathBuf,
     pub server: PathBuf,
     pub models_dir: PathBuf,
@@ -186,6 +187,7 @@ impl Default for Settings {
                 "tesseract".into()
             },
             pdfium: "runtime".into(),
+            tessdata_dir: PathBuf::new(),
             server: crate::setup::saved_runtime(std::path::Path::new("runtime"))
                 .map(|r| r.server)
                 .unwrap_or_else(|| "runtime/llama-server.exe".into()),
@@ -224,6 +226,7 @@ impl Default for ExperienceOptions {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Appearance {
+    pub locale: crate::localization::Locale,
     pub dark: bool,
     pub accent: [u8; 3],
     pub scale: f32,
@@ -246,6 +249,7 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
+            locale: crate::localization::Locale::En,
             dark: true,
             accent: [100, 226, 204],
             scale: 1.0,

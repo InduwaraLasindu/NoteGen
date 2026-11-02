@@ -267,6 +267,9 @@ pub struct Desktop {
     completed_at: Option<Instant>,
 }
 impl Desktop {
+    fn tr<'a>(&self, key: &'a str) -> &'a str {
+        crate::localization::text(self.state.settings.ui.locale, key)
+    }
     pub fn new(state: Workspace) -> Self {
         let (tx, rx) = mpsc::channel();
         let draft = state.settings.clone();
@@ -718,9 +721,9 @@ impl Desktop {
                 ui.label(RichText::new("NoteGen").size(23.).strong());
                 ui.label(RichText::new("LOCAL STUDIO").size(10.).color(self.muted()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                    if ui.button("Projects & tools").clicked(){self.tools_open(0);}
-                    if ui.button("Settings").clicked() { self.experience.open = true; }
-                    if ui.button("Advanced").clicked(){
+                    if ui.button(self.tr("projects_tools")).clicked(){self.tools_open(0);}
+                    if ui.button(self.tr("settings")).clicked() { self.experience.open = true; }
+                    if ui.button(self.tr("advanced")).clicked(){
                         self.advanced_open();
                     }
                     if self.installed.is_empty() && ui.add_enabled(self.worker.is_none() && self.hardware.is_some(),egui::Button::new(RichText::new("Install AI").color(self.accent_text())).fill(self.accent())).on_hover_text("Download and verify the recommended local runtime and AI models. Model names and sizes are shown below.").clicked() {
@@ -767,7 +770,7 @@ impl Desktop {
                 ui.add_space(20.);
                 ui.horizontal(|ui|{
                     let ready=self.state.next().is_some() && self.worker.is_none();
-                    let convert=ui.add_enabled(ready,egui::Button::new(RichText::new("Convert to Word   →").strong().color(self.accent_text())).fill(self.accent()).min_size(Vec2::new(220.,48.)));
+                    let convert=ui.add_enabled(ready,egui::Button::new(RichText::new(self.tr("start_conversion")).strong().color(self.accent_text())).fill(self.accent()).min_size(Vec2::new(220.,48.)));
                     self.hover_ring(ui,&convert,"convert-hover");
                     if convert.clicked(){
                         self.batch=None;
@@ -775,17 +778,17 @@ impl Desktop {
                         self.running_queue=true;
                         self.start_next(&ctx);
                     }
-                    if ui.add_enabled(ready,egui::Button::new("One-page trial")).on_hover_text("Convert the first selected page of the next pending input. Inspect its quality, time and review result before running the queue.").clicked(){self.one_page_trial(&ctx);}
+                    if ui.add_enabled(ready,egui::Button::new(self.tr("one_page_trial"))).on_hover_text("Convert the first selected page of the next pending input. Inspect its quality, time and review result before running the queue.").clicked(){self.one_page_trial(&ctx);}
                     if self.active.is_some(){
                         let paused=self.paused();
                         if ui.button(if paused{
-                            "Resume"}
+                            self.tr("resume")}
                         else{
-                            "Pause"}
+                            self.tr("pause")}
                         ).clicked(){
                             self.control.paused.store(!paused,Ordering::Relaxed);
                         }
-                        if ui.button("Cancel").clicked(){
+                        if ui.button(self.tr("cancel")).clicked(){
                             self.running_queue=false;
                             self.control.cancelled.store(true,Ordering::Relaxed);
                         }

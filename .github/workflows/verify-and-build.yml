@@ -70,6 +70,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/Test-Font.ps1
+      - name: Native Windows credential store synthetic round-trip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach($pass in 1..2){
+            cargo test --locked --all-features --lib credentials::windows_tests::isolated_native_store_round_trip_and_cleanup -- --ignored --exact
+            if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          }
       - name: Actual native desktop and review screenshots
         if: runner.os == 'Linux'
         shell: bash

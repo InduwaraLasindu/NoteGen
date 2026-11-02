@@ -64,7 +64,7 @@ try {
         $relative = [IO.Path]::GetRelativePath($binaryRoot, $binary.FullName).Replace('\', '/')
         @{ name = $relative; digest = @{ sha256 = (Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } }
     })
-    $pins = @(foreach ($relative in @('Cargo.lock', 'rust/catalog.json', 'rust/downloads.json', 'rust/runtime-downloads.json')) {
+    $pins = @(foreach ($relative in @('Cargo.lock', 'rust/catalog.json', 'rust/downloads.json', 'rust/runtime-downloads.json', 'rust/languages.json')) {
         @{ name = $relative; sha256 = (Get-FileHash -LiteralPath $relative -Algorithm SHA256).Hash.ToLowerInvariant() }
     })
     $rustVersion = (& rustc --version) -join ''

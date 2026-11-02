@@ -178,6 +178,15 @@ fn download(dir: &Path, pack: &LanguagePack, c: &Control, log: &Activity) -> Res
     if healthy(&destination, pack, c)? {
         return Ok(());
     }
+    if let Ok(metadata) = destination.metadata() {
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() <= 20_000_000,
+            Fault::new(
+                "NG740",
+                "Existing OCR resource is not a regular bounded file; preserve it and choose another resource folder"
+            )
+        );
+    }
     let mut response = reqwest::blocking::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -234,7 +243,16 @@ fn download(dir: &Path, pack: &LanguagePack, c: &Control, log: &Activity) -> Res
         );
         let original = storage::hash_file(&destination, c)?;
         let backup = dir.join(format!("{}.previous-{}", pack.file, &original[..12]));
-        if !backup.exists() {
+        if backup.exists() {
+            plain_path(&backup)?;
+            anyhow::ensure!(
+                backup.is_file() && storage::hash_file(&backup, c)? == original,
+                Fault::new(
+                    "NG740",
+                    "Previous OCR resource backup is incomplete or changed; preserve it before retrying"
+                )
+            );
+        } else {
             let mut source = fs::File::open(&destination)?;
             let mut out = fs::OpenOptions::new()
                 .write(true)
