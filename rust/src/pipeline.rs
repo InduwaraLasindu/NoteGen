@@ -48,12 +48,7 @@ pub fn convert(
         !output.exists(),
         Fault::new("NG401", "Output already exists")
     );
-    anyhow::ensure!(
-        source
-            .extension()
-            .is_some_and(|v| v.eq_ignore_ascii_case("pdf")),
-        Fault::new("NG100", "Choose a PDF input")
-    );
+    crate::inputs::files(source)?;
     let hw = hardware::detect_for(s, c);
     // Printed OCR must not depend on (or scan gigabytes of) unrelated AI assets.
     let installed = if s.preset == Preset::Fast {
@@ -73,7 +68,7 @@ pub fn convert(
         models
     };
     let mut plan = planning::build(&hw, s, &installed)?;
-    let pages = scan::selected_page_count(source, &s.pdfium, &s.page_range)?;
+    let pages = crate::inputs::selected_page_count(source, &s.pdfium, &s.page_range)?;
     let readers = plan.models.len();
     let read_ms = if plan.backend == Backend::Cpu {
         30000
@@ -151,7 +146,7 @@ pub fn convert(
         0,
         "",
     );
-    let input = hash_file(source, c).map_err(|e| {
+    let input = crate::inputs::hash(source, c).map_err(|e| {
         if e.downcast_ref::<Fault>().is_some() {
             e
         } else {
@@ -198,7 +193,7 @@ pub fn convert(
     let mut selected = vec![];
     let mut rendered = vec![];
     // PDFium stays in this one worker. Stage results live on disk instead of a document-sized RAM graph.
-    scan::render_pdf(
+    crate::inputs::render(
         source,
         &s.pdfium,
         &s.page_range,
@@ -246,6 +241,7 @@ pub fn convert(
                 0,
                 "",
             );
+            let preflight = crate::preflight::analyze(&im);
             let im = scan::deskew(scan::orient(im, s, c)?, s.deskew, s.max_pixels);
             let content = match scan::printed(&im, s, c) {
                 Ok(p) => p,
@@ -293,6 +289,15 @@ pub fn convert(
                     .warnings
                     .push("Blur/low detail detected. Verify small text against the source.".into());
             }
+            for observation in preflight.observations {
+                p.content.warnings.push(format!(
+                    "{} {}",
+                    observation.message, observation.suggestion
+                ));
+            }
+            p.content
+                .warnings
+                .extend(crate::preflight::numeric_observations(&p.content));
             p.source_warnings = p.content.warnings.clone();
             atomic_json(&checkpoint, &p)?;
             rendered.push(n);
@@ -320,6 +325,11 @@ pub fn convert(
         settings: s.clone(),
     };
     let project = Project::open(root.clone(), manifest)?;
+    let mut metadata = crate::projects::metadata(&project)?;
+    if metadata.source.is_none() {
+        metadata.source = Some(source.canonicalize()?);
+        crate::projects::save_metadata(&project, &metadata)?;
+    }
     let guidance = crate::assistance::load_guidance(&project)?;
     let context_notes = guidance.notes.join("\n");
     let total = selected.len() * (plan.models.len() + 1) + 1;

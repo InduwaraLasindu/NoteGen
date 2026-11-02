@@ -466,7 +466,7 @@ pub fn export(root: &Path, id: &str, output: &Path, o: &FontOptions, c: &Control
     let chars = p
         .samples
         .iter()
-        .filter(|s| s.glyph)
+        .filter(|s| s.glyph && s.active())
         .filter_map(|s| s.label.chars().next())
         .filter(char::is_ascii_graphic)
         .collect::<BTreeSet<_>>();

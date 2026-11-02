@@ -2575,6 +2575,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror 2.0.21",
+ "tiff",
  "tokio",
  "ttf-parser",
  "unicode-normalization",

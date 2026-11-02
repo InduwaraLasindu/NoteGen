@@ -611,7 +611,7 @@ pub fn page_schema() -> Value {
         "blocks":{"type":"array","items":{"type":"object","additionalProperties":false,
             "required":["kind","text","box","rows","description","interpretation","uncertain"],
             "properties":{
-                "kind":{"type":"string","enum":["text","heading","list","table","figure","equation"]},
+                "kind":{"type":"string","enum":["text","heading","list","table","figure","equation","code","caption","reference"]},
                 "text":{"type":"string"},"box":{"anyOf":[bbox,{"type":"null"}]},
                 "confidence":{"anyOf":[{"type":"number","minimum":0,"maximum":1},{"type":"null"}]},
                 "rows":{"type":"array","items":{"type":"array","items":{"type":"string"}}},

@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use notegen::{hardware, pipeline, planning, runtime, storage::*, types::*, word};
 use std::{fs, path::PathBuf, sync::Arc};
+#[path = "../commands.rs"]
+mod commands;
 #[derive(Parser)]
 #[command(
     name = "notegen-cli",
@@ -20,6 +22,11 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Review, project, evaluation, privacy and export tools.
+    Tools {
+        #[command(subcommand)]
+        command: commands::Action,
+    },
     Doctor,
     /// Check official model, AI runtime and app dependency updates.
     CheckUpdates {
@@ -203,6 +210,7 @@ fn run() -> Result<()> {
         })),
     };
     match args.command {
+        Action::Tools { command } => commands::run(command, &s, &c)?,
         Action::CheckUpdates { output } => {
             let report = notegen::maintenance::check(&s, &c, &log)?;
             if let Some(path) = output {

@@ -62,6 +62,10 @@ jobs:
       - run: cargo clippy --locked --all-features --all-targets -j 2 -- -D warnings
       - name: All Rust tests and real raster-PDF OCR
         run: cargo test --locked --all-features --all-targets -j 2
+      - name: Repeat the complete suite with serial test execution
+        env:
+          RUST_TEST_THREADS: '1'
+        run: cargo test --locked --all-features --all-targets -j 2
       - name: Native Windows TrueType installation and rendering
         if: runner.os == 'Windows'
         shell: pwsh

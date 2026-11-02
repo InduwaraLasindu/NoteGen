@@ -24,3 +24,7 @@ outputs/
 /ai-settings.json
 /updates/
 /user-data/
+/.local-tools/
+/.source-snapshot.json
+/feature-source*.txt
+/feature-source.html

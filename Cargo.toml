@@ -49,6 +49,7 @@ unicode-normalization = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tiff = "0.11.3"
 rayon = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
@@ -101,4 +102,36 @@ path = "rust/tests/studio.rs"
 [[test]]
 name = "experience"
 path = "rust/tests/experience.rs"
+
+[[test]]
+name = "evaluation"
+path = "rust/tests/evaluation.rs"
+
+[[test]]
+name = "exports"
+path = "rust/tests/exports.rs"
+
+[[test]]
+name = "review"
+path = "rust/tests/review.rs"
+
+[[test]]
+name = "inputs"
+path = "rust/tests/inputs.rs"
+
+[[test]]
+name = "projects"
+path = "rust/tests/projects.rs"
+
+[[test]]
+name = "profile_tools"
+path = "rust/tests/profile_tools.rs"
+
+[[test]]
+name = "bundles"
+path = "rust/tests/bundles.rs"
+
+[[test]]
+name = "resources"
+path = "rust/tests/resources.rs"
 

@@ -18,6 +18,21 @@ pub struct Sample {
     pub image: String,
     pub created: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<Quarantine>,
+    /// User-confirmed capture conditions; never guessed from the image.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Quarantine {
+    pub reason: String,
+    pub created: String,
+}
+impl Sample {
+    pub fn active(&self) -> bool {
+        self.quarantine.is_none()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Profile {
@@ -35,11 +50,11 @@ pub fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
-fn folder(root: &Path, id: &str) -> Result<PathBuf> {
+pub(crate) fn folder(root: &Path, id: &str) -> Result<PathBuf> {
     anyhow::ensure!(valid_id(id), Fault::new("NG610", "Invalid writer ID"));
     Ok(root.join(id))
 }
-fn validate(p: &Profile) -> Result<()> {
+pub(crate) fn validate(p: &Profile) -> Result<()> {
     anyhow::ensure!(
         p.schema == 1
             && valid_id(&p.id)
@@ -49,13 +64,26 @@ fn validate(p: &Profile) -> Result<()> {
             && p.samples.len() <= 10000,
         Fault::new("NG610", "Invalid or oversized handwriting profile")
     );
+    let mut seen = std::collections::HashSet::new();
     for s in &p.samples {
         anyhow::ensure!(
             valid_id(&s.id)
+                && seen.insert(&s.id)
                 && s.image == format!("{}.png", s.id)
                 && !s.label.trim().is_empty()
                 && s.label.len() <= 160
-                && (!s.glyph || s.label.chars().count() == 1),
+                && (!s.glyph || s.label.chars().count() == 1)
+                && s.source.len() <= 4000
+                && s.conditions.len() <= 16
+                && s.conditions.iter().all(|v| !v.is_empty()
+                    && v.len() <= 40
+                    && v.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                && s.quarantine
+                    .as_ref()
+                    .is_none_or(|q| !q.reason.trim().is_empty()
+                        && q.reason.len() <= 2000
+                        && q.created.len() <= 100),
             Fault::new("NG610", "Invalid labelled handwriting example")
         );
     }
@@ -277,6 +305,8 @@ pub fn add_example(
         image: filename,
         created: chrono::Utc::now().to_rfc3339(),
         source: source.chars().take(500).collect(),
+        quarantine: None,
+        conditions: vec![],
     });
     p.revision += 1;
     validate(&p)?;
@@ -307,7 +337,18 @@ pub fn delete_example(root: &Path, id: &str, sample_id: &str) -> Result<Profile>
 }
 pub fn digest(root: &Path, id: Option<&str>) -> Result<String> {
     match id {
-        Some(id) => fingerprint(&read(root, id)?),
+        Some(id) => {
+            let p = read(root, id)?;
+            // Quarantined images/labels and administrative revision changes cannot
+            // influence recognition context or its cache identity.
+            fingerprint(&(
+                p.schema,
+                &p.id,
+                &p.name,
+                &p.notes,
+                p.samples.iter().filter(|s| s.active()).collect::<Vec<_>>(),
+            ))
+        }
         None => Ok(String::new()),
     }
 }
@@ -320,13 +361,13 @@ pub struct Reference {
 /// A second image carries real confirmed shapes, not just a textual name.
 pub fn reference(root: &Path, id: &str) -> Result<Option<Reference>> {
     let p = read(root, id)?;
-    if p.samples.is_empty() {
+    if !p.samples.iter().any(Sample::active) {
         return Ok(None);
     }
     let glyphs = p
         .samples
         .iter()
-        .filter(|s| s.glyph)
+        .filter(|s| s.glyph && s.active())
         .filter_map(|s| s.label.chars().next())
         .take(10000)
         .collect::<std::collections::BTreeSet<_>>();
@@ -339,7 +380,7 @@ pub fn reference(root: &Path, id: &str) -> Result<Option<Reference>> {
         .samples
         .iter()
         .rev()
-        .filter(|s| !s.glyph && seen.insert(s.label.clone()))
+        .filter(|s| s.active() && !s.glyph && seen.insert(s.label.clone()))
         .take(8)
         .collect::<Vec<_>>();
     let glyph_rows = glyphs.len().div_ceil(8) as u32;
@@ -397,7 +438,7 @@ pub fn coverage(p: &Profile) -> String {
         .filter(|c| {
             p.samples
                 .iter()
-                .any(|s| s.glyph && s.label == c.to_string())
+                .any(|s| s.active() && s.glyph && s.label == c.to_string())
         })
         .collect()
 }
@@ -405,7 +446,7 @@ pub fn average_glyph(root: &Path, p: &Profile, ch: char) -> Result<GrayImage> {
     let samples = p
         .samples
         .iter()
-        .filter(|s| s.glyph && s.label == ch.to_string())
+        .filter(|s| s.active() && s.glyph && s.label == ch.to_string())
         .rev()
         .take(32)
         .collect::<Vec<_>>();

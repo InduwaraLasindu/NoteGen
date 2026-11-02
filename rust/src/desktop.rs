@@ -35,6 +35,8 @@ pub struct Job {
     pub output: Option<PathBuf>,
     pub project: Option<PathBuf>,
     pub detail: String,
+    #[serde(default)]
+    pub priority: u8,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,9 +57,7 @@ impl Workspace {
         }
     }
     pub fn enqueue(&mut self, path: PathBuf) -> bool {
-        if !path
-            .extension()
-            .is_some_and(|p| p.eq_ignore_ascii_case("pdf"))
+        if !(crate::inputs::supported(&path) || path.is_dir())
             || self.queue.iter().any(|j| {
                 j.input == path && matches!(j.status, JobStatus::Pending | JobStatus::Running)
             })
@@ -70,13 +70,17 @@ impl Workspace {
             output: None,
             project: None,
             detail: String::new(),
+            priority: 0,
         });
         true
     }
     pub fn next(&self) -> Option<usize> {
         self.queue
             .iter()
-            .position(|j| j.status == JobStatus::Pending)
+            .enumerate()
+            .filter(|(_, j)| j.status == JobStatus::Pending)
+            .max_by_key(|(i, j)| (j.priority.min(2), std::cmp::Reverse(*i)))
+            .map(|(i, _)| i)
     }
     pub fn apply(&mut self, raw: &str) -> Result<()> {
         let next: Settings = serde_json::from_str(raw)?;
@@ -99,7 +103,22 @@ pub fn save_review(project: &Project, page: &mut Page, approved: bool) -> Result
     page.content.validate()?;
     page.edited = true;
     page.reviewed = approved;
-    project.save(page)
+    if project.page_path(page.page).exists() {
+        let expected = project.load(page.page)?;
+        crate::review::commit(
+            project,
+            &expected,
+            page,
+            if approved {
+                "Approve page"
+            } else {
+                "Save draft"
+            },
+        )?;
+        Ok(())
+    } else {
+        project.save(page)
+    }
 }
 fn evidence_label(page: &Page) -> String {
     let families = page
@@ -122,6 +141,8 @@ fn evidence_label(page: &Page) -> String {
 mod experience;
 #[path = "studio.rs"]
 mod studio;
+#[path = "workbench.rs"]
+mod workbench;
 
 enum Message {
     Maintenance(Box<std::result::Result<crate::maintenance::Report, String>>),
@@ -142,6 +163,11 @@ struct Review {
     project: Project,
     index: usize,
     page: Page,
+    baseline: Page,
+    zoom: f32,
+    heatmap: bool,
+    issues: Vec<crate::review::Issue>,
+    revision_name: String,
     texture: Option<egui::TextureHandle>,
     selected: usize,
     dirty: bool,
@@ -176,10 +202,16 @@ impl Review {
                 )
             });
         let raw = serde_json::to_string_pretty(&page.content)?;
+        let issues = crate::review::issues(&project).unwrap_or_default();
         Ok(Self {
             project,
             index,
+            baseline: page.clone(),
             page,
+            zoom: 1.,
+            heatmap: true,
+            issues,
+            revision_name: String::new(),
             texture,
             selected: 0,
             dirty: false,
@@ -192,6 +224,7 @@ impl Review {
     }
 }
 pub struct Desktop {
+    workbench: workbench::Workbench,
     studio: studio::Studio,
     experience: experience::Experience,
     pub state: Workspace,
@@ -240,6 +273,7 @@ impl Desktop {
         let raw = serde_json::to_string_pretty(&draft).unwrap_or_default();
         let studio = studio::Studio::new(&state.settings);
         Self {
+            workbench: workbench::Workbench::default(),
             studio,
             experience: experience::Experience::default(),
             state,
@@ -598,7 +632,7 @@ impl Desktop {
                         c.check()?;
                         weights.push((
                             i,
-                            crate::scan::selected_page_count(&path, &s.pdfium, &s.page_range)
+                            crate::inputs::selected_page_count(&path, &s.pdfium, &s.page_range)
                                 .unwrap_or(1),
                         ));
                     }
@@ -617,7 +651,7 @@ impl Desktop {
         if let Some(r) = &mut self.review
             && r.dirty
         {
-            save_review(&r.project, &mut r.page, false)?;
+            r.save(false)?;
             r.dirty = false;
         }
         Ok(())
@@ -680,6 +714,7 @@ impl Desktop {
                 ui.label(RichText::new("NoteGen").size(23.).strong());
                 ui.label(RichText::new("LOCAL STUDIO").size(10.).color(self.muted()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                    if ui.button("Projects & tools").clicked(){self.tools_open(0);}
                     if ui.button("Settings").clicked() { self.experience.open = true; }
                     if ui.button("Advanced").clicked(){
                         self.advanced_open();
@@ -800,6 +835,7 @@ impl Desktop {
         self.settings_ui(&ctx);
         self.review_ui(&ctx);
         self.studio_ui(&ctx);
+        self.workbench_ui(&ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if let Some(delay) = motion::repaint_delay(
             &self.state.settings.ui,
@@ -812,7 +848,7 @@ impl Desktop {
     }
     fn pick_files(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
-            .add_filter("Scanned PDF", &["pdf"])
+            .add_filter("Scans", &["pdf", "png", "jpg", "jpeg", "tif", "tiff"])
             .pick_files()
         {
             for p in paths {
@@ -837,7 +873,11 @@ impl Desktop {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Drop scanned PDFs here").size(19.).strong());
+                        ui.label(
+                            RichText::new("Drop PDFs or scanned images here")
+                                .size(19.)
+                                .strong(),
+                        );
                         ui.add_space(6.);
                         ui.label(
                             RichText::new(
@@ -1074,6 +1114,8 @@ impl Desktop {
         });
         let mut review = None;
         let mut remove = None;
+        let mut move_job = None;
+        let queue_len = self.state.queue.len();
         for (i, j) in self.state.queue.iter_mut().enumerate() {
             ui.push_id(i, |ui| {
                 ui.horizontal(|ui| {
@@ -1085,6 +1127,33 @@ impl Desktop {
                         JobStatus::Cancelled => "−",
                     };
                     ui.label(icon);
+                    if j.status == JobStatus::Pending {
+                        egui::ComboBox::from_id_salt(("priority", i))
+                            .selected_text(["Normal", "High", "Urgent"][j.priority.min(2) as usize])
+                            .show_ui(ui, |ui| {
+                                for (p, title) in ["Normal", "High", "Urgent"].iter().enumerate() {
+                                    ui.selectable_value(&mut j.priority, p as u8, *title);
+                                }
+                            });
+                        if self.worker.is_none()
+                            && i > 0
+                            && ui
+                                .small_button("↑")
+                                .on_hover_text("Move earlier in the queue")
+                                .clicked()
+                        {
+                            move_job = Some((i, i - 1));
+                        }
+                        if self.worker.is_none()
+                            && i + 1 < queue_len
+                            && ui
+                                .small_button("↓")
+                                .on_hover_text("Move later in the queue")
+                                .clicked()
+                        {
+                            move_job = Some((i, i + 1));
+                        }
+                    }
                     ui.label(j.input.file_name().unwrap_or_default().to_string_lossy())
                         .on_hover_text(j.input.display().to_string());
                     if !j.detail.is_empty() {
@@ -1113,6 +1182,10 @@ impl Desktop {
         }
         if let Some(i) = remove {
             self.state.queue.remove(i);
+            self.batch = None;
+        } else if let Some((a, b)) = move_job {
+            self.state.queue.swap(a, b);
+            self.batch = None;
         }
         if let Some(p) = review {
             self.open_review(p, ui.ctx());
@@ -1605,6 +1678,8 @@ impl Desktop {
             }
             );
             ui.separator();
+            self.history_controls(&mut r,ui);
+            self.issue_controls(&mut r,ui);
             ui.horizontal_wrapped(|ui|{
                 ui.toggle_value(&mut r.crop_mode,"Label handwriting / context");
                 if r.crop_mode{ui.small("Drag a tight box around a letter, word or picture.");}
@@ -1620,7 +1695,7 @@ impl Desktop {
                 egui::ScrollArea::both().id_salt("source").max_height(530.).show(&mut cols[0],|ui|{
                     if let Some(texture)=&r.texture {
                         let size=texture.size_vec2();
-                        let width=ui.available_width().max(200.);
+                        let width=ui.available_width().max(200.)*r.zoom;
                         let response=ui.add(egui::Image::new((texture.id(),size)).fit_to_exact_size(Vec2::new(width,width*size.y/size.x)).sense(if r.crop_mode{egui::Sense::drag()}else{egui::Sense::hover()}));
                         let rect=response.rect;
                         if r.crop_mode{
@@ -1634,6 +1709,12 @@ impl Desktop {
                             if response.drag_stopped() && let Some(region)=r.crop.take(){self.prepare_teach(&r,region,ctx);r.crop_start=None;r.crop_mode=false;}
                         }
                         for(i,b)in r.page.content.blocks.iter().enumerate(){
+                            if r.heatmap && r.issues.iter().any(|issue| issue.page==r.page.page && issue.block==i) {
+                                if let Some(b)=&b.bbox {
+                                    let area=egui::Rect::from_min_max(rect.min+Vec2::new(b.left*rect.width(),b.top*rect.height()),rect.min+Vec2::new(b.right*rect.width(),b.bottom*rect.height()));
+                                    ui.painter().rect_filled(area,2,Color32::from_rgba_unmultiplied(255,150,70,45));
+                                }
+                            }
                             if let Some(b)=&b.bbox{
                                 let region=egui::Rect::from_min_max(egui::pos2(rect.left()+b.left*rect.width(),rect.top()+b.top*rect.height()),egui::pos2(rect.left()+b.right*rect.width(),rect.top()+b.bottom*rect.height()));
                                 ui.painter().rect_stroke(region,2,egui::Stroke::new(if i==r.selected{
@@ -1750,7 +1831,7 @@ impl Desktop {
             ui.separator();
             ui.horizontal(|ui|{
                 if ui.button("Save draft").clicked(){
-                    match save_review(&r.project,&mut r.page,false){
+                    match r.save(false){
                         Ok(_)=>{
                             r.dirty=false;
                             self.review_error.clear();
@@ -1758,7 +1839,7 @@ impl Desktop {
                         ,Err(e)=>self.review_error=e.to_string()}
                 }
                 if ui.button("Save & mark reviewed").clicked(){
-                    match save_review(&r.project,&mut r.page,true){
+                    match r.save(true){
                         Ok(_)=>{
                             r.dirty=false;
                             self.review_error.clear();
@@ -1806,7 +1887,7 @@ impl Desktop {
             }));
         }
         if !open && r.dirty {
-            match save_review(&r.project, &mut r.page, false) {
+            match r.save(false) {
                 Ok(()) => {
                     r.dirty = false;
                     self.notice = "Review draft saved".into();

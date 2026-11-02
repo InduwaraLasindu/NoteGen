@@ -245,7 +245,9 @@ impl Project {
             Fault::new("NG500", "Invalid project page list")
         );
         m.settings.validate()?;
-        Ok(Self { root, manifest: m })
+        let project = Self { root, manifest: m };
+        crate::review::recover(&project)?;
+        Ok(project)
     }
     pub fn image(&self, n: usize) -> PathBuf {
         self.root.join(format!("page-{n:05}.png"))

@@ -470,8 +470,18 @@ impl Block {
     }
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
-            ["text", "heading", "list", "table", "figure", "equation"]
-                .contains(&self.kind.as_str()),
+            [
+                "text",
+                "heading",
+                "list",
+                "table",
+                "figure",
+                "equation",
+                "code",
+                "caption",
+                "reference"
+            ]
+            .contains(&self.kind.as_str()),
             Fault::new("NG201", "Unknown block kind")
         );
         anyhow::ensure!(
