@@ -150,7 +150,8 @@ jobs:
         shell: pwsh
         run: |
           Expand-Archive ./dist/NoteGen-Rust-Windows-x64.zip ./build/package-smoke -Force
-          $process=Start-Process ./build/package-smoke/NoteGen/NoteGen.exe -PassThru
+          $state=Join-Path (Get-Location).Path 'build/package-ui-state'
+          $process=Start-Process ./build/package-smoke/NoteGen/NoteGen.exe -ArgumentList @('--data-dir',('"{0}"' -f $state)) -WindowStyle Hidden -PassThru
           Start-Sleep -Seconds 8
           if ($process.HasExited) {throw "Desktop exited: $($process.ExitCode)"}
           Stop-Process -Id $process.Id

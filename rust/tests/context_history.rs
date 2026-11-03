@@ -294,6 +294,13 @@ fn invalid_region_requests_and_empty_reader_output_are_rejected() {
 }
 #[test]
 fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() {
+    assert_targeted_reader_request(false);
+}
+#[test]
+fn repaired_line_request_uses_whitened_quad_not_the_old_paragraph_bounds() {
+    assert_targeted_reader_request(true);
+}
+fn assert_targeted_reader_request(repaired_line: bool) {
     use base64::Engine;
     use std::{
         io::{Read, Write},
@@ -314,6 +321,27 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     }
     source.save(p.image(1)).unwrap();
     let original_checkpoint = fs::read(p.page_path(1)).unwrap();
+    if repaired_line {
+        use notegen::{
+            geometry::{Point, Quad},
+            geometry_repair,
+        };
+        geometry_repair::repair_lines(
+            p,
+            &p.load(1).unwrap(),
+            0,
+            &[Quad {
+                points: [
+                    Point { x: 0.25, y: 0.30 },
+                    Point { x: 0.75, y: 0.25 },
+                    Point { x: 0.75, y: 0.45 },
+                    Point { x: 0.25, y: 0.50 },
+                ],
+            }],
+            &Control::default(),
+        )
+        .unwrap();
+    }
     let unused_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     unused_listener.set_nonblocking(true).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -490,13 +518,31 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
         context: "User crop topic".into(),
         task: "handwriting".into(),
     };
-    let result = pipeline::reread_region(
-        p,
-        &request,
-        &settings,
-        &Control::default(),
-        &Activity::default(),
-    );
+    let result = if repaired_line {
+        pipeline::reread_line(
+            p,
+            &pipeline::LineReadRequest {
+                page: 1,
+                block: 0,
+                ordinal: 0,
+                reader_id: request.reader.clone(),
+                task: request.task.clone(),
+                image_edge: request.image_edge,
+                context: request.context.clone(),
+            },
+            &settings,
+            &Control::default(),
+            &Activity::default(),
+        )
+    } else {
+        pipeline::reread_region(
+            p,
+            &request,
+            &settings,
+            &Control::default(),
+            &Activity::default(),
+        )
+    };
     let (identities, mut completions) = server.finish();
     result.unwrap();
     assert!(identities >= 1);
@@ -519,10 +565,24 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     assert_eq!((image.width(), image.height()), (512, 256));
     assert_eq!(image.get_pixel(64, 64).0, [255, 0, 0]);
     assert_eq!(image.get_pixel(448, 192).0, [0, 255, 0]);
-    assert!(
-        image.pixels().all(|pixel| pixel[2] == 0),
-        "Source outside the requested region reached the reader"
-    );
+    if repaired_line {
+        assert_eq!(image.get_pixel(16, 16).0, [255, 255, 255]);
+        assert!(
+            image.pixels().any(|pixel| pixel.0 == [255, 255, 255]),
+            "Repaired quad was ignored"
+        );
+        assert!(
+            image
+                .pixels()
+                .all(|pixel| pixel[2] <= pixel[0].max(pixel[1]).saturating_add(8)),
+            "Outside source pixels reached the line reader"
+        );
+    } else {
+        assert!(
+            image.pixels().all(|pixel| pixel[2] == 0),
+            "Source outside the requested region reached the reader"
+        );
+    }
     let content = raw["messages"][0]["content"].as_array().unwrap();
     assert_eq!(
         content
@@ -550,4 +610,9 @@ fn exact_region_request_reaches_only_selected_loopback_reader_and_is_undoable() 
     assert_eq!(fs::read(p.page_path(1)).unwrap(), original_checkpoint);
     review::undo(p).unwrap();
     assert!(p.load(1).unwrap().candidates.is_empty());
+    if repaired_line {
+        assert!(p.load(1).unwrap().content.blocks[0].geometry.is_some());
+        review::undo(p).unwrap();
+        assert!(p.load(1).unwrap().content.blocks[0].geometry.is_none());
+    }
 }

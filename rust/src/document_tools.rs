@@ -29,6 +29,9 @@ fn source(page: &Page, index: usize) -> Result<SourceRef> {
         block_fingerprint: fingerprint(b)?,
     })
 }
+fn analysis_page(project: &Project, number: usize, c: &Control) -> Result<Page> {
+    crate::redactions::analysis_page(project, &project.load(number)?, c)
+}
 fn textual(b: &Block) -> bool {
     matches!(b.kind.as_str(), "text" | "heading" | "list")
 }
@@ -87,7 +90,7 @@ pub fn script_hints(
     let mut hints = vec![];
     for n in &project.manifest.pages {
         c.check()?;
-        let page = project.load(*n)?;
+        let page = analysis_page(project, *n, c)?;
         let mut counts = BTreeMap::new();
         for ch in page.content.plain().chars() {
             if let Some(name) = script(ch) {
@@ -126,7 +129,7 @@ pub fn recurring_elements(project: &Project, c: &Control) -> Result<Vec<Recurrin
     let mut count = 0;
     for n in &project.manifest.pages {
         c.check()?;
-        let page = project.load(*n)?;
+        let page = analysis_page(project, *n, c)?;
         for (index, b) in page.content.blocks.iter().enumerate() {
             if !textual(b) || b.text.trim().is_empty() || b.text.len() > 400 {
                 continue;
@@ -295,7 +298,7 @@ pub fn reference_links(project: &Project, c: &Control) -> Result<Vec<ReferenceLi
     let mut total = 0;
     for n in &project.manifest.pages {
         c.check()?;
-        let page = project.load(*n)?;
+        let page = analysis_page(project, *n, c)?;
         for (index, b) in page
             .content
             .blocks
@@ -366,7 +369,7 @@ pub fn consistency_suggestions(
     let mut count = 0;
     for n in &project.manifest.pages {
         c.check()?;
-        let page = project.load(*n)?;
+        let page = analysis_page(project, *n, c)?;
         for (index, b) in page.content.blocks.iter().enumerate() {
             let text = b.plain();
             let origin = source(&page, index)?;
@@ -546,9 +549,12 @@ fn notation_candidates(
 pub fn technical_checks(project: &Project, c: &Control) -> Result<Vec<TechnicalIssue>> {
     let mut issues = vec![];
     let incomplete = Regex::new(r"[\^_]\s*(?:$|\{\s*\})")?;
+    let chemical_index = Regex::new(
+        r"(?:H|C|N|O|S|P|F|Cl|Na|K|Ca|Mg|Al|Fe|Cu|Zn|Ag|Br|I|Li|Mn|Cr|Co|Ni|Si)[_0-9₀-₉]",
+    )?;
     for n in &project.manifest.pages {
         c.check()?;
-        let page = project.load(*n)?;
+        let page = analysis_page(project, *n, c)?;
         let candidates = notation_candidates(&page, c)?;
         for (index, b) in page.content.blocks.iter().enumerate() {
             c.check()?;
@@ -587,6 +593,21 @@ pub fn technical_checks(project: &Project, c: &Control) -> Result<Vec<TechnicalI
             }
             if incomplete.is_match(&text) {
                 issues.push(TechnicalIssue{code:"incomplete_script_marker".into(),source:source(&page,index)?,message:"A superscript/subscript marker appears empty. Review the source; no missing exponent, charge or chemical index is invented.".into(),reader_evidence:vec![]});
+            }
+            if b.kind == "equation"
+                && text.len() <= 4096
+                && chemical_index.is_match(&text)
+                && (!text.contains('=') || text.contains("=>"))
+            {
+                let reaction = text.contains("->") || text.contains(['→', '⇌', '⇋']);
+                let check = if reaction {
+                    crate::chemistry::reaction(&text).and_then(|report| { anyhow::ensure!(report.balanced, Fault::new("NG400","Element counts or explicit ionic charges do not balance across this reaction"));Ok(()) })
+                } else {
+                    crate::chemistry::formula(&text).map(|_| ())
+                };
+                if let Err(error) = check {
+                    issues.push(TechnicalIssue {code:"chemical_notation_review".into(),source:source(&page,index)?,message:format!("Possible chemical notation: {error}. Compare symbols, indices, coefficients and charges with the source. No text was changed."),reader_evidence:vec![]});
+                }
             }
             if let Some(region) = &b.bbox {
                 let normalized = normalized_notation(&text);

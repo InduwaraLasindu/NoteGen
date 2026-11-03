@@ -183,6 +183,76 @@ fn native_searchable_export_has_source_pages_unicode_embedded_font_and_grounded_
     assert_eq!(rendered.get_pixel(20, 20), f.image.get_pixel(20, 20));
     assert_eq!(rendered.get_pixel(40, 30), f.image.get_pixel(40, 30));
 }
+
+#[test]
+fn native_redacted_pdf_contains_only_masked_rasters_and_no_covered_text_layer() {
+    use notegen::{
+        redactions::{self, MaskSpec, Reason},
+        review,
+    };
+    let f = fixture();
+    let before = f.project.load(1).unwrap();
+    let original_png = fs::read(f.project.image(1)).unwrap();
+    let preview = redactions::preview_confirmation(
+        &f.project,
+        &before,
+        &[MaskSpec {
+            region: BoxRect {
+                left: 0.05,
+                top: 0.05,
+                right: 0.95,
+                bottom: 0.3,
+            },
+            reason: Reason::PersonalInformation,
+        }],
+        &Control::default(),
+    )
+    .unwrap();
+    let mut after = before.clone();
+    after.confirmed_redactions = redactions::confirm(
+        &f.project,
+        &before,
+        &preview,
+        &preview.token,
+        &[0],
+        &Control::default(),
+    )
+    .unwrap();
+    review::commit(&f.project, &before, &after, "Confirm source cover").unwrap();
+    searchable_pdf::export(&f.project, &f.output, &options(), &Control::default()).unwrap();
+    let engine = pdfium();
+    let document = engine.load_pdf_from_file(&f.output, None).unwrap();
+    let page = document.pages().get(0).unwrap();
+    let text = page.text().unwrap().all();
+    assert!(
+        !text.contains("1250") && !text.contains("Search 1"),
+        "{text}"
+    );
+    assert!(text.contains("[redacted]"), "{text}");
+    let mut image_count = 0;
+    for object in page.objects().iter() {
+        if let Some(image) = object.as_image_object() {
+            image_count += 1;
+            let actual = image.get_raw_image().unwrap().to_rgb8();
+            assert_eq!(actual[(35, 30)], image::Rgb([0, 0, 0]));
+            assert_eq!(actual[(120, 160)], f.image[(120, 160)]);
+            assert_eq!(actual[(5, 5)], f.image[(5, 5)]);
+        }
+    }
+    assert_eq!(image_count, 1);
+    assert!(
+        document
+            .pages()
+            .get(1)
+            .unwrap()
+            .text()
+            .unwrap()
+            .all()
+            .contains("2250")
+    );
+    assert_eq!(fs::read(f.project.image(1)).unwrap(), original_png);
+    assert!(f.project.load(1).unwrap().content.plain().contains("1250"));
+}
 #[test]
 fn uncertainty_annotations_are_visible_metadata_and_preserve_the_source_image() {
     let f = fixture();

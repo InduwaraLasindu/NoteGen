@@ -366,6 +366,7 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
     for (index, n) in project.manifest.pages.iter().enumerate() {
         c.check()?;
         let page = project.load(*n)?;
+        crate::geometry::verify_metadata_source(project, &page, c)?;
         crate::roundtrip::record_page(&mut baseline, &page);
         if index > 0 && project.manifest.settings.keep_page_breaks {
             body.write_all(b"<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>")?;

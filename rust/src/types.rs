@@ -265,6 +265,7 @@ impl UpdateChannel {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Appearance {
+    pub shortcuts: crate::shortcuts::Bindings,
     pub locale: crate::localization::Locale,
     pub dark: bool,
     pub accent: [u8; 3],
@@ -288,6 +289,7 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
+            shortcuts: Default::default(),
             locale: crate::localization::Locale::En,
             dark: true,
             accent: [100, 226, 204],
@@ -312,6 +314,7 @@ impl Default for Appearance {
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        self.ui.shortcuts.validate()?;
         let bad = |message| Err(Fault::new("NG102", message).into());
         if self.handwriting && self.preset == Preset::Fast {
             return bad(
@@ -507,6 +510,9 @@ pub struct Block {
     pub interpretation: String,
     pub uncertain: bool,
     pub alternatives: Vec<String>,
+    /// Actual supplied source precision; absent geometry is never reconstructed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<crate::geometry::BlockGeometry>,
 }
 impl Block {
     pub fn text(text: impl Into<String>) -> Self {
@@ -597,6 +603,7 @@ impl Block {
                 }
             }
         }
+        crate::geometry::validate(self)?;
         Ok(())
     }
 }
@@ -661,6 +668,10 @@ pub struct Page {
     /// Confirmed source covers, bound to exact source pixels and kept separate from reader output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub confirmed_redactions: Vec<crate::redactions::ConfirmedMask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_detection: Option<crate::language_routing::BoundScriptObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub region_languages: Vec<crate::language_routing::RegionLanguage>,
 }
 impl Page {
     pub fn validate(&self) -> Result<()> {
@@ -682,6 +693,8 @@ impl Page {
             )
         );
         self.content.validate()?;
+        crate::geometry::validate_page(self)?;
+        crate::language_routing::validate_page(self)?;
         crate::layers::validate_metadata(&self.manual_layers)?;
         crate::redactions::validate_metadata(&self.confirmed_redactions)?;
         anyhow::ensure!(

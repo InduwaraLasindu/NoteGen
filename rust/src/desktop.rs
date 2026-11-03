@@ -48,6 +48,13 @@ pub struct Workspace {
     pub installation_stamp: String,
 }
 impl Workspace {
+    pub fn for_data_dir(root: &Path) -> Self {
+        let mut state = Self::default();
+        state.settings.models_dir = root.join("models");
+        state.settings.shared_model_store = root.join("model-store");
+        state.settings.writer.root = root.join("writers");
+        state
+    }
     pub fn recover(&mut self) {
         for j in &mut self.queue {
             if j.status == JobStatus::Running {
@@ -164,6 +171,9 @@ enum Message {
     Exported(PathBuf),
 }
 struct Review {
+    context: egui::Context,
+    baseline_id: String,
+    fine_heatmap: Option<crate::geometry::HeatmapReport>,
     project: Project,
     index: usize,
     page: Page,
@@ -279,6 +289,7 @@ impl Review {
             .get(index)
             .ok_or_else(|| Fault::new("NG500", "Page does not exist"))?;
         let mut page = project.load(n)?;
+        crate::geometry::verify_metadata_source(&project, &page, &Control::default())?;
         let mut normalized = false;
         let mut masked_source = None;
         if !page.confirmed_redactions.is_empty() {
@@ -333,7 +344,17 @@ impl Review {
             );
         }
         let layer_cache = crate::layers::report(&page)?;
+        let baseline_id = fingerprint(&page)?;
+        let fine_heatmap = Some(crate::geometry::heatmap(
+            &project,
+            &page,
+            project.manifest.settings.review_threshold,
+            &Control::default(),
+        )?);
         Ok(Self {
+            context: ctx.clone(),
+            baseline_id,
+            fine_heatmap,
             project,
             index,
             baseline: page.clone(),
@@ -368,6 +389,8 @@ enum ReviewAction {
     Approve,
     NextIssue,
     Defer,
+    Undo,
+    Redo,
 }
 pub struct Desktop {
     downloads: download_ui::Downloads,
@@ -546,16 +569,23 @@ impl Desktop {
         }
     }
     pub fn from_context(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::from_context_with_data_dir(cc, None)
+    }
+    pub fn from_context_with_data_dir(
+        cc: &eframe::CreationContext<'_>,
+        data_dir: Option<&Path>,
+    ) -> Self {
         let mut state = cc
             .storage
             .and_then(|s| s.get_string("workspace"))
             .and_then(|s| serde_json::from_str::<Workspace>(&s).ok())
             .filter(|s| s.settings.validate().is_ok())
-            .unwrap_or_default();
+            .unwrap_or_else(|| data_dir.map_or_else(Workspace::default, Workspace::for_data_dir));
         state.recover();
         // Installer settings are imported once per setup change, preserving user
         // appearance, queue and document settings during upgrades.
-        if let Ok(profile) = read_json::<Settings>(Path::new("ai-settings.json"), 1_000_000)
+        if data_dir.is_none()
+            && let Ok(profile) = read_json::<Settings>(Path::new("ai-settings.json"), 1_000_000)
             && profile.validate().is_ok()
             && let Ok(stamp) = fingerprint(&(&profile.server, profile.backend, &profile.models_dir))
             && state.installation_stamp != stamp
@@ -975,7 +1005,7 @@ impl Desktop {
         for f in files {
             self.state.enqueue(f.path().to_path_buf());
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+        if self.global_shortcut(&ctx, crate::shortcuts::Action::Import) {
             self.pick_files();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -2051,6 +2081,7 @@ impl Desktop {
                         let width=ui.available_width().max(200.)*r.zoom;
                         let response=ui.add(egui::Image::new((texture.id(),size)).alt_text(format!("Original source scan, page {}. Use the text editor to inspect recognized blocks.",r.page.page)).fit_to_exact_size(Vec2::new(width,width*size.y/size.x)).sense(if r.crop_mode{egui::Sense::drag()}else{egui::Sense::hover()}));
                         let rect=response.rect;
+                        self.paint_source_geometry(&r,ui,rect);
                         if r.crop_mode{
                             if response.drag_started(){r.crop_start=response.interact_pointer_pos();}
                             if (response.dragged() || response.drag_stopped()) && let (Some(start),Some(end))=(r.crop_start,response.interact_pointer_pos()){
@@ -2200,8 +2231,8 @@ impl Desktop {
             ui.separator();
             action=self.review_shortcut_controls(&r,ui);
             ui.horizontal_wrapped(|ui|{
-                if ui.add_enabled(!r.raw_open,egui::Button::new(Self::review_action_label(ctx,ReviewAction::Save))).clicked() && !Self::repeated_review_activation(ctx){action=Some(ReviewAction::Save);}
-                if ui.add_enabled(!r.raw_open,egui::Button::new(Self::review_action_label(ctx,ReviewAction::Approve))).clicked() && !Self::repeated_review_activation(ctx){action=Some(ReviewAction::Approve);}
+                if ui.add_enabled(!r.raw_open,egui::Button::new(self.review_action_label(ctx,ReviewAction::Save))).clicked() && !Self::repeated_review_activation(ctx){action=Some(ReviewAction::Save);}
+                if ui.add_enabled(!r.raw_open,egui::Button::new(self.review_action_label(ctx,ReviewAction::Approve))).clicked() && !Self::repeated_review_activation(ctx){action=Some(ReviewAction::Approve);}
                 ui.checkbox(&mut r.auto_advance,"After approval, open the next page").on_hover_text("Applies only to this open project session. Approval must save successfully before navigation; held keys cannot approve successive pages.");
                 if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Export corrected Word")).clicked(){
                     export=true;
@@ -3364,6 +3395,81 @@ mod acceptance {
             crate::review::timeline(&project).unwrap().revisions.len(),
             1
         );
+    }
+
+    #[test]
+    fn configured_review_shortcut_saves_only_with_the_review_scope_focused() {
+        use egui::accesskit::{Action, ActionRequest, TreeId};
+        let (_dir, project) = two_page_review();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut state = Workspace::default();
+        state.settings.ui.shortcuts.save = "Ctrl+Shift+S".into();
+        state.settings.ui.shortcuts.validate().unwrap();
+        let mut app = Desktop::new(state);
+        assert!(app.open_review(project.root.clone(), &ctx));
+        let viewport = Vec2::new(1400., 1100.);
+        for _ in 0..3 {
+            review_access_tree(&mut app, &ctx, viewport, vec![]);
+        }
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        let (focus, _) = review_button(&tree, "Keyboard review");
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Focus,
+                target_tree: TreeId::ROOT,
+                target_node: focus,
+                data: None,
+            })],
+        );
+        let baseline = fingerprint(&project.load(1).unwrap()).unwrap();
+        let review = app.review.as_mut().unwrap();
+        review.page.content.blocks[0].text = "Saved with the selected binding".into();
+        review.dirty = true;
+        let key = |shift| {
+            let modifiers = egui::Modifiers {
+                ctrl: true,
+                command: true,
+                shift,
+                ..Default::default()
+            };
+            vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key: egui::Key::S,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                },
+            ]
+        };
+        review_access_tree(&mut app, &ctx, viewport, key(false));
+        assert_eq!(fingerprint(&project.load(1).unwrap()).unwrap(), baseline);
+        review_access_tree(&mut app, &ctx, viewport, key(true));
+        assert_eq!(
+            project.load(1).unwrap().content.plain(),
+            "Saved with the selected binding"
+        );
+        assert!(!app.review.as_ref().unwrap().dirty);
+        assert_eq!(
+            crate::review::timeline(&project).unwrap().revisions.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn isolated_data_defaults_keep_private_assets_under_the_selected_root() {
+        let root = Path::new("isolated state folder");
+        let state = Workspace::for_data_dir(root);
+        assert_eq!(state.settings.models_dir, root.join("models"));
+        assert_eq!(state.settings.writer.root, root.join("writers"));
+        assert_eq!(state.settings.shared_model_store, root.join("model-store"));
+        assert!(state.queue.is_empty() && state.recent.is_empty());
+        state.settings.validate().unwrap();
     }
 
     #[test]

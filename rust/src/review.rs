@@ -402,6 +402,9 @@ pub fn commit_pages(p: &Project, pages: &[(Page, Page)], label: &str) -> Result<
             fail("An edit cannot change or duplicate a source page identity")
         );
         let mut after = replacement.clone();
+        for block in &mut after.content.blocks {
+            crate::geometry::clear_structurally_stale(block);
+        }
         after.edited = true;
         changes.push(Change {
             before: expected.clone(),
@@ -437,6 +440,9 @@ pub fn commit_guidance(
             fail("Invalid or duplicate clarification page")
         );
         let mut after = replacement.clone();
+        for block in &mut after.content.blocks {
+            crate::geometry::clear_structurally_stale(block);
+        }
         after.edited = true;
         changes.push(Change {
             before: before.clone(),

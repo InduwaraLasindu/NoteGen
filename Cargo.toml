@@ -229,10 +229,18 @@ name = "writer_history"
 path = "rust/tests/writer_history.rs"
 
 [[test]]
+name = "geometry_language"
+path = "rust/tests/geometry_language.rs"
+
+[[test]]
 name = "model_store"
 path = "rust/tests/model_store.rs"
 
 [[test]]
 name = "canary"
 path = "rust/tests/canary.rs"
+
+[[test]]
+name = "project_lock"
+path = "rust/tests/project_lock.rs"
 

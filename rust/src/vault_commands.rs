@@ -252,7 +252,7 @@ pub fn run(action: Action, settings: &Settings, c: &Control) -> Result<()> {
                         Operation::SavePage {
                             page,
                             expected_fingerprint,
-                            replacement,
+                            mut replacement,
                         } => {
                             let before = project.load(page)?;
                             anyhow::ensure!(
@@ -265,6 +265,11 @@ pub fn run(action: Action, settings: &Settings, c: &Control) -> Result<()> {
                                     "Vault page changed; inspect a fresh page and preserve confirmed source masks"
                                 )
                             );
+                            if !replacement.confirmed_redactions.is_empty() {
+                                *replacement =
+                                    notegen::redactions::effective_page(&project, &replacement, c)?
+                                        .0;
+                            }
                             super::print(notegen::review::commit(
                                 &project,
                                 &before,

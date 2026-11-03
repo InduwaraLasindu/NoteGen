@@ -8,6 +8,10 @@ use std::path::PathBuf;
 
 #[path = "download_commands.rs"]
 mod download_commands;
+#[path = "geometry_commands.rs"]
+mod geometry_commands;
+#[path = "lock_commands.rs"]
+mod lock_commands;
 #[path = "redaction_commands.rs"]
 mod redaction_commands;
 #[path = "vault_commands.rs"]
@@ -33,6 +37,14 @@ impl SupportRequest {
 
 #[derive(Subcommand)]
 pub enum Action {
+    Geometry {
+        #[command(subcommand)]
+        command: geometry_commands::Action,
+    },
+    ProjectLock {
+        #[command(subcommand)]
+        command: lock_commands::Action,
+    },
     /// Encrypted project snapshots and guarded temporary work sessions.
     Vault {
         #[command(subcommand)]
@@ -106,6 +118,11 @@ pub enum Action {
     },
     CredentialStatus,
     ConnectionStatus,
+    ValidateNotation {
+        #[arg(value_parser=["formula","reaction"])]
+        kind: String,
+        text: String,
+    },
     RemoveCredential,
     Watch {
         config: PathBuf,
@@ -546,8 +563,10 @@ fn format(value: &str) -> Result<exports::Format> {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::Geometry { command } => geometry_commands::run(command, s, c),
+        Action::ProjectLock { command } => lock_commands::run(command, s, c),
         Action::Vault { command } => vault_commands::run(command, s, c),
-        Action::Redactions { command } => redaction_commands::run(command, c),
+        Action::Redactions { command } => redaction_commands::run(command, s, c),
         Action::Downloads { command } => download_commands::run(command, c),
         Action::TeachFont {
             writer,
@@ -662,6 +681,13 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
         }
         Action::CredentialStatus => print(notegen::credentials::native().status()?),
         Action::ConnectionStatus => print(notegen::connections::snapshot()),
+        Action::ValidateNotation { kind, text } => {
+            if kind == "reaction" {
+                print(notegen::chemistry::reaction(&text)?)
+            } else {
+                print(notegen::chemistry::formula(&text)?)
+            }
+        }
         Action::RemoveCredential => {
             notegen::credentials::native().delete()?;
             print(notegen::credentials::native().status()?)
@@ -1318,6 +1344,9 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
 
 /// Only commands that receive assets need to acquire the shared download store.
 pub fn needs_download_control(action: &Action) -> bool {
+    if let Action::ProjectLock { command } = action {
+        return lock_commands::needs_download_control(command);
+    }
     matches!(
         action,
         Action::Downloads { .. } | Action::InstallLanguages { .. } | Action::RepairAssets { .. }

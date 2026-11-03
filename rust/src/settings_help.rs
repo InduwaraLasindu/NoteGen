@@ -1,6 +1,42 @@
 //! Searchable setting descriptions shared by the desktop and configuration guide.
 pub const GUIDE: &[(&str, &str)] = &[
     (
+        "ui.shortcuts",
+        "Configurable keyboard actions. Duplicate combinations, text-editing/window controls and Ctrl+Alt international input combinations are rejected. Review actions run only with the keyboard-review button focused; editors keep their normal shortcuts.",
+    ),
+    (
+        "ui.shortcuts.import",
+        "Import scans shortcut; default Ctrl+O. Ignored while a text editor has focus.",
+    ),
+    (
+        "ui.shortcuts.palette",
+        "Open the command palette; default Ctrl+K. Ignored while a text editor has focus.",
+    ),
+    (
+        "ui.shortcuts.save",
+        "Save the current review draft; default Ctrl+S. Requires the review shortcut focus scope.",
+    ),
+    (
+        "ui.shortcuts.approve",
+        "Save and approve the current page; default Ctrl+Enter. Held keys do not approve successive pages.",
+    ),
+    (
+        "ui.shortcuts.next_issue",
+        "Move to the next undeferred review issue; default Ctrl+J.",
+    ),
+    (
+        "ui.shortcuts.defer",
+        "Defer the selected issue for this open review session; default Ctrl+D.",
+    ),
+    (
+        "ui.shortcuts.undo",
+        "Undo a review revision; default Ctrl+Z. Text editors keep their own text undo.",
+    ),
+    (
+        "ui.shortcuts.redo",
+        "Redo a review revision; default Ctrl+Y. Text editors keep their own text redo.",
+    ),
+    (
         "tessdata_dir",
         "Verified optional printed-OCR resource folder. Empty uses bundled/system Tesseract data. Interface language is independent.",
     ),

@@ -340,8 +340,8 @@ fn contextual_re_readings_never_overwrite_confirmed_text_or_add_independent_vote
         blocks: vec![Block::text("AI guessed 155")],
         ..Default::default()
     };
-    pipeline::attach_context_reading(&mut page, &fresh, &model);
-    pipeline::attach_context_reading(&mut page, &fresh, &model);
+    pipeline::attach_context_reading(&mut page, &fresh, &model).unwrap();
+    pipeline::attach_context_reading(&mut page, &fresh, &model).unwrap();
     assert_eq!(page.content.blocks[0].text, "User confirmed 105");
     assert_eq!(page.content.blocks[0].alternatives, vec!["AI guessed 155"]);
     assert_eq!(page.agreement, 0.66);

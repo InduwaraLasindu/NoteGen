@@ -160,6 +160,7 @@ fn read_source(
 ) -> Result<(SourceIdentity, DynamicImage)> {
     c.check()?;
     page.validate()?;
+    let bound_source = crate::geometry::verify_metadata_source(project, page, c)?;
     no_links(&project.root)?;
     let path = project.image(page.page);
     no_links(&path)?;
@@ -198,15 +199,17 @@ fn read_source(
     reader.limits(limits);
     let decoded = reader.decode()?;
     c.check()?;
-    Ok((
-        SourceIdentity {
-            page: page.page,
-            sha256: hex::encode(Sha256::digest(&bytes)),
-            width,
-            height,
-        },
-        decoded,
-    ))
+    let identity = SourceIdentity {
+        page: page.page,
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        width,
+        height,
+    };
+    anyhow::ensure!(
+        bound_source.is_none_or(|source| source == identity),
+        fail("Source changed while reading source-bound metadata")
+    );
+    Ok((identity, decoded))
 }
 pub fn source_identity(project: &Project, page: &Page, c: &Control) -> Result<SourceIdentity> {
     Ok(read_source(project, page, c)?.0)
@@ -223,6 +226,7 @@ pub fn recognition_view(
 /// Visible blocks retain their CANONICAL indices. Never write a compacted
 /// effective page back over the canonical review checkpoint.
 pub fn visible_blocks(project: &Project, page: &Page, c: &Control) -> Result<Vec<(usize, Block)>> {
+    crate::geometry::verify_metadata_source(project, page, c)?;
     if page.confirmed_redactions.is_empty() {
         return Ok(page.content.blocks.iter().cloned().enumerate().collect());
     }
@@ -238,11 +242,33 @@ pub fn visible_blocks(project: &Project, page: &Page, c: &Control) -> Result<Vec
         {
             continue;
         }
-        let mut block = block.clone();
-        block.alternatives.clear();
-        visible.push((index, block));
+        visible.push((index, public_block(block)));
     }
     Ok(visible)
+}
+/// A read-only report view with canonical block indices. This is never a
+/// transaction baseline: hidden blocks become fixed placeholders in place.
+pub fn analysis_page(project: &Project, canonical: &Page, c: &Control) -> Result<Page> {
+    if canonical.confirmed_redactions.is_empty() {
+        crate::geometry::verify_metadata_source(project, canonical, c)?;
+        return Ok(canonical.clone());
+    }
+    let visible = visible_blocks(project, canonical, c)?
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut page = canonical.clone();
+    for (index, block) in page.content.blocks.iter_mut().enumerate() {
+        *block = visible.get(&index).cloned().unwrap_or_else(|| Block {
+            bbox: block.bbox.clone(),
+            ..Block::text("[redacted]")
+        });
+    }
+    page.content.summary.clear();
+    page.content.warnings = vec![EXPORT_NOTICE.into()];
+    page.candidates.clear();
+    page.manual_layers.clear();
+    page.source_warnings.clear();
+    Ok(page)
 }
 fn current(project: &Project, expected: &Page) -> Result<()> {
     no_links(&project.root)?;
@@ -331,6 +357,31 @@ fn intersection(a: &BoxRect, b: &BoxRect) -> Option<BoxRect> {
         bottom: a.bottom.min(b.bottom),
     };
     region.valid().then_some(region)
+}
+// Explicit allowlist: source-bound word geometry can retain covered strings
+// even when the visible block's text is safe. New metadata stays private until
+// it has its own redaction contract.
+fn public_block(block: &Block) -> Block {
+    Block {
+        kind: block.kind.clone(),
+        text: block.text.clone(),
+        bbox: block.bbox.clone(),
+        confidence: block.confidence,
+        rows: block.rows.clone(),
+        merges: block.merges.clone(),
+        header_rows: block.header_rows,
+        description: block.description.clone(),
+        interpretation: block.interpretation.clone(),
+        uncertain: block.uncertain,
+        ..Default::default()
+    }
+}
+fn public_content(content: &PageContent) -> PageContent {
+    PageContent {
+        blocks: content.blocks.iter().map(public_block).collect(),
+        warnings: vec![EXPORT_NOTICE.into()],
+        ..Default::default()
+    }
 }
 fn local_masks(masks: &[ConfirmedMask], view: &BoxRect) -> Result<Vec<BoxRect>> {
     anyhow::ensure!(view.valid(), fail("Invalid redaction source view"));
@@ -425,9 +476,7 @@ pub fn enforce_view(
             report.withheld_blocks += 1;
             continue;
         }
-        let mut visible = block.clone();
-        visible.alternatives.clear();
-        blocks.push(visible);
+        blocks.push(public_block(block));
         report.retained_blocks += 1;
     }
     for region in regions {
@@ -509,12 +558,24 @@ impl ExportProjection {
         if !has_masks(original, c)? {
             return Ok(None);
         }
+        no_links(&original.root.join("project.json"))?;
+        let disk_manifest: Manifest =
+            crate::storage::read_json(&original.root.join("project.json"), 1_000_000)?;
+        anyhow::ensure!(
+            disk_manifest.schema == original.manifest.schema
+                && disk_manifest.input_sha256 == original.manifest.input_sha256
+                && disk_manifest.fingerprint == original.manifest.fingerprint
+                && disk_manifest.pages == original.manifest.pages,
+            fail("Project source identity changed before export")
+        );
         let directory = tempfile::Builder::new()
             .prefix("notegen-redacted-export-")
             .tempdir()?;
         let settings = Settings {
             server: "runtime/llama-server.exe".into(),
             tesseract: "tesseract".into(),
+            shared_model_store: PathBuf::from("models/shared"),
+            project_lock: None,
             ..Default::default()
         };
         let mut project = Project::open(
@@ -537,7 +598,7 @@ impl ExportProjection {
             let private = load_page(original, *number)?;
             let (identity, image) = read_source(original, &private, c)?;
             let masked = mask_view(&image, &identity, &private.confirmed_redactions, None, c)?;
-            let (mut content, _) = enforce_view(
+            let (content, _) = enforce_view(
                 &private.content,
                 &identity,
                 &private.confirmed_redactions,
@@ -550,11 +611,7 @@ impl ExportProjection {
                     && fragments.iter().map(String::len).sum::<usize>() <= 8_000_000,
                 fail("Export known-private text exceeds the bounded leak-check budget")
             );
-            content.summary.clear();
-            content.warnings = vec![EXPORT_NOTICE.into()];
-            for block in &mut content.blocks {
-                block.alternatives.clear();
-            }
+            let content = public_content(&content);
             let public = Page {
                 page: *number,
                 image: format!("page-{number:05}.png"),
@@ -605,7 +662,7 @@ impl ExportProjection {
             project,
             _directory: directory,
             bindings,
-            manifest_digest: fingerprint(&original.manifest)?,
+            manifest_digest: fingerprint(&disk_manifest)?,
         };
         projection.verify_unchanged(original, c)?;
         Ok(Some(projection))
@@ -966,6 +1023,8 @@ pub fn export_share(
     let mut settings = Settings {
         server: "runtime/llama-server.exe".into(),
         tesseract: "tesseract".into(),
+        shared_model_store: PathBuf::from("models/shared"),
+        project_lock: None,
         ..Default::default()
     };
     settings.assistance.ask_questions = false;
@@ -1017,6 +1076,7 @@ pub fn export_share(
             None,
             c,
         )?;
+        let content = public_content(&content);
         let number = page.page;
         let image_path = public.image(number);
         image.save_with_format(&image_path, image::ImageFormat::Png)?;

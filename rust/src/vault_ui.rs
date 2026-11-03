@@ -81,7 +81,21 @@ fn load_page(copy: &WorkCopy, index: usize, c: &Control) -> Result<Loaded> {
         .pages
         .get(index)
         .ok_or_else(|| Fault::new("NG682", "This workspace has no selected page to edit"))?;
-    let page = project.load(number)?;
+    let mut page = project.load(number)?;
+    if !page.confirmed_redactions.is_empty() {
+        let (mut effective, _, _) = crate::redactions::effective_page(&project, &page, c)?;
+        if fingerprint(&effective)? != fingerprint(&page)? {
+            effective.edited = true;
+            effective.reviewed = false;
+            crate::review::commit(
+                &project,
+                &page,
+                &effective,
+                "Apply confirmed mask visibility in encrypted workspace",
+            )?;
+            page = project.load(number)?;
+        }
+    }
     let raw = Zeroizing::new(serde_json::to_string_pretty(&page.content)?);
     anyhow::ensure!(
         raw.chars().count() <= EDITOR_CHARS,
@@ -363,6 +377,9 @@ impl VaultUi {
                 content.validate()?;
                 let mut next = before.clone();
                 next.content = content;
+                if !next.confirmed_redactions.is_empty() {
+                    next = crate::redactions::effective_page(&project, &next, c)?.0;
+                }
                 next.edited = true;
                 next.reviewed = false;
                 crate::review::commit(&project, &before, &next, "Encrypted workspace edit")?;

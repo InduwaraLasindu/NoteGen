@@ -188,6 +188,112 @@ struct PagePreparation<'a> {
     log: &'a Activity,
     total: usize,
     has_readers: bool,
+    prepare_only: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingRecognition {
+    schema: u32,
+    source: crate::redactions::SourceIdentity,
+    phase: u8,
+    page_fingerprint: String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedInput {
+    schema: u32,
+    source: PathBuf,
+    input_sha256: String,
+    fingerprint: String,
+}
+fn pending_recognition(root: &Path, page: usize) -> PathBuf {
+    root.join(format!("page-{page:05}.pending-recognition.json"))
+}
+fn update_pending(project: &Project, page: &Page) -> Result<()> {
+    let path = pending_recognition(&project.root, page.page);
+    crate::watch::no_links(&path)?;
+    if path.exists() {
+        let mut pending: PendingRecognition = read_json(&path, 100_000)?;
+        pending.phase = 1;
+        pending.page_fingerprint = fingerprint(page)?;
+        atomic_json(&path, &pending)?;
+    }
+    Ok(())
+}
+fn pending_reader(project: &Project, page: &Page, id: &str) -> Result<bool> {
+    let path = pending_recognition(&project.root, page.page);
+    crate::watch::no_links(&path)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let pending: PendingRecognition = read_json(&path, 100_000)?;
+    anyhow::ensure!(
+        pending.schema == 1 && pending.phase == 1 && pending.page_fingerprint == fingerprint(page)?,
+        Fault::new(
+            "NG500",
+            "Prepared recognition checkpoint changed; preserve edits and use explicit Review rereading"
+        )
+    );
+    Ok(!page.reviewed
+        && !page
+            .candidates
+            .iter()
+            .any(|candidate| candidate.model_id == id && candidate.view == "full"))
+}
+fn sanitize_masked_readings(
+    page: &mut Page,
+    identity: &crate::redactions::SourceIdentity,
+    c: &Control,
+) -> Result<()> {
+    if page.confirmed_redactions.is_empty() {
+        return Ok(());
+    }
+    page.content = crate::redactions::enforce_view(
+        &page.content,
+        identity,
+        &page.confirmed_redactions,
+        None,
+        c,
+    )?
+    .0;
+    for candidate in &mut page.candidates {
+        // Crop candidates have already been mapped back to full-page boxes.
+        candidate.content = crate::redactions::enforce_view(
+            &candidate.content,
+            identity,
+            &page.confirmed_redactions,
+            None,
+            c,
+        )?
+        .0;
+    }
+    page.source_warnings.clear();
+    page.manual_layers.clear();
+    Ok(())
+}
+fn verify_reader_source(
+    project: &Project,
+    page: &Page,
+    expected: &crate::redactions::SourceIdentity,
+    c: &Control,
+) -> Result<()> {
+    anyhow::ensure!(
+        crate::redactions::source_identity(project, page, c)? == *expected,
+        Fault::new(
+            "NG500",
+            "Source changed during recognition; response was withheld"
+        )
+    );
+    Ok(())
+}
+fn pixel_view(region: &BoxRect, image: &image::DynamicImage) -> BoxRect {
+    let (left, top, right, bottom) = region.pixels(image.width(), image.height());
+    BoxRect {
+        left: left as f32 / image.width() as f32,
+        top: top as f32 / image.height() as f32,
+        right: right as f32 / image.width() as f32,
+        bottom: bottom as f32 / image.height() as f32,
+    }
 }
 impl PagePreparation<'_> {
     fn run(&self, n: usize, ordinal: usize, im: image::DynamicImage, c: &Control) -> Result<bool> {
@@ -197,6 +303,157 @@ impl PagePreparation<'_> {
         let pages = self.total;
         let image = root.join(format!("page-{n:05}.png"));
         let checkpoint = root.join(format!("page-{n:05}.json"));
+        let overlay = root.join(format!("page-{n:05}.edits.json"));
+        let pending_path = pending_recognition(root, n);
+        let saved_path = if fs::symlink_metadata(&overlay).is_ok() {
+            &overlay
+        } else {
+            &checkpoint
+        };
+        if fs::symlink_metadata(saved_path).is_ok() {
+            crate::watch::no_links(saved_path)?;
+        }
+        let saved_page = if saved_path.exists() {
+            crate::watch::no_links(saved_path)?;
+            match read_json::<Page>(saved_path, 32_000_000) {
+                Ok(saved) => Some(saved),
+                Err(error) if pending_path.exists() || saved_path == &overlay => return Err(error),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        if let Some(mut saved) = saved_page {
+            if !saved.confirmed_redactions.is_empty() || pending_path.exists() {
+                anyhow::ensure!(
+                    saved.page == n && saved.image == format!("page-{n:05}.png"),
+                    Fault::new("NG500", "Prepared page identity changed")
+                );
+                let project = Project {
+                    root: root.into(),
+                    manifest: Manifest {
+                        schema: 2,
+                        input_sha256: String::new(),
+                        fingerprint: String::new(),
+                        pages: vec![n],
+                        models: vec![],
+                        settings: s.clone(),
+                    },
+                };
+                let (identity, masked) = crate::redactions::recognition_view(&project, &saved, c)?;
+                if !pending_path.exists() {
+                    return Ok(false);
+                }
+                crate::watch::no_links(&pending_path)?;
+                let mut pending: PendingRecognition = read_json(&pending_path, 100_000)?;
+                anyhow::ensure!(
+                    pending.schema == 1 && pending.source == identity && pending.phase <= 1,
+                    Fault::new(
+                        "NG500",
+                        "Prepared source changed; prepare and confirm masks again"
+                    )
+                );
+                if pending.phase == 1 {
+                    anyhow::ensure!(
+                        !self.prepare_only && pending.page_fingerprint == fingerprint(&saved)?,
+                        Fault::new(
+                            "NG500",
+                            "Prepared page was recognized or manually edited; use Review without overwriting it"
+                        )
+                    );
+                    return Ok(false);
+                }
+                if self.prepare_only {
+                    return Ok(false);
+                }
+                let before_recognition = saved.clone();
+                anyhow::ensure!(
+                    saved.candidates.is_empty()
+                        && saved.content.summary.is_empty()
+                        && saved.content.blocks.iter().all(|block| block.kind == "text"
+                            && block.text == "[redacted]"
+                            && block.bbox.as_ref().is_some_and(|bounds| saved
+                                .confirmed_redactions
+                                .iter()
+                                .any(|mask| mask.region == *bounds))),
+                    Fault::new(
+                        "NG500",
+                        "Prepared page contains manual text; preserve it and use explicit Review rereading"
+                    )
+                );
+                let safe = crate::redactions::recognition_settings(s, &saved.confirmed_redactions)?;
+                let mut content = match scan::printed(&masked, &safe, c) {
+                    Ok(content) => content,
+                    Err(error)
+                        if !self.has_readers
+                            || error
+                                .downcast_ref::<Fault>()
+                                .is_some_and(|fault| fault.code == "NG900") =>
+                    {
+                        return Err(error);
+                    }
+                    Err(_) => PageContent {
+                        warnings: vec![
+                            "Printed OCR unavailable; prepared source retained for AI recognition."
+                                .into(),
+                        ],
+                        ..Default::default()
+                    },
+                };
+                crate::geometry::bind_content(&mut content, &identity)?;
+                let content = crate::redactions::enforce_view(
+                    &content,
+                    &identity,
+                    &saved.confirmed_redactions,
+                    None,
+                    c,
+                )?
+                .0;
+                saved.script_detection = Some(crate::language_routing::bind_detection(
+                    &identity,
+                    scan::detect_script(&masked, &safe, c)?,
+                )?);
+                saved.content = content.clone();
+                saved.source_warnings = content.warnings.clone();
+                saved.candidates = vec![Candidate {
+                    region: None,
+                    model_id: "tesseract".into(),
+                    family: "tesseract".into(),
+                    view: "full".into(),
+                    reliability: if s.handwriting { 0.25 } else { 0.65 },
+                    content,
+                }];
+                saved.reviewed = false;
+                saved.edited = true;
+                saved.agreement = if s.preset == Preset::Fast { 1. } else { 0. };
+                verify_reader_source(&project, &saved, &identity, c)?;
+                let canonical_project = Project::read(root.into())?;
+                crate::review::commit(
+                    &canonical_project,
+                    &before_recognition,
+                    &saved,
+                    "Recognize prepared source",
+                )?;
+                pending.phase = 1;
+                pending.page_fingerprint = fingerprint(&saved)?;
+                atomic_json(&pending_path, &pending)?;
+                return Ok(true);
+            }
+            anyhow::ensure!(
+                !self.prepare_only,
+                Fault::new(
+                    "NG500",
+                    "This source already has recognition; confirm masks in Review or choose a new preparation folder"
+                )
+            );
+        }
+        anyhow::ensure!(
+            !pending_path.exists(),
+            Fault::new(
+                "NG500",
+                "Prepared source checkpoint is missing; recover it before recognition"
+            )
+        );
         log.work(
             Work::new(Phase::Render, ordinal - 1, pages, 1500, true),
             "Preparing source pages",
@@ -220,6 +477,40 @@ impl PagePreparation<'_> {
             return Ok(false);
         }
         c.check()?;
+        if self.prepare_only {
+            // Pixel-only deskew is allowed; OSD/orientation would itself run OCR.
+            let im = scan::deskew(im, s.deskew, s.max_pixels);
+            scan::save_scan(&image, &im)?;
+            let page = Page { page: n, image: format!("page-{n:05}.png"), content: PageContent { warnings: vec!["Source prepared without OCR, orientation detection or AI. Confirm masks, then explicitly recognize this prepared source.".into()], ..Default::default() }, ..Default::default() };
+            let project = Project {
+                root: root.into(),
+                manifest: Manifest {
+                    schema: 2,
+                    input_sha256: String::new(),
+                    fingerprint: String::new(),
+                    pages: vec![n],
+                    models: vec![],
+                    settings: s.clone(),
+                },
+            };
+            let pending = PendingRecognition {
+                schema: 1,
+                source: crate::redactions::source_identity(&project, &page, c)?,
+                phase: 0,
+                page_fingerprint: fingerprint(&page)?,
+            };
+            atomic_json(&pending_path, &pending)?;
+            atomic_json(&checkpoint, &page)?;
+            log.emit(
+                "prepare",
+                "Source page saved without recognition; mask confirmation is available",
+                n,
+                ordinal,
+                pages,
+                "",
+            );
+            return Ok(true);
+        }
         log.emit(
             "render",
             "Preparing source scan and printed OCR",
@@ -229,8 +520,9 @@ impl PagePreparation<'_> {
             "",
         );
         let preflight = crate::preflight::analyze(&im);
-        let im = scan::deskew(scan::orient(im, s, c)?, s.deskew, s.max_pixels);
-        let content = match scan::printed(&im, s, c) {
+        let oriented = scan::orient_with_detection(im, s, c)?;
+        let im = scan::deskew(oriented.image, s.deskew, s.max_pixels);
+        let mut content = match scan::printed(&im, s, c) {
             Ok(p) => p,
             Err(e) => {
                 if e.downcast_ref::<Fault>().is_some_and(|f| f.code == "NG900") {
@@ -254,6 +546,8 @@ impl PagePreparation<'_> {
             }
         };
         scan::save_scan(&image, &im)?;
+        let identity = crate::geometry::source_identity(&image, n, c)?;
+        crate::geometry::bind_content(&mut content, &identity)?;
         let warning = scan::blur_warning(&im);
         let candidate = Candidate {
             region: None,
@@ -269,6 +563,10 @@ impl PagePreparation<'_> {
             content,
             candidates: vec![candidate],
             agreement: if s.preset == Preset::Fast { 1. } else { 0. },
+            script_detection: Some(crate::language_routing::bind_detection(
+                &identity,
+                oriented.detection,
+            )?),
             ..Default::default()
         };
         if warning {
@@ -322,7 +620,16 @@ pub fn convert_with_preparation(
     activity: &Activity,
     preparation_mode: PreparationMode,
 ) -> Result<Completed> {
-    convert_internal(source, output, s, c, activity, preparation_mode, None)
+    convert_internal(
+        source,
+        output,
+        s,
+        c,
+        activity,
+        preparation_mode,
+        None,
+        ConversionIntent::Recognize,
+    )
 }
 /// Explicit normal-workspace opt-in. Retention sessions and hardware trials keep
 /// using the cold conversion API and never supply a pool.
@@ -335,7 +642,75 @@ pub fn convert_with_runtime(
     preparation_mode: PreparationMode,
     pool: &crate::warm_runtime::WarmPool,
 ) -> Result<Completed> {
-    convert_internal(source, output, s, c, activity, preparation_mode, Some(pool))
+    convert_internal(
+        source,
+        output,
+        s,
+        c,
+        activity,
+        preparation_mode,
+        Some(pool),
+        ConversionIntent::Recognize,
+    )
+}
+#[derive(Clone, Copy)]
+enum ConversionIntent<'a> {
+    Recognize,
+    PrepareOnly,
+    Prepared(&'a Project),
+}
+/// Save immutable source rasters and pending checkpoints without OCR, OSD or AI.
+/// `output_hint` selects the ordinary private project folder; no Word is written.
+pub fn prepare_for_review(
+    source: &Path,
+    output_hint: &Path,
+    settings: &Settings,
+    c: &Control,
+    activity: &Activity,
+) -> Result<Project> {
+    Ok(convert_internal(
+        source,
+        output_hint,
+        settings,
+        c,
+        activity,
+        PreparationMode::Sequential,
+        None,
+        ConversionIntent::PrepareOnly,
+    )?
+    .project)
+}
+/// Recognize an explicitly prepared project, rejecting changed input/settings
+/// before any reader. Output may be written elsewhere without moving the project.
+pub fn recognize_prepared(
+    project: &Project,
+    output: &Path,
+    settings: &Settings,
+    c: &Control,
+    activity: &Activity,
+) -> Result<Completed> {
+    crate::watch::no_links(&project.root.join("prepared-input.json"))?;
+    let prepared: PreparedInput = read_json(&project.root.join("prepared-input.json"), 100_000)?;
+    anyhow::ensure!(
+        prepared.schema == 1
+            && prepared.input_sha256 == project.manifest.input_sha256
+            && prepared.fingerprint == project.manifest.fingerprint
+            && crate::inputs::hash(&prepared.source, c)? == prepared.input_sha256,
+        Fault::new(
+            "NG500",
+            "Prepared input changed; prepare the new source and explicitly confirm its masks"
+        )
+    );
+    convert_internal(
+        &prepared.source,
+        output,
+        settings,
+        c,
+        activity,
+        PreparationMode::Sequential,
+        None,
+        ConversionIntent::Prepared(project),
+    )
 }
 #[allow(clippy::too_many_arguments)]
 fn convert_internal(
@@ -346,14 +721,25 @@ fn convert_internal(
     activity: &Activity,
     preparation_mode: PreparationMode,
     pool: Option<&crate::warm_runtime::WarmPool>,
+    intent: ConversionIntent<'_>,
 ) -> Result<Completed> {
+    let prepare_only = matches!(intent, ConversionIntent::PrepareOnly);
     let mut warm_job = pool.map(|pool| pool.begin(c)).transpose()?;
     let begun = Instant::now();
     s.validate()?;
+    let resolved = match intent {
+        ConversionIntent::Prepared(project) => {
+            crate::project_lock::resolve_for_project(project, s, c)?
+        }
+        _ => crate::project_lock::resolve_settings(s, c)?,
+    };
+    let s = resolved.as_ref().map(|value| &value.settings).unwrap_or(s);
     let language_digest = if s.tessdata_dir.as_os_str().is_empty() {
         String::new()
     } else {
-        crate::languages::verify_selection(&s.tessdata_dir, &s.languages, c)?;
+        if !prepare_only {
+            crate::languages::verify_selection(&s.tessdata_dir, &s.languages, c)?;
+        }
         fingerprint(&(s.languages.clone(), include_str!("../languages.json")))?
     };
     let mut effective = s.clone();
@@ -362,7 +748,8 @@ fn convert_internal(
     } else {
         String::new()
     };
-    if s.preset != Preset::Fast
+    if !prepare_only
+        && s.preset != Preset::Fast
         && s.writer.use_examples
         && let Some(id) = s.writer.id.as_deref()
     {
@@ -376,7 +763,9 @@ fn convert_internal(
     crate::inputs::files(source)?;
     let hw = hardware::detect_for(s, c);
     // Printed OCR must not depend on (or scan gigabytes of) unrelated AI assets.
-    let installed = if s.preset == Preset::Fast {
+    let installed = if let Some(locked) = &resolved {
+        locked.models.clone()
+    } else if s.preset == Preset::Fast {
         vec![]
     } else {
         let (models, errors) = runtime::inventory_available(&s.models_dir)?;
@@ -454,7 +843,8 @@ fn convert_internal(
             "Reader files verified",
         );
     }
-    if s.preset != Preset::Fast && (s.handwriting || s.preset != Preset::Balanced) {
+    if !prepare_only && s.preset != Preset::Fast && (s.handwriting || s.preset != Preset::Balanced)
+    {
         anyhow::ensure!(
             !plan.models.is_empty(),
             Fault::new(
@@ -478,9 +868,35 @@ fn convert_internal(
             Fault::new("NG100", format!("Cannot read input PDF: {e}")).into()
         }
     })?;
+    if let Some(locked) = &resolved {
+        anyhow::ensure!(
+            locked.input_sha256 == input,
+            Fault::new(
+                "NG500",
+                "Pinned reader lock belongs to different source bytes"
+            )
+        );
+    }
+    // A restored CAS copy of the exact same files must keep the same prepared
+    // identity. Pin content and effective reader selection, not storage paths.
+    let mut cache_settings = recognition_settings(s);
+    cache_settings.server = PathBuf::new();
+    cache_settings.models_dir = PathBuf::new();
+    cache_settings.shared_model_store = PathBuf::new();
+    cache_settings.project_lock = None;
+    cache_settings.automatic_models = false;
+    cache_settings.backend = plan.backend;
+    cache_settings.model_ids = plan.models.iter().map(|model| model.id.clone()).collect();
+    let runtime_identity =
+        if !s.external_server && plan.models.iter().any(|model| model.endpoint.is_none()) {
+            Some(crate::canary::runtime_identity(&s.server, c)?.fingerprint)
+        } else {
+            None
+        };
     let key = fingerprint(&(
-        2,
-        recognition_settings(s),
+        3,
+        cache_settings,
+        runtime_identity,
         &writer_digest,
         &language_digest,
         (plan.image_edge, plan.context, plan.dpi, plan.image_tokens),
@@ -490,8 +906,6 @@ fn convert_internal(
             .map(|m| {
                 (
                     &m.id,
-                    &m.weights,
-                    &m.projector,
                     fs::metadata(&m.weights).ok().map(|v| v.len()),
                     &m.sha256,
                     &m.endpoint,
@@ -512,6 +926,23 @@ fn convert_internal(
         &key[..10]
     ));
     let mut root = base_root.clone();
+    if let ConversionIntent::Prepared(expected) = intent {
+        anyhow::ensure!(
+            expected.manifest.input_sha256 == input && expected.manifest.fingerprint == key,
+            Fault::new(
+                "NG500",
+                "Prepared recognition settings or reader versions changed; prepare and confirm masks again"
+            )
+        );
+        root = expected.root.canonicalize()?;
+        anyhow::ensure!(
+            !root.join("input-invalidated.json").exists(),
+            Fault::new(
+                "NG500",
+                "Prepared source was invalidated; prepare and confirm a fresh source"
+            )
+        );
+    }
     let mut attempt = 0;
     while root.join("input-invalidated.json").exists() {
         attempt += 1;
@@ -550,6 +981,7 @@ fn convert_internal(
         log: &log,
         total: pages,
         has_readers: !plan.models.is_empty(),
+        prepare_only,
     };
     let mut rendered = vec![];
     let mut prepared = 0;
@@ -598,11 +1030,52 @@ fn convert_internal(
         models: plan.models.iter().map(|m| m.id.clone()).collect(),
         settings: s.clone(),
     };
-    let project = Project::open(root.clone(), manifest)?;
+    let new_project = !root.join("project.json").exists();
+    let mut project = Project::open(root.clone(), manifest)?;
+    if root.join("prepared-input.json").exists() {
+        // Review history is bound to the persisted manifest, including its
+        // original presentation settings, rather than a caller's UI clone.
+        project = Project::read(root.clone())?;
+    }
+    if new_project {
+        crate::project_lock::ensure_conversion_lock(&project, &plan.models, s, c)?;
+    }
     let mut metadata = crate::projects::metadata(&project)?;
     if metadata.source.is_none() {
         metadata.source = Some(source.canonicalize()?);
         crate::projects::save_metadata(&project, &metadata)?;
+    }
+    if prepare_only {
+        atomic_json(
+            &root.join("prepared-input.json"),
+            &PreparedInput {
+                schema: 1,
+                source: source.canonicalize()?,
+                input_sha256: project.manifest.input_sha256.clone(),
+                fingerprint: project.manifest.fingerprint.clone(),
+            },
+        )?;
+        log.emit("prepare", "Source pages prepared without recognition. Confirm masks, then recognize this prepared project.", 0, selected.len(), selected.len(), "");
+        return Ok(Completed {
+            project,
+            output: output.into(),
+            pages: selected.len(),
+            review: selected.len(),
+            seconds: begun.elapsed().as_secs_f64(),
+            plan,
+            preparation: admission,
+        });
+    }
+    let private_project = crate::redactions::has_masks(&project, c)?;
+    if private_project {
+        drop(warm_job.take());
+        anyhow::ensure!(
+            !s.external_server && plan.models.iter().all(|model| model.endpoint.is_none()),
+            Fault::new(
+                "NG200",
+                "Confirmed masks require fresh internally owned readers; external endpoints are withheld"
+            )
+        );
     }
     let guidance = crate::assistance::load_guidance(&project)?;
     let context_notes = guidance.notes.join("\n");
@@ -616,16 +1089,15 @@ fn convert_internal(
             "Preparing local reader",
         );
         c.check()?;
-        let tasks = selected
-            .iter()
-            .copied()
-            .filter(|n| {
-                project
-                    .load(*n)
-                    .ok()
-                    .is_none_or(|p| should_read(&model.id, &model.role, &p, s))
-            })
-            .collect::<Vec<_>>();
+        let mut tasks = vec![];
+        for n in &selected {
+            let page = project.load(*n)?;
+            if pending_reader(&project, &page, &model.id)?
+                || should_read(&model.id, &model.role, &page, s)
+            {
+                tasks.push(*n);
+            }
+        }
         if tasks.is_empty() {
             done += selected.len();
             read_done += selected.len();
@@ -674,7 +1146,11 @@ fn convert_internal(
             );
             continue;
         }
-        let mut active_settings = s.clone();
+        let mut active_settings = if private_project {
+            crate::redactions::private_recognition_settings(s)
+        } else {
+            s.clone()
+        };
         if active_settings.image_edge == 0 {
             active_settings.image_edge = if model.prompt == "lighton" {
                 if model.id == "lighton3-1b" {
@@ -797,6 +1273,7 @@ fn convert_internal(
                 );
                 continue;
             }
+            let before_reading = page.clone();
             let started = Instant::now();
             log.work(
                 Work::new(Phase::Read, read_done, pages * readers, read_ms, true),
@@ -815,8 +1292,9 @@ fn convert_internal(
                 total,
                 "",
             );
-            let im = image::open(project.image(*n))?;
-            if s.experience.live_preview {
+            let (identity, im) = crate::redactions::recognition_view(&project, &page, c)?;
+            sanitize_masked_readings(&mut page, &identity, c)?;
+            if !private_project && s.experience.live_preview {
                 log.preview(crate::telemetry::Preview::source(
                     project.image(*n),
                     *n,
@@ -841,7 +1319,23 @@ fn convert_internal(
             // First-pass readers are blind to one another to avoid artificial agreement.
             let evidence = String::new();
             let mut failure = None;
-            let mut reading = server.read(&im, &evidence, &context, &active_settings, c, &log, *n);
+            let read = |settings: &Settings| {
+                if private_project {
+                    server.read_masked(
+                        &im,
+                        &identity,
+                        &page.confirmed_redactions,
+                        None,
+                        settings,
+                        c,
+                        &log,
+                        *n,
+                    )
+                } else {
+                    server.read(&im, &evidence, &context, settings, c, &log, *n)
+                }
+            };
+            let mut reading = read(&active_settings);
             if reading
                 .as_ref()
                 .is_err_and(|e| e.downcast_ref::<Fault>().is_some_and(|f| f.code == "NG202"))
@@ -856,10 +1350,12 @@ fn convert_internal(
                     total,
                     "NG202",
                 );
-                reading = server.read(&im, &evidence, &context, &reduced, c, &log, *n);
+                reading = read(&reduced);
             }
+            verify_reader_source(&project, &page, &identity, c)?;
             match reading {
-                Ok(content) => {
+                Ok(mut content) => {
+                    crate::geometry::bind_content(&mut content, &identity)?;
                     page.candidates.push(Candidate {
                         region: None,
                         model_id: model.id.clone(),
@@ -898,6 +1394,7 @@ fn convert_internal(
             if s.preset == Preset::Maximum && (agreement < s.agreement_threshold || s.handwriting) {
                 let regions = scan::crop_regions(&content, &im, s);
                 for (i, (bbox, crop)) in regions.into_iter().enumerate() {
+                    let bbox = pixel_view(&bbox, &im);
                     c.check()?;
                     log.work(
                         Work::new(
@@ -923,7 +1420,7 @@ fn convert_internal(
                                 .as_ref()
                                 .is_some_and(|b| consensus::overlap(b, &bbox) > 0.5)
                     });
-                    if s.experience.live_preview {
+                    if !private_project && s.experience.live_preview {
                         log.preview(crate::telemetry::Preview::source(
                             project.image(*n),
                             *n,
@@ -931,7 +1428,29 @@ fn convert_internal(
                             Some(bbox.clone()),
                         ));
                     }
-                    let reading = if table_crop {
+                    let reading = if private_project && table_crop {
+                        server.read_table_masked(
+                            &crop,
+                            &identity,
+                            &page.confirmed_redactions,
+                            Some(&bbox),
+                            &active_settings,
+                            c,
+                            &log,
+                            *n,
+                        )
+                    } else if private_project {
+                        server.read_masked(
+                            &crop,
+                            &identity,
+                            &page.confirmed_redactions,
+                            Some(&bbox),
+                            &active_settings,
+                            c,
+                            &log,
+                            *n,
+                        )
+                    } else if table_crop {
                         server.read_table(&crop, "", &context, &active_settings, c, &log, *n)
                     } else {
                         server.read(&crop, "", &context, &active_settings, c, &log, *n)
@@ -964,14 +1483,7 @@ fn convert_internal(
                         );
                     }
                     if let Ok(mut candidate) = reading {
-                        for block in &mut candidate.blocks {
-                            if let Some(b) = &mut block.bbox {
-                                b.left = bbox.left + b.left * (bbox.right - bbox.left);
-                                b.right = bbox.left + b.right * (bbox.right - bbox.left);
-                                b.top = bbox.top + b.top * (bbox.bottom - bbox.top);
-                                b.bottom = bbox.top + b.bottom * (bbox.bottom - bbox.top);
-                            }
-                        }
+                        crate::geometry::map_content(&mut candidate, &bbox, &identity)?;
                         page.candidates.push(Candidate {
                             region: Some(bbox.clone()),
                             model_id: model.id.clone(),
@@ -999,9 +1511,22 @@ fn convert_internal(
             }
             retain_source_warnings(&page.source_warnings, &mut content);
             page.content = content;
+            verify_reader_source(&project, &page, &identity, c)?;
+            sanitize_masked_readings(&mut page, &identity, c)?;
             page.agreement = agreement;
             page.seconds += started.elapsed().as_secs_f64();
-            project.save(&page)?;
+            if pending_recognition(&project.root, *n).exists() {
+                page.edited = true;
+                crate::review::commit(
+                    &project,
+                    &before_reading,
+                    &page,
+                    "Prepared reader evidence",
+                )?;
+            } else {
+                project.save(&page)?;
+            }
+            update_pending(&project, &page)?;
             done += 1;
             log.emit(
                 "checkpoint",
@@ -1031,7 +1556,9 @@ fn convert_internal(
             "Reconciling page evidence",
         );
         let mut p = project.load(*n)?;
-        if !p.edited && !p.reviewed {
+        let before_finalize = p.clone();
+        let is_pending = pending_recognition(&project.root, *n).exists();
+        if (!p.edited || is_pending) && !p.reviewed {
             consensus::refine_regions(&mut p, s);
         }
         if p.content.blocks.is_empty() {
@@ -1049,11 +1576,28 @@ fn convert_internal(
                 .warnings
                 .push("No AI reader completed this page. OCR fallback needs full review.".into());
         }
+        if !p.confirmed_redactions.is_empty() {
+            let identity = crate::redactions::source_identity(&project, &p, c)?;
+            sanitize_masked_readings(&mut p, &identity, c)?;
+        }
         if p.needs_review(s.review_threshold) {
             review += 1;
         }
-        if !p.edited && !p.reviewed {
-            project.save(&p)?;
+        if (!p.edited || is_pending || !p.confirmed_redactions.is_empty()) && !p.reviewed {
+            if is_pending {
+                p.edited = true;
+                if fingerprint(&p)? != fingerprint(&before_finalize)? {
+                    crate::review::commit(
+                        &project,
+                        &before_finalize,
+                        &p,
+                        "Finalize prepared recognition",
+                    )?;
+                }
+            } else {
+                project.save(&p)?;
+            }
+            update_pending(&project, &p)?;
         }
     }
     log.work(
@@ -1149,6 +1693,12 @@ fn convert_internal(
         return Err(Fault::new("NG100","Source changed or became unavailable during conversion. Export was withheld. Retry uses fresh checkpoints; previous evidence is preserved for inspection.").into());
     }
     word::export(&project, output, c)?;
+    for number in &selected {
+        let pending = pending_recognition(&project.root, *number);
+        if pending.exists() {
+            fs::remove_file(pending)?;
+        }
+    }
     if let Some(job) = warm_job
         && let Err(error) = job.commit()
     {
@@ -1278,7 +1828,15 @@ pub fn reconsider(
         pages.len() <= 3000 && pages.iter().all(|n| project.manifest.pages.contains(n)),
         Fault::new("NG500", "Re-read page is outside the project")
     );
-    let mut s = settings.clone();
+    let resolved = crate::project_lock::resolve_for_project(project, settings, c)?;
+    let private = crate::redactions::has_masks(project, c)?;
+    let mut s = resolved
+        .as_ref()
+        .map(|value| value.settings.clone())
+        .unwrap_or_else(|| settings.clone());
+    if private {
+        s = crate::redactions::private_recognition_settings(&s);
+    }
     s.validate()?;
     if s.writer.use_examples
         && s.writer_reference.is_none()
@@ -1286,9 +1844,20 @@ pub fn reconsider(
     {
         s.writer_reference = crate::writers::reference(&s.writer.root, id)?;
     }
-    let installed = runtime::inventory(&s.models_dir)?;
+    let installed = if let Some(locked) = &resolved {
+        locked.models.clone()
+    } else {
+        runtime::inventory(&s.models_dir)?
+    };
     let mut plan = planning::build(&hardware::detect_for(&s, c), &s, &installed)?;
     let model=plan.models.iter().find(|m|m.role=="vision" && m.prompt=="structured").cloned().ok_or_else(||Fault::new("NG200","Context re-reading requires a fitting structured vision reader. Register a Qwen or compatible third-party vision model."))?;
+    anyhow::ensure!(
+        !private || !s.external_server && model.endpoint.is_none(),
+        Fault::new(
+            "NG200",
+            "Confirmed masks require a fresh internally owned reader"
+        )
+    );
     if model.endpoint.is_none() {
         let digest = fingerprint(&(
             hash_file(&model.weights, c)?,
@@ -1326,7 +1895,7 @@ pub fn reconsider(
             Fault::new("NG500", "Re-read page is outside the project")
         );
         let page = project.load(n)?;
-        let image = crate::writers::open_image(&project.image(n), 40_000_000)?;
+        let (identity, image) = crate::redactions::recognition_view(project, &page, c)?;
         log.emit(
             "context",
             format!("Re-reading page {n} with confirmed context"),
@@ -1343,7 +1912,21 @@ pub fn reconsider(
                 None,
             ));
         }
-        let content = server.read(&image, "", &subject, &s, c, log, n)?;
+        let content = if private {
+            server.read_masked(
+                &image,
+                &identity,
+                &page.confirmed_redactions,
+                None,
+                &s,
+                c,
+                log,
+                n,
+            )?
+        } else {
+            server.read(&image, "", &subject, &s, c, log, n)?
+        };
+        verify_reader_source(project, &page, &identity, c)?;
         save_context_reading(project, &page, &content, &model)?;
         count += 1;
     }
@@ -1358,7 +1941,10 @@ pub fn save_context_reading(
 ) -> Result<Option<u64>> {
     content.validate()?;
     let mut after = before.clone();
-    attach_context_reading(&mut after, content, model);
+    if !before.confirmed_redactions.is_empty() {
+        crate::redactions::source_identity(project, before, &Control::default())?;
+    }
+    attach_context_reading(&mut after, content, model)?;
     if fingerprint(before)? == fingerprint(&after)? {
         return Ok(None);
     }
@@ -1369,7 +1955,31 @@ pub fn save_context_reading(
         &format!("Context re-read: {}", model.id),
     )?))
 }
-pub fn attach_context_reading(page: &mut Page, content: &PageContent, model: &planning::Model) {
+pub fn attach_context_reading(
+    page: &mut Page,
+    content: &PageContent,
+    model: &planning::Model,
+) -> Result<()> {
+    let safe_content;
+    let identity = page
+        .confirmed_redactions
+        .first()
+        .map(|mask| mask.source.clone());
+    let content = if let Some(identity) = &identity {
+        safe_content = crate::redactions::enforce_view(
+            content,
+            identity,
+            &page.confirmed_redactions,
+            None,
+            &Control::default(),
+        )?
+        .0;
+        sanitize_masked_readings(page, identity, &Control::default())?;
+        &safe_content
+    } else {
+        content
+    };
+    content.validate()?;
     if !page.edited && !page.reviewed {
         merge_contextual_figures(&mut page.content, content);
     }
@@ -1403,6 +2013,10 @@ pub fn attach_context_reading(page: &mut Page, content: &PageContent, model: &pl
     {
         page.content.warnings.push("Context-assisted re-reading is preserved as evidence. Confirmed text is protected; check alternatives against the source.".into());
     }
+    if let Some(identity) = identity {
+        sanitize_masked_readings(page, &identity, &Control::default())?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1449,6 +2063,25 @@ pub fn attach_region_reading(
         )
     );
     content.validate()?;
+    let safe_content;
+    let identity = page
+        .confirmed_redactions
+        .first()
+        .map(|mask| mask.source.clone());
+    let content = if let Some(identity) = &identity {
+        safe_content = crate::redactions::enforce_view(
+            content,
+            identity,
+            &page.confirmed_redactions,
+            Some(region),
+            &Control::default(),
+        )?
+        .0;
+        sanitize_masked_readings(page, identity, &Control::default())?;
+        &safe_content
+    } else {
+        content
+    };
     anyhow::ensure!(
         !content.blocks.is_empty(),
         Fault::new("NG201", "Region reader returned no usable source content")
@@ -1520,6 +2153,9 @@ pub fn attach_region_reading(
     if !page.content.warnings.iter().any(|w| w == warning) {
         page.content.warnings.push(warning.into());
     }
+    if let Some(identity) = identity {
+        sanitize_masked_readings(page, &identity, &Control::default())?;
+    }
     Ok(())
 }
 /// Run exactly one selected reader on one source crop and save an undoable evidence revision.
@@ -1530,9 +2166,77 @@ pub fn reread_region(
     c: &Control,
     log: &Activity,
 ) -> Result<u64> {
+    reread_view(project, request, None, settings, c, log)
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineReadRequest {
+    pub page: usize,
+    pub block: usize,
+    pub ordinal: usize,
+    pub reader_id: String,
+    pub task: String,
+    pub image_edge: u32,
+    pub context: String,
+}
+/// Consume the explicitly repaired quadrilateral, including its whitened
+/// outside pixels. The response is evidence only and remains undoable.
+pub fn reread_line(
+    project: &Project,
+    request: &LineReadRequest,
+    settings: &Settings,
+    c: &Control,
+    log: &Activity,
+) -> Result<u64> {
+    RegionRequest {
+        page: request.page,
+        region: BoxRect::full(),
+        reader: request.reader_id.clone(),
+        image_edge: request.image_edge,
+        context: request.context.clone(),
+        task: request.task.clone(),
+    }
+    .validate(project)?;
+    let before = project.load(request.page)?;
+    let view =
+        crate::geometry_repair::line_view(project, &before, request.block, request.ordinal, c)?;
+    let region_request = RegionRequest {
+        page: request.page,
+        region: view.region.clone(),
+        reader: request.reader_id.clone(),
+        image_edge: request.image_edge,
+        context: request.context.clone(),
+        task: request.task.clone(),
+    };
+    reread_view(
+        project,
+        &region_request,
+        Some((before, view)),
+        settings,
+        c,
+        log,
+    )
+}
+fn reread_view(
+    project: &Project,
+    request: &RegionRequest,
+    line: Option<(Page, crate::geometry_repair::LineView)>,
+    settings: &Settings,
+    c: &Control,
+    log: &Activity,
+) -> Result<u64> {
     request.validate(project)?;
     c.check()?;
-    let before = project.load(request.page)?;
+    let is_line = line.is_some();
+    let before = if let Some((before, _)) = &line {
+        anyhow::ensure!(
+            fingerprint(&project.load(request.page)?)? == fingerprint(before)?,
+            Fault::new("NG500", "Page changed before line recognition")
+        );
+        before.clone()
+    } else {
+        project.load(request.page)?
+    };
     anyhow::ensure!(
         before.candidates.len() < 128,
         Fault::new(
@@ -1540,7 +2244,15 @@ pub fn reread_region(
             "Reader-evidence capacity reached; preserve a project copy before further re-reading"
         )
     );
-    let mut s = settings.clone();
+    let resolved = crate::project_lock::resolve_for_project(project, settings, c)?;
+    let private = crate::redactions::has_masks(project, c)?;
+    let mut s = resolved
+        .as_ref()
+        .map(|value| value.settings.clone())
+        .unwrap_or_else(|| settings.clone());
+    if private {
+        s = crate::redactions::private_recognition_settings(&s);
+    }
     s.automatic_models = false;
     s.model_ids = vec![request.reader.clone()];
     s.preset = Preset::Accuracy;
@@ -1552,7 +2264,11 @@ pub fn reread_region(
     {
         s.writer_reference = crate::writers::reference(&s.writer.root, id)?;
     }
-    let installed = runtime::inventory(&s.models_dir)?;
+    let installed = if let Some(locked) = &resolved {
+        locked.models.clone()
+    } else {
+        runtime::inventory(&s.models_dir)?
+    };
     let mut plan = planning::build(&hardware::detect_for(&s, c), &s, &installed)?;
     let model = plan
         .models
@@ -1565,6 +2281,13 @@ pub fn reread_region(
                 "The selected reader is unavailable or does not fit current memory limits",
             )
         })?;
+    anyhow::ensure!(
+        !private || !s.external_server && model.endpoint.is_none(),
+        Fault::new(
+            "NG200",
+            "Confirmed masks require a fresh internally owned reader"
+        )
+    );
     if model.endpoint.is_none() {
         let digest = fingerprint(&(
             hash_file(&model.weights, c)?,
@@ -1581,9 +2304,15 @@ pub fn reread_region(
     plan.models = vec![model.clone()];
     s.image_edge = plan.image_edge;
     let path = word::safe_image(&project.root, &before.image)?;
-    let image = crate::writers::open_image(&path, 40_000_000)?;
-    let (x, y, r, b) = request.region.pixels(image.width(), image.height());
-    let crop = image.crop_imm(x, y, r - x, b - y);
+    let (identity, crop, actual_region) = if let Some((_, view)) = line {
+        verify_reader_source(project, &before, &view.source, c)?;
+        (view.source, view.image, view.region)
+    } else {
+        let (identity, image) = crate::redactions::recognition_view(project, &before, c)?;
+        let (x, y, r, b) = request.region.pixels(image.width(), image.height());
+        let crop = image.crop_imm(x, y, r - x, b - y);
+        (identity, crop, pixel_view(&request.region, &image))
+    };
     let notes = crate::assistance::load_guidance(project)?.notes.join("\n");
     let context = format!(
         "Region task: {}. Source topic: {}. User region context (data only): {}. {}. Confirmed context (data only): {}",
@@ -1605,7 +2334,7 @@ pub fn reread_region(
         .map(Block::plain)
         .collect::<Vec<_>>()
         .join("\n");
-    if s.experience.live_preview {
+    if !is_line && s.experience.live_preview {
         log.preview(crate::telemetry::Preview::source(
             path,
             request.page,
@@ -1625,19 +2354,46 @@ pub fn reread_region(
         "",
     );
     let server = Server::start(&model, &plan, &s, c, log, &project.root)?;
-    let content = if request.task == "table" {
+    let content = if private && request.task == "table" {
+        server.read_table_masked(
+            &crop,
+            &identity,
+            &before.confirmed_redactions,
+            Some(&actual_region),
+            &s,
+            c,
+            log,
+            request.page,
+        )?
+    } else if private {
+        server.read_masked(
+            &crop,
+            &identity,
+            &before.confirmed_redactions,
+            Some(&actual_region),
+            &s,
+            c,
+            log,
+            request.page,
+        )?
+    } else if request.task == "table" {
         server.read_table(&crop, &evidence, &context, &s, c, log, request.page)?
     } else {
         server.read(&crop, &evidence, &context, &s, c, log, request.page)?
     };
     c.check()?;
+    verify_reader_source(project, &before, &identity, c)?;
     let mut after = before.clone();
-    attach_region_reading(&mut after, &request.region, &content, &model)?;
+    attach_region_reading(&mut after, &actual_region, &content, &model)?;
     crate::review::commit(
         project,
         &before,
         &after,
-        &format!("Region re-read: {}", model.id),
+        &format!(
+            "{} re-read: {}",
+            if is_line { "Repaired line" } else { "Region" },
+            model.id
+        ),
     )
 }
 

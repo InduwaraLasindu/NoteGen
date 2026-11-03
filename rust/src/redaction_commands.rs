@@ -8,6 +8,17 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Rasterize only, without OCR, OSD or AI, so source covers can be confirmed first.
+    Prepare {
+        input: PathBuf,
+        #[arg(long)]
+        output_hint: PathBuf,
+    },
+    RecognizePrepared {
+        project: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     Covers {
         project: PathBuf,
         page: usize,
@@ -51,8 +62,33 @@ pub enum Action {
     },
 }
 
-pub fn run(action: Action, c: &Control) -> Result<()> {
+pub fn run(action: Action, settings: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::Prepare { input, output_hint } => {
+            let project = notegen::pipeline::prepare_for_review(
+                &input,
+                &output_hint,
+                settings,
+                c,
+                &Default::default(),
+            )?;
+            super::print(
+                serde_json::json!({"project":project.root,"pages":project.manifest.pages,"note":"Source rasters prepared without recognition. Confirm covers, then run recognize-prepared with the same recognition configuration."}),
+            )
+        }
+        Action::RecognizePrepared { project, output } => {
+            let project = Project::read(project)?;
+            let completed = notegen::pipeline::recognize_prepared(
+                &project,
+                &output,
+                settings,
+                c,
+                &Default::default(),
+            )?;
+            super::print(
+                serde_json::json!({"project":completed.project.root,"output":completed.output,"pages":completed.pages,"pending_review":completed.review,"seconds":completed.seconds}),
+            )
+        }
         Action::Covers { project, page } => {
             let project = Project::read(project)?;
             let page = project.load(page)?;

@@ -244,10 +244,10 @@ pub fn parse_tsv(text: &str) -> Vec<Word> {
                 return None;
             }
             let confidence = r.get(10)?.parse::<f32>().ok()? / 100.;
-            if confidence < 0. {
+            if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
                 return None;
             }
-            Some(Word {
+            let word = Word {
                 text,
                 x: r.get(6)?.parse().ok()?,
                 y: r.get(7)?.parse().ok()?,
@@ -259,9 +259,150 @@ pub fn parse_tsv(text: &str) -> Vec<Word> {
                     r.get(3)?.parse().ok()?,
                     r.get(4)?.parse().ok()?,
                 ),
-            })
+            };
+            (word.w > 0
+                && word.h > 0
+                && word.x.checked_add(word.w).is_some()
+                && word.y.checked_add(word.h).is_some())
+            .then_some(word)
         })
         .collect()
+}
+fn checked_words(text: &str, width: u32, height: u32) -> Result<Vec<Word>> {
+    let mut native = 0usize;
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .quoting(false)
+        .flexible(true)
+        .from_reader(text.as_bytes());
+    let header = reader
+        .headers()
+        .map_err(|_| Fault::new("NG110", "Malformed Tesseract TSV header"))?;
+    anyhow::ensure!(
+        header.len() == 12
+            && header.get(0) == Some("level")
+            && header.get(6) == Some("left")
+            && header.get(10) == Some("conf")
+            && header.get(11) == Some("text"),
+        Fault::new("NG110", "Unrecognized Tesseract TSV header")
+    );
+    for row in reader.records() {
+        let row = row.map_err(|_| Fault::new("NG110", "Malformed Tesseract TSV"))?;
+        if row.get(0) == Some("5") && row.get(11).is_some_and(|value| !value.trim().is_empty()) {
+            anyhow::ensure!(
+                row.len() == 12,
+                Fault::new("NG110", "Tesseract TSV word has unexpected fields")
+            );
+            native += 1;
+        }
+        anyhow::ensure!(
+            native <= 30_000,
+            Fault::new("NG110", "Tesseract word count exceeds its geometry budget")
+        );
+    }
+    let words = parse_tsv(text);
+    anyhow::ensure!(
+        words.len() == native
+            && words
+                .iter()
+                .all(|word| word.x + word.w <= width && word.y + word.h <= height),
+        Fault::new(
+            "NG110",
+            "Tesseract supplied invalid word coordinates or confidence; source retained for review"
+        )
+    );
+    Ok(words)
+}
+fn word_region(word: &Word, width: u32, height: u32) -> Option<BoxRect> {
+    let right = word.x.checked_add(word.w)?;
+    let bottom = word.y.checked_add(word.h)?;
+    if width == 0 || height == 0 || right > width || bottom > height || word.w == 0 || word.h == 0 {
+        return None;
+    }
+    Some(BoxRect {
+        left: word.x as f32 / width as f32,
+        top: word.y as f32 / height as f32,
+        right: right as f32 / width as f32,
+        bottom: bottom as f32 / height as f32,
+    })
+}
+fn observed_geometry(
+    words: &[&Word],
+    width: u32,
+    height: u32,
+    grid: Option<crate::geometry::TableGrid>,
+) -> crate::geometry::BlockGeometry {
+    use crate::geometry::{BlockGeometry, CellAddress, CellBox, LineRegion, Origin, Quad, WordBox};
+    let mut groups = BTreeMap::<(u32, u32, u32), Vec<&Word>>::new();
+    for word in words {
+        if word_region(word, width, height).is_some() {
+            groups.entry(word.group).or_default().push(word);
+        }
+    }
+    let mut ordinals = BTreeMap::new();
+    let mut lines = vec![];
+    for (ordinal, (key, group)) in groups.iter().enumerate() {
+        ordinals.insert(*key, ordinal);
+        let left = group.iter().map(|word| word.x).min().unwrap();
+        let top = group.iter().map(|word| word.y).min().unwrap();
+        let right = group.iter().map(|word| word.x + word.w).max().unwrap();
+        let bottom = group.iter().map(|word| word.y + word.h).max().unwrap();
+        lines.push(LineRegion {
+            ordinal,
+            shape: Quad::rectangle(&BoxRect {
+                left: left as f32 / width as f32,
+                top: top as f32 / height as f32,
+                right: right as f32 / width as f32,
+                bottom: bottom as f32 / height as f32,
+            }),
+            origin: Origin::TesseractTsv,
+        });
+    }
+    let mut result = BlockGeometry {
+        lines,
+        grid,
+        ..Default::default()
+    };
+    if let Some(grid) = &result.grid {
+        for row in 0..grid.row_edges.len() - 1 {
+            for col in 0..grid.column_edges.len() - 1 {
+                result.cells.push(CellBox {
+                    row,
+                    col,
+                    region: grid.cell(row, col).expect("validated grid shape"),
+                    origin: Origin::DetectedGrid,
+                });
+            }
+        }
+    }
+    for word in words {
+        let Some(region) = word_region(word, width, height) else {
+            continue;
+        };
+        let cell = result.grid.as_ref().and_then(|grid| {
+            let x = (region.left + region.right) / 2.;
+            let y = (region.top + region.bottom) / 2.;
+            Some(CellAddress {
+                row: grid
+                    .row_edges
+                    .windows(2)
+                    .position(|v| v[0] <= y && y <= v[1])?,
+                col: grid
+                    .column_edges
+                    .windows(2)
+                    .position(|v| v[0] <= x && x <= v[1])?,
+            })
+        });
+        result.words.push(WordBox {
+            text: word.text.clone(),
+            region,
+            confidence: Some(word.confidence),
+            line: ordinals.get(&word.group).copied(),
+            cell,
+            origin: Origin::TesseractTsv,
+        });
+    }
+    result
 }
 #[derive(Clone, Copy, Debug)]
 struct Line {
@@ -388,6 +529,7 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
         }
         let mut rows = vec![vec![String::new(); xs.len() - 1]; ys.len() - 1];
         let mut confidences = vec![];
+        let mut table_words = vec![];
         for word in words {
             let x = word.x + word.w / 2;
             let y = word.y + word.h / 2;
@@ -400,6 +542,7 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
                 }
                 rows[row][col].push_str(&word.text);
                 confidences.push(word.confidence);
+                table_words.push(word);
             }
         }
         out.push(Block {
@@ -416,12 +559,36 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
             } else {
                 confidences.iter().sum::<f32>() / confidences.len() as f32
             }),
+            geometry: Some(observed_geometry(
+                &table_words,
+                g.width(),
+                g.height(),
+                Some(crate::geometry::TableGrid {
+                    row_edges: ys.iter().map(|y| *y as f32 / g.height() as f32).collect(),
+                    column_edges: xs.iter().map(|x| *x as f32 / g.width() as f32).collect(),
+                    origin: crate::geometry::Origin::DetectedGrid,
+                }),
+            )),
             ..Default::default()
         });
     }
     out
 }
+#[derive(Clone, Copy)]
+pub enum PrintedLayout {
+    Automatic,
+    Paragraph,
+    Line,
+}
 pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageContent> {
+    printed_with_layout(im, s, c, PrintedLayout::Automatic)
+}
+pub fn printed_with_layout(
+    im: &DynamicImage,
+    s: &Settings,
+    c: &Control,
+    layout: PrintedLayout,
+) -> Result<PageContent> {
     let dir = tempfile::tempdir()?;
     let within_budget_pool =
         rayon::current_thread_index().is_some() && rayon::current_num_threads() <= s.cpu_threads;
@@ -455,7 +622,12 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
                 "-l".into(),
                 s.languages.clone(),
                 "--psm".into(),
-                "3".into(),
+                match layout {
+                    PrintedLayout::Automatic => "3",
+                    PrintedLayout::Paragraph => "6",
+                    PrintedLayout::Line => "7",
+                }
+                .into(),
                 "tsv".into(),
             ],
             s,
@@ -475,7 +647,7 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
             "Tesseract failed; check executable and language data"
         )
     );
-    let words = parse_tsv(&text);
+    let words = checked_words(&text, im.width(), im.height())?;
     let mut blocks = tables(&original, &words);
     let mut groups: BTreeMap<(u32, u32), Vec<&Word>> = BTreeMap::new();
     for w in &words {
@@ -510,6 +682,7 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
                 bottom: (b as f32 / im.height() as f32).min(1.),
             }),
             confidence: Some(group.iter().map(|w| w.confidence).sum::<f32>() / group.len() as f32),
+            geometry: Some(observed_geometry(group, im.width(), im.height(), None)),
             ..Default::default()
         });
     }
@@ -533,10 +706,28 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
     result.summary = result.plain().chars().take(2000).collect();
     Ok(result)
 }
-pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImage> {
-    if !s.auto_rotate {
-        return Ok(im);
-    }
+pub struct OrientationResult {
+    pub image: DynamicImage,
+    pub detection: crate::language_routing::ScriptObservation,
+}
+/// Detect on the supplied (already masked, when applicable) raster. Never rotates.
+pub fn detect_script(
+    im: &DynamicImage,
+    s: &Settings,
+    c: &Control,
+) -> Result<crate::language_routing::ScriptObservation> {
+    detect_script_with_timeout(im, s, c, Duration::from_secs(20))
+}
+pub fn detect_script_with_timeout(
+    im: &DynamicImage,
+    s: &Settings,
+    c: &Control,
+    timeout: Duration,
+) -> Result<crate::language_routing::ScriptObservation> {
+    anyhow::ensure!(
+        !timeout.is_zero() && timeout <= Duration::from_secs(20),
+        Fault::new("NG110", "Invalid script detection time budget")
+    );
     let d = tempfile::tempdir()?;
     let p = d.path().join("osd.png");
     im.thumbnail(1800, 1800).save(&p)?;
@@ -546,12 +737,14 @@ pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImag
             &[
                 p.to_string_lossy().into(),
                 "stdout".into(),
+                "-l".into(),
+                "osd".into(),
                 "--psm".into(),
                 "0".into(),
             ],
             s,
         ),
-        Duration::from_secs(20),
+        timeout,
         c,
         if s.cpu_threads == 0 {
             4
@@ -559,21 +752,36 @@ pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImag
             s.cpu_threads.min(4)
         },
     );
+    c.check()?;
     if let Ok((true, text, _)) = r {
-        let angle = text
-            .lines()
-            .find_map(|l| l.strip_prefix("Rotate: "))
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .unwrap_or(0);
-        return Ok(match angle {
+        return Ok(crate::language_routing::parse_osd(&text)
+            .unwrap_or_else(|_| crate::language_routing::ScriptObservation::unavailable()));
+    }
+    Ok(crate::language_routing::ScriptObservation::unavailable())
+}
+pub fn orient_with_detection(
+    im: DynamicImage,
+    s: &Settings,
+    c: &Control,
+) -> Result<OrientationResult> {
+    let detection = detect_script(&im, s, c)?;
+    let image = if s.auto_rotate {
+        match detection.rotate_degrees {
             90 => im.rotate90(),
             180 => im.rotate180(),
             270 => im.rotate270(),
             _ => im,
-        });
+        }
+    } else {
+        im
+    };
+    Ok(OrientationResult { image, detection })
+}
+pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImage> {
+    if !s.auto_rotate {
+        return Ok(im);
     }
-    c.check()?;
-    Ok(im)
+    Ok(orient_with_detection(im, s, c)?.image)
 }
 pub fn crop_regions(
     content: &PageContent,
@@ -625,6 +833,51 @@ pub fn save_scan(path: &Path, im: &DynamicImage) -> Result<()> {
     im.save(&t)?;
     fs::rename(&t, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    const HEADER: &str = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n";
+    #[test]
+    fn native_tsv_keeps_actual_word_line_geometry_and_rejects_corrupt_precision() {
+        let text = format!(
+            "{HEADER}5\t1\t2\t3\t4\t1\t10\t20\t30\t40\t92.5\t1250\n5\t1\t2\t3\t4\t2\t50\t20\t20\t40\t40\tword\n"
+        );
+        let words = checked_words(&text, 100, 100).unwrap();
+        let refs = words.iter().collect::<Vec<_>>();
+        let data = observed_geometry(&refs, 100, 100, None);
+        assert_eq!(data.words.len(), 2);
+        assert_eq!(data.lines.len(), 1);
+        assert_eq!(data.words[0].text, "1250");
+        assert_eq!(data.words[0].confidence, Some(0.925));
+        assert_eq!(
+            data.words[0].region,
+            BoxRect {
+                left: 0.1,
+                top: 0.2,
+                right: 0.4,
+                bottom: 0.6
+            }
+        );
+        assert_eq!(
+            data.lines[0].shape.bounds(),
+            BoxRect {
+                left: 0.1,
+                top: 0.2,
+                right: 0.7,
+                bottom: 0.6
+            }
+        );
+        for record in [
+            "5\t1\t1\t1\t1\t1\t90\t0\t30\t20\t90\toutside\n",
+            "5\t1\t1\t1\t1\t1\t0\t0\t10\t20\tNaN\tnan\n",
+            "5\t1\t1\t1\t1\t1\t4294967295\t0\t20\t20\t90\toverflow\n",
+        ] {
+            assert!(checked_words(&format!("{HEADER}{record}"), 100, 100).is_err());
+        }
+        assert!(checked_words("not a TSV header\n", 100, 100).is_err());
+    }
 }
 
 pub fn deskew(im: DynamicImage, enabled: bool, max_pixels: u32) -> DynamicImage {

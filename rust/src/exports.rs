@@ -201,6 +201,7 @@ fn traceability_inner(project: &Project, c: &Control) -> Result<Traceability> {
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
+        crate::geometry::verify_metadata_source(project, &page, c)?;
         let checkpoint = checkpoint_uri(project, &page)?;
         let evidence = evidence_index(&page, &checkpoint)?;
         let layers = crate::layers::report(&page)?;
@@ -399,6 +400,7 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
+        crate::geometry::verify_metadata_source(project, &page, c)?;
         let state = if page.reviewed {
             "reviewed"
         } else {
@@ -737,6 +739,7 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
+        crate::geometry::verify_metadata_source(project, &page, c)?;
         for (bi, block) in page.content.blocks.iter().enumerate() {
             if block.kind != "table" {
                 continue;
@@ -905,6 +908,7 @@ fn spreadsheet(project: &Project, file: &mut fs::File, c: &Control) -> Result<()
     for n in &project.manifest.pages {
         c.check()?;
         let page = project.load(*n)?;
+        crate::geometry::verify_metadata_source(project, &page, c)?;
         for layer in crate::layers::report(&page)? {
             annotation_row += 1;
             anyhow::ensure!(

@@ -7,6 +7,7 @@ use crate::{
 };
 
 pub(super) enum StudioMessage {
+    Project(Project, String),
     Update(models::Update),
     Web(Vec<assistance::WebSource>),
     Done(String),
@@ -165,6 +166,11 @@ impl Desktop {
                 self.refresh(ctx);
             }
 
+            StudioMessage::Project(project, notice) => {
+                if self.open_review(project.root, ctx) {
+                    self.notice = notice;
+                }
+            }
             StudioMessage::Update(u) => {
                 self.studio.updates.retain(|v| v.id != u.id);
                 self.notice = if u.previous_revision == u.revision {

@@ -493,7 +493,7 @@ pub fn install_runtime_release(
     .into())
 }
 
-fn extract_runtime(archive: &Path, dir: &Path, c: &Control) -> Result<()> {
+pub(crate) fn extract_runtime(archive: &Path, dir: &Path, c: &Control) -> Result<()> {
     let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
     anyhow::ensure!(
         zip.len() <= 1000,

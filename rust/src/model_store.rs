@@ -281,22 +281,20 @@ impl Store {
         if let Some(path) = self.resolve(&id, kind, c)? {
             return Ok((id, path));
         }
-        let incoming = self
-            .root
-            .join("incoming")
-            .join(format!("{}.download", id.sha256));
-        no_links(&incoming)?;
-        // The central manager owns .part/range/rate/policy behavior. Incoming
-        // files remain available after cancellation; activation is separate.
-        models::download(url, &incoming, asset, c, log)?;
-        let path = self.ingest_locked(&incoming, &id, kind, c)?;
+        let path = self.object_path(&id)?;
+        no_links(path.parent().unwrap())?;
+        fs::create_dir_all(path.parent().unwrap())?;
+        // Download directly to the immutable object namespace. The central
+        // verified .part publication avoids a second full copy or inferring
+        // ownership of an existing incoming file merely from its name.
+        models::download(url, &path, asset, c, log)?;
+        let mut permissions = fs::metadata(&path)?.permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions)?;
         anyhow::ensure!(
-            inspect(&incoming, id.bytes, kind, c)? == id,
-            fault("Download cache changed after immutable publication")
+            self.resolve(&id, kind, c)?.is_some(),
+            fault("Downloaded immutable object failed sealing")
         );
-        no_links(&incoming)?;
-        c.check()?;
-        fs::remove_file(&incoming)?;
         Ok((id, path))
     }
     pub fn adopt_model(&self, model: &Model, c: &Control) -> Result<StoredModel> {

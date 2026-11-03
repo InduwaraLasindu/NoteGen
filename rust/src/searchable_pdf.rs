@@ -301,6 +301,7 @@ fn export_inner(
     for n in &project.manifest.pages {
         c.check()?;
         let source = project.load(*n)?;
+        crate::geometry::verify_metadata_source(project, &source, c)?;
         let path = crate::word::safe_image(&project.root, &source.image)?;
         let (image_width, image_height) = image::image_dimensions(&path)?;
         pixels = pixels

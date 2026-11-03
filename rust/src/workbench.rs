@@ -12,6 +12,7 @@ struct WordPreview {
 }
 
 enum Report {
+    Routing(PathBuf, crate::language_routing::RereadPreview),
     Catalog(Vec<crate::projects::Entry>),
     Search(crate::projects::SearchReport),
     Text(String),
@@ -59,6 +60,17 @@ pub(super) struct Workbench {
     mask_selected: BTreeSet<usize>,
     mask_reason: usize,
     share_preview: Option<crate::redactions::SharePreview>,
+    notation: String,
+    notation_reaction: bool,
+    shortcut_draft: Option<crate::shortcuts::Bindings>,
+    line_shapes: String,
+    line_ordinal: usize,
+    grid_repair: String,
+    grid_preview: Option<crate::geometry_repair::GridPreview>,
+    route_codes: String,
+    route_line: bool,
+    route_preview: Option<crate::language_routing::RereadPreview>,
+    geometry_project: Option<PathBuf>,
     rx: Option<mpsc::Receiver<std::result::Result<Report, String>>>,
 }
 impl Drop for Workbench {
@@ -101,6 +113,14 @@ impl Workbench {
         if let Some(value) = value {
             self.rx = None;
             match value {
+                Ok(Report::Routing(project, preview)) => {
+                    if self.geometry_project.as_ref() == Some(&project) {
+                        self.report="Regional OCR preview is ready. Compare its source and visible text before applying.".into();
+                        self.route_preview = Some(preview);
+                    } else {
+                        self.report="The completed regional preview belongs to another project. Reopen it and refresh the preview before applying.".into();
+                    }
+                }
                 Ok(Report::Catalog(entries)) => {
                     self.entries = entries;
                     self.hits.clear();
@@ -316,6 +336,7 @@ impl Review {
         }
         self.page = page.clone();
         self.baseline = page;
+        self.baseline_id = fingerprint(&self.baseline)?;
         self.selected = self
             .selected
             .min(self.page.content.blocks.len().saturating_sub(1));
@@ -341,17 +362,58 @@ impl Review {
         self.reload()
     }
     fn reload(&mut self) -> Result<()> {
-        self.page = self.project.load(self.page.page)?;
-        self.baseline = self.page.clone();
+        let canonical = self.project.load(self.page.page)?;
+        let visible = if canonical.confirmed_redactions.is_empty() {
+            canonical.clone()
+        } else {
+            crate::redactions::effective_page(&self.project, &canonical, &Control::default())?.0
+        };
+        let source = review_source(&self.project, &canonical);
+        let source = if canonical.confirmed_redactions.is_empty() {
+            source.ok()
+        } else {
+            Some(source?)
+        };
+        let limit = self
+            .context
+            .input(|input| input.max_texture_side)
+            .clamp(1, 2048) as u32;
+        self.texture = source.map(|source| {
+            let image = source.thumbnail(limit, limit).to_rgba8();
+            self.context.load_texture(
+                "reloaded-review-source",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        self.magnifier = None;
+        let compacted = fingerprint(&canonical)? != fingerprint(&visible)?;
+        self.page = visible;
+        self.baseline = canonical;
+        self.baseline_id = fingerprint(&self.baseline)?;
         self.raw = serde_json::to_string_pretty(&self.page.content)?;
         self.selected = self
             .selected
             .min(self.page.content.blocks.len().saturating_sub(1));
         self.refresh_issues();
+        if compacted {
+            self.issues.retain(|issue| issue.page != self.page.page);
+            self.issue_notice="Confirmed masks are applied to this history view. Save a draft to commit its visible block order before using this page's issue queue; Undo and Redo remain available.".into();
+        }
         self.dirty = false;
         Ok(())
     }
     fn refresh_issues(&mut self) {
+        self.fine_heatmap = crate::geometry::heatmap(
+            &self.project,
+            &self.page,
+            self.project.manifest.settings.review_threshold,
+            &Control::default(),
+        )
+        .ok();
         match crate::layers::report(&self.page) {
             Ok(layers) => {
                 self.layer_cache = layers;
@@ -379,10 +441,329 @@ impl Review {
 }
 
 impl Desktop {
+    pub(super) fn paint_source_geometry(&self, review: &Review, ui: &egui::Ui, rect: egui::Rect) {
+        let point = |x: f32, y: f32| {
+            egui::pos2(
+                rect.left() + x * rect.width(),
+                rect.top() + y * rect.height(),
+            )
+        };
+        if review.heatmap
+            && let Some(report) = &review.fine_heatmap
+        {
+            for spot in &report.spots {
+                let region = &spot.region;
+                let bounds = egui::Rect::from_min_max(
+                    point(region.left, region.top),
+                    point(region.right, region.bottom),
+                );
+                let color = match spot.kind {
+                    crate::geometry::HeatKind::LowWordConfidence => {
+                        Color32::from_rgba_unmultiplied(255, 166, 45, 65)
+                    }
+                    _ => Color32::from_rgba_unmultiplied(235, 80, 115, 70),
+                };
+                ui.painter().rect_filled(bounds, 1, color);
+            }
+        }
+        let preview = self.workbench.grid_preview.as_ref().filter(|preview| {
+            self.workbench.geometry_project.as_ref() == Some(&review.project.root)
+                && preview.before_fingerprint == review.baseline_id
+        });
+        let block = preview
+            .map_or(&review.page, |preview| &preview.after)
+            .content
+            .blocks
+            .get(review.selected);
+        let Some(data) = block.and_then(|block| block.geometry.as_ref()) else {
+            return;
+        };
+        let color = if preview.is_some() {
+            Color32::from_rgb(255, 220, 100)
+        } else {
+            Color32::from_rgb(100, 225, 205)
+        };
+        for line in &data.lines {
+            for edge in 0..4 {
+                let a = line.shape.points[edge];
+                let b = line.shape.points[(edge + 1) % 4];
+                ui.painter().line_segment(
+                    [point(a.x, a.y), point(b.x, b.y)],
+                    egui::Stroke::new(1.2, color),
+                );
+            }
+        }
+        if let Some(grid) = &data.grid {
+            if let (Some(left), Some(right), Some(top), Some(bottom)) = (
+                grid.column_edges.first(),
+                grid.column_edges.last(),
+                grid.row_edges.first(),
+                grid.row_edges.last(),
+            ) {
+                for y in &grid.row_edges {
+                    ui.painter().line_segment(
+                        [point(*left, *y), point(*right, *y)],
+                        egui::Stroke::new(1.4, color),
+                    );
+                }
+                for x in &grid.column_edges {
+                    ui.painter().line_segment(
+                        [point(*x, *top), point(*x, *bottom)],
+                        egui::Stroke::new(1.4, color),
+                    );
+                }
+            }
+        }
+    }
+    fn geometry_tools(&mut self, w: &mut Workbench, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some((project, page, index, region, dirty)) = self.review.as_ref().map(|r| {
+            (
+                r.project.clone(),
+                r.page.clone(),
+                r.selected,
+                r.crop.clone().or_else(|| {
+                    r.page
+                        .content
+                        .blocks
+                        .get(r.selected)
+                        .and_then(|b| b.bbox.clone())
+                }),
+                r.dirty || r.raw_open,
+            )
+        }) else {
+            return;
+        };
+        let ready = !dirty && self.worker.is_none() && w.rx.is_none();
+        if w.geometry_project.as_ref() != Some(&project.root) {
+            w.geometry_project = Some(project.root.clone());
+            w.grid_preview = None;
+            w.route_preview = None;
+            w.line_shapes.clear();
+            w.grid_repair.clear();
+        }
+        ui.separator();
+        ui.heading("Source geometry and language regions");
+        if let Some(detection) = &page.script_detection {
+            ui.label(format!(
+                "Detected script: {:?} · native score {:?} · suggestions {}",
+                detection.observation.script,
+                detection.observation.script_confidence,
+                detection.observation.suggested_languages.join(" + ")
+            ));
+            ui.small(&detection.observation.note);
+        }
+        if let Some(data) = page
+            .content
+            .blocks
+            .get(index)
+            .and_then(|block| block.geometry.as_ref())
+        {
+            ui.label(format!(
+                "Selected block: {} word bounds · {} cell bounds · {} line regions",
+                data.words.len(),
+                data.cells.len(),
+                data.lines.len()
+            ));
+        } else {
+            ui.label("The selected block has no word/cell geometry. Only supplied source bounds are shown.");
+        }
+        ui.small("Review overlays show supplied word confidence scores, line outlines and table grids. Native confidence scores are not calibrated error probabilities. Previewed grid repairs are shown before application.");
+        egui::CollapsingHeader::new("Mixed-language region recognition").show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut w.route_codes)
+                    .hint_text("eng+sin, eng+tam, ara or heb")
+                    .char_limit(100),
+            )
+            .accessible_name("OCR languages for selected source region");
+            ui.checkbox(
+                &mut w.route_line,
+                "Selected region is one line (otherwise paragraph)",
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        ready,
+                        egui::Button::new("Inspect image-based paragraph scripts"),
+                    )
+                    .clicked()
+                {
+                    let project = project.clone();
+                    let page = page.clone();
+                    let settings = self.state.settings.clone();
+                    w.task(ctx, move || {
+                        Ok(Report::Text(serde_json::to_string_pretty(
+                            &crate::language_routing::suggest_regions(
+                                &project,
+                                &page,
+                                &settings,
+                                8,
+                                &Control::default(),
+                            )?,
+                        )?))
+                    });
+                }
+                if ui
+                    .add_enabled(
+                        ready && region.is_some() && !w.route_codes.trim().is_empty(),
+                        egui::Button::new("Confirm language selection for this region"),
+                    )
+                    .clicked()
+                {
+                    let selected = region.clone().expect("enabled measured region");
+                    let layout = if w.route_line {
+                        crate::language_routing::RegionLayout::Line
+                    } else {
+                        crate::language_routing::RegionLayout::Paragraph
+                    };
+                    let target = page
+                        .content
+                        .blocks
+                        .get(index)
+                        .and_then(|block| block.bbox.as_ref())
+                        .filter(|bounds| **bounds == selected)
+                        .map(|_| index);
+                    let result = crate::language_routing::select_region(
+                        &project,
+                        &page,
+                        selected,
+                        &w.route_codes,
+                        layout,
+                        target,
+                        &Control::default(),
+                    )
+                    .and_then(|selection| {
+                        let mut selections = page.region_languages.clone();
+                        selections.push(selection);
+                        crate::language_routing::commit_selections(
+                            &project,
+                            &page,
+                            selections,
+                            &Control::default(),
+                        )
+                    });
+                    match result {
+                        Ok(revision) => {
+                            w.report =
+                                format!("Region language selection saved as revision {revision}");
+                            let _ = self.open_review(project.root.clone(), ctx);
+                        }
+                        Err(error) => w.report = error.to_string(),
+                    }
+                }
+                if ui
+                    .add_enabled(
+                        ready && !page.region_languages.is_empty(),
+                        egui::Button::new("Preview selected-language OCR"),
+                    )
+                    .clicked()
+                {
+                    let project = project.clone();
+                    let page = page.clone();
+                    let settings = self.state.settings.clone();
+                    w.task(ctx, move || {
+                        Ok(Report::Routing(
+                            project.root.clone(),
+                            crate::language_routing::reread_preview(
+                                &project,
+                                &page,
+                                &page.region_languages,
+                                &settings,
+                                &Control::default(),
+                            )?,
+                        ))
+                    });
+                }
+            });
+            for selection in &page.region_languages {
+                ui.label(format!(
+                    "{} · {:?} · {:?}",
+                    selection.languages, selection.layout, selection.region
+                ));
+            }
+            if let Some(preview) = w.route_preview.clone() {
+                ui.label(&preview.note);
+                ui.label(format!(
+                    "Preview: {} blocks, {} warnings",
+                    preview.after.content.blocks.len(),
+                    preview.after.content.warnings.len()
+                ));
+                ui.add(
+                    egui::TextEdit::multiline(&mut preview.after.content.plain())
+                        .desired_rows(4)
+                        .interactive(false)
+                        .desired_width(f32::INFINITY),
+                );
+                if ui
+                    .add_enabled(
+                        ready,
+                        egui::Button::new("Apply reviewed regional OCR preview"),
+                    )
+                    .clicked()
+                {
+                    match crate::language_routing::apply_preview(
+                        &project,
+                        &page,
+                        &preview,
+                        &preview.token,
+                        &Control::default(),
+                    ) {
+                        Ok(revision) => {
+                            w.route_preview = None;
+                            w.report = format!("Regional OCR applied as revision {revision}");
+                            let _ = self.open_review(project.root.clone(), ctx);
+                        }
+                        Err(error) => w.report = error.to_string(),
+                    }
+                }
+            }
+        });
+        egui::CollapsingHeader::new("Repair handwritten line boundaries").show(ui,|ui| {
+            ui.small("Confirm ordered convex quadrilaterals in normalized page coordinates. Original pixels stay unchanged; re-reading whites pixels outside the selected line.");
+            if ui.add_enabled(region.is_some(),egui::Button::new("Start line draft from selected source bounds")).clicked(){let bounds=region.as_ref().unwrap();let quad=crate::geometry::Quad{points:[crate::geometry::Point{x:bounds.left,y:bounds.top},crate::geometry::Point{x:bounds.right,y:bounds.top},crate::geometry::Point{x:bounds.right,y:bounds.bottom},crate::geometry::Point{x:bounds.left,y:bounds.bottom}]};w.line_shapes=serde_json::to_string_pretty(&vec![quad]).unwrap_or_default();}
+            ui.add(egui::TextEdit::multiline(&mut w.line_shapes).code_editor().char_limit(100_000).desired_rows(7).desired_width(f32::INFINITY)).accessible_name("Ordered line quadrilaterals JSON");
+            if ui.add_enabled(ready && !w.line_shapes.trim().is_empty(),egui::Button::new("Validate and confirm line boundaries")).clicked(){let result=serde_json::from_str::<Vec<crate::geometry::Quad>>(&w.line_shapes).map_err(anyhow::Error::from).and_then(|quads|crate::geometry_repair::repair_lines(&project,&page,index,&quads,&Control::default()));match result{Ok(revision)=>{w.report=format!("Line boundaries saved as revision {revision}");let _=self.open_review(project.root.clone(),ctx);},Err(error)=>w.report=error.to_string()}}
+            ui.add(egui::DragValue::new(&mut w.line_ordinal).range(0..=999).prefix("Zero-based line ")).accessible_name("Repaired line ordinal");
+            if ui.add_enabled(ready && !w.reader.is_empty(),egui::Button::new("Re-read this repaired line with selected reader")).clicked(){let request=pipeline::LineReadRequest{page:page.page,block:index,ordinal:w.line_ordinal,reader_id:w.reader.clone(),task:"handwriting".into(),image_edge:w.region_edge,context:w.region_context.clone()};let settings=self.state.settings.clone();let project=project.clone();self.studio_task(ctx,move|c,log|{let revision=pipeline::reread_line(&project,&request,&settings,&c,&log)?;Ok(studio::StudioMessage::Done(format!("Repaired-line reading retained as revision {revision}; compare its evidence before accepting.")))});}
+        });
+        if let Some(block) = page
+            .content
+            .blocks
+            .get(index)
+            .filter(|block| block.kind == "table")
+        {
+            egui::CollapsingHeader::new("Source-overlaid table grid repair").show(ui,|ui| {
+            if ui.add_enabled(region.is_some(),egui::Button::new("Create editable grid and cell mapping draft")).clicked(){let bounds=region.as_ref().unwrap();let rows=block.rows.len();let columns=block.rows.first().map_or(0,Vec::len);if rows>0 && columns>0{let grid=block.geometry.as_ref().and_then(|data|data.grid.clone()).unwrap_or_else(||crate::geometry::TableGrid{row_edges:(0..=rows).map(|row|bounds.top+(bounds.bottom-bounds.top)*row as f32/rows as f32).collect(),column_edges:(0..=columns).map(|column|bounds.left+(bounds.right-bounds.left)*column as f32/columns as f32).collect(),origin:crate::geometry::Origin::HumanConfirmed});let repair=crate::geometry_repair::GridRepair{grid,mapping:(0..rows).flat_map(|row|(0..columns).map(move|col|crate::geometry_repair::CellMove{from_row:row,from_col:col,to_row:row,to_col:col})).collect(),merges:block.merges.clone(),header_rows:block.header_rows};w.grid_repair=serde_json::to_string_pretty(&repair).unwrap_or_default();}}
+            ui.small("A draft without measured grid geometry uses an evenly spaced proposal. Adjust boundaries against the source before applying. Every old cell must be mapped explicitly; new split cells start empty.");
+            ui.add(egui::TextEdit::multiline(&mut w.grid_repair).code_editor().char_limit(200_000).desired_rows(10).desired_width(f32::INFINITY)).accessible_name("Table grid boundaries, merges and cell mappings JSON");
+            if ui.add_enabled(ready && !w.grid_repair.trim().is_empty(),egui::Button::new("Preview repaired grid on the source")).clicked(){let result=serde_json::from_str::<crate::geometry_repair::GridRepair>(&w.grid_repair).map_err(anyhow::Error::from).and_then(|repair|crate::geometry_repair::preview_grid(&project,&page,index,&repair,&Control::default()));match result{Ok(preview)=>w.grid_preview=Some(preview),Err(error)=>w.report=error.to_string()}}
+            if let Some(preview)=w.grid_preview.clone(){ui.label(&preview.note);ui.label("Previewed grid is overlaid in Review. Inspect the cell mapping and all retained values before applying.");if ui.add_enabled(ready,egui::Button::new("Apply reviewed grid repair")).clicked(){match crate::geometry_repair::apply_grid(&project,&page,&preview,&preview.token,&Control::default()){Ok(revision)=>{w.grid_preview=None;w.report=format!("Table grid saved as revision {revision}");let _=self.open_review(project.root.clone(),ctx);},Err(error)=>w.report=error.to_string()}}}
+        });
+        }
+    }
     fn redaction_tools(&mut self, w: &mut Workbench, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.separator();
         ui.heading("Confirmed source masks and sharing");
         ui.label(crate::redactions::LIMITS);
+        if ui
+            .add_enabled(
+                self.worker.is_none() && w.rx.is_none(),
+                egui::Button::new("Prepare source pages before recognition"),
+            )
+            .clicked()
+            && let Some(input) = rfd::FileDialog::new()
+                .add_filter("Scans", &["pdf", "png", "jpg", "jpeg", "tif", "tiff"])
+                .pick_file()
+            && let Some(output) = rfd::FileDialog::new()
+                .add_filter("Output naming hint", &["docx"])
+                .set_file_name("prepared-notes.docx")
+                .save_file()
+        {
+            let settings = self.state.settings.clone();
+            self.studio_task(ctx,move|c,log|{
+                let project=pipeline::prepare_for_review(&input,&output,&settings,&c,&log)?;
+                Ok(studio::StudioMessage::Project(project,"Source pages prepared without OCR or AI. Inspect the source and confirm masks in Privacy tools before recognizing this prepared project.".into()))
+            });
+        }
         let Some((project, page, region, dirty)) = self.review.as_ref().map(|r| {
             (
                 r.project.clone(),
@@ -401,6 +782,34 @@ impl Desktop {
             return;
         };
         let ready = !dirty && self.worker.is_none() && w.rx.is_none();
+        if project.root.join("prepared-input.json").is_file() {
+            ui.label("Prepared source project. Recognition checks the original input and intended settings before reading its confirmed masked images.");
+            if ui
+                .add_enabled(
+                    ready,
+                    egui::Button::new("Recognize confirmed prepared pages"),
+                )
+                .clicked()
+                && let Some(output) = rfd::FileDialog::new()
+                    .add_filter("Word", &["docx"])
+                    .set_file_name("recognized-notes.docx")
+                    .save_file()
+            {
+                let project = project.clone();
+                let settings = self.state.settings.clone();
+                self.studio_task(ctx, move |c, log| {
+                    let done =
+                        pipeline::recognize_prepared(&project, &output, &settings, &c, &log)?;
+                    let notice = format!(
+                        "Recognized {} prepared pages. {} need review. Word copy: {}",
+                        done.pages,
+                        done.review,
+                        done.output.display()
+                    );
+                    Ok(studio::StudioMessage::Project(done.project, notice))
+                });
+            }
+        }
         let reasons = [
             crate::redactions::Reason::PersonalInformation,
             crate::redactions::Reason::AccountInformation,
@@ -631,27 +1040,28 @@ impl Desktop {
             }
         });
     }
-    fn review_shortcut(action: ReviewAction) -> egui::KeyboardShortcut {
-        egui::KeyboardShortcut::new(
-            egui::Modifiers::COMMAND,
-            match action {
-                ReviewAction::Save => egui::Key::S,
-                ReviewAction::Approve => egui::Key::Enter,
-                ReviewAction::NextIssue => egui::Key::J,
-                ReviewAction::Defer => egui::Key::D,
-            },
-        )
+    fn review_shortcut(&self, action: ReviewAction) -> egui::KeyboardShortcut {
+        self.state.settings.ui.shortcuts.egui(match action {
+            ReviewAction::Save => crate::shortcuts::Action::Save,
+            ReviewAction::Approve => crate::shortcuts::Action::Approve,
+            ReviewAction::NextIssue => crate::shortcuts::Action::NextIssue,
+            ReviewAction::Defer => crate::shortcuts::Action::Defer,
+            ReviewAction::Undo => crate::shortcuts::Action::Undo,
+            ReviewAction::Redo => crate::shortcuts::Action::Redo,
+        })
     }
-    pub(super) fn review_action_label(ctx: &egui::Context, action: ReviewAction) -> String {
+    pub(super) fn review_action_label(&self, ctx: &egui::Context, action: ReviewAction) -> String {
         let name = match action {
             ReviewAction::Save => "Save draft",
             ReviewAction::Approve => "Save & mark reviewed",
             ReviewAction::NextIssue => "Next issue",
             ReviewAction::Defer => "Defer selected issue",
+            ReviewAction::Undo => "Undo revision",
+            ReviewAction::Redo => "Redo revision",
         };
         format!(
             "{name} · {}",
-            ctx.format_shortcut(&Self::review_shortcut(action))
+            ctx.format_shortcut(&self.review_shortcut(action))
         )
     }
     pub(super) fn review_action(
@@ -687,6 +1097,8 @@ impl Desktop {
             }
             ReviewAction::NextIssue => r.next_issue(ctx),
             ReviewAction::Defer => r.defer_selected(ctx),
+            ReviewAction::Undo => r.history_action(false),
+            ReviewAction::Redo => r.history_action(true),
         }
     }
     pub(super) fn review_shortcut_controls(
@@ -724,13 +1136,15 @@ impl Desktop {
                 ReviewAction::Approve,
                 ReviewAction::NextIssue,
                 ReviewAction::Defer,
+                ReviewAction::Undo,
+                ReviewAction::Redo,
             ] {
                 if ctx.input_mut(|i| {
-                    let shortcut = Self::review_shortcut(action);
+                    let shortcut = self.review_shortcut(action);
                     i.events.iter().any(|event| {
                         matches!(event,
                             egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. }
-                            if *key == shortcut.logical_key && !modifiers.alt && !modifiers.shift
+                            if *key == shortcut.logical_key && modifiers.alt==shortcut.modifiers.alt && modifiers.shift==shortcut.modifiers.shift
                                 && modifiers.matches_logically(shortcut.modifiers)
                         )
                     }) && i.consume_shortcut(&shortcut)
@@ -1065,6 +1479,32 @@ impl Desktop {
     }
 
     fn region_reread_tools(&mut self, w: &mut Workbench, ui: &mut egui::Ui, ctx: &egui::Context) {
+        egui::CollapsingHeader::new("Chemical notation checks").show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut w.notation)
+                    .desired_rows(2)
+                    .char_limit(4096)
+                    .hint_text("H₂SO₄, [Fe(CN)₆]³⁻, or 2H₂ + O₂ → 2H₂O"),
+            )
+            .accessible_name("Chemical formula or reaction to validate");
+            ui.checkbox(
+                &mut w.notation_reaction,
+                "This is a reaction with spaced + separators",
+            );
+            if ui.button("Check symbols, counts and charges").clicked() {
+                let result = if w.notation_reaction {
+                    crate::chemistry::reaction(&w.notation).and_then(|report| {
+                        serde_json::to_string_pretty(&report).map_err(Into::into)
+                    })
+                } else {
+                    crate::chemistry::formula(&w.notation).and_then(|report| {
+                        serde_json::to_string_pretty(&report).map_err(Into::into)
+                    })
+                };
+                w.report = result.unwrap_or_else(|error| error.to_string());
+            }
+            ui.small(crate::chemistry::LIMITS);
+        });
         let Some((project, page, selected, region, dirty)) = self.review.as_ref().map(|r| {
             (
                 r.project.clone(),
@@ -1480,7 +1920,7 @@ impl Desktop {
                             ReviewAction::Defer => r.selected_issue().is_some(),
                             _ => r.issues.iter().any(|i| i.page > 0 && !r.deferred_issues.contains(&i.id)),
                         };
-                        if ui.add_enabled(available, egui::Button::new(Self::review_action_label(ui.ctx(), action))).clicked() {
+                        if ui.add_enabled(available, egui::Button::new(self.review_action_label(ui.ctx(), action))).clicked() {
                             match self.review_action(r, action, ui.ctx()) {
                                 Ok(()) => self.review_error.clear(),
                                 Err(e) => self.review_error = e.to_string(),
@@ -1536,54 +1976,75 @@ impl Desktop {
         self.workbench.tab = tab.min(3);
         self.workbench.catalog_loaded = false;
     }
+    pub(super) fn global_shortcut(
+        &self,
+        ctx: &egui::Context,
+        action: crate::shortcuts::Action,
+    ) -> bool {
+        if ctx.text_edit_focused() || egui::Popup::is_any_open(ctx) || self.vault.blocks_close() {
+            return false;
+        }
+        let shortcut = self.state.settings.ui.shortcuts.egui(action);
+        ctx.input_mut(|input| input.events.iter().any(|event|matches!(event,egui::Event::Key{key,pressed:true,repeat:false,modifiers,..} if *key==shortcut.logical_key && modifiers.alt==shortcut.modifiers.alt && modifiers.shift==shortcut.modifiers.shift && modifiers.matches_logically(shortcut.modifiers))) && input.consume_shortcut(&shortcut))
+    }
     pub(super) fn workbench_ui(&mut self, ctx: &egui::Context) {
         self.workbench.poll();
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) {
+        if self.global_shortcut(ctx, crate::shortcuts::Action::Palette) {
             self.workbench.palette = true;
             self.workbench.palette_focus = true;
         }
         if self.workbench.palette {
             let mut open = true;
-            egui::Window::new("Command palette · Ctrl+K")
-                .open(&mut open)
-                .default_width(440.)
-                .show(ctx, |ui| {
-                    let search = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.workbench.palette_query)
-                                .hint_text("Find an action…"),
-                        )
-                        .accessible_name("Command palette: find an action");
-                    if self.workbench.palette_focus {
-                        search.request_focus();
-                        self.workbench.palette_focus = false;
-                    }
-                    let query = self.workbench.palette_query.to_lowercase();
-                    for (id, label) in [
-                        "Import scans · Ctrl+O",
-                        "Projects and search",
-                        "Exports and correction rules",
-                        "Recovery and references",
-                        "Privacy and readability",
-                        "Settings",
-                        "Review results",
-                        "Studio",
-                    ]
-                    .iter()
-                    .enumerate()
-                    {
-                        if label.to_lowercase().contains(&query) && ui.button(*label).clicked() {
-                            match id {
-                                0 => self.pick_files(),
-                                1..=4 => self.tools_open(id - 1),
-                                5 => self.settings_open(0),
-                                6 => self.review_open = true,
-                                _ => self.studio.open = true,
-                            }
-                            self.workbench.palette = false;
+            egui::Window::new(format!(
+                "Command palette · {}",
+                ctx.format_shortcut(
+                    &self
+                        .state
+                        .settings
+                        .ui
+                        .shortcuts
+                        .egui(crate::shortcuts::Action::Palette)
+                )
+            ))
+            .open(&mut open)
+            .default_width(440.)
+            .show(ctx, |ui| {
+                let search = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.workbench.palette_query)
+                            .hint_text("Find an action…"),
+                    )
+                    .accessible_name("Command palette: find an action");
+                if self.workbench.palette_focus {
+                    search.request_focus();
+                    self.workbench.palette_focus = false;
+                }
+                let query = self.workbench.palette_query.to_lowercase();
+                for (id, label) in [
+                    "Import scans · Ctrl+O",
+                    "Projects and search",
+                    "Exports and correction rules",
+                    "Recovery and references",
+                    "Privacy and readability",
+                    "Settings",
+                    "Review results",
+                    "Studio",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    if label.to_lowercase().contains(&query) && ui.button(*label).clicked() {
+                        match id {
+                            0 => self.pick_files(),
+                            1..=4 => self.tools_open(id - 1),
+                            5 => self.settings_open(0),
+                            6 => self.review_open = true,
+                            _ => self.studio.open = true,
                         }
+                        self.workbench.palette = false;
                     }
-                });
+                }
+            });
             self.workbench.palette &= open;
         }
         if !self.workbench.open {
@@ -1642,6 +2103,7 @@ impl Desktop {
                             if !w.metadata.is_empty(){ui.add(egui::TextEdit::multiline(&mut w.metadata).code_editor().desired_rows(12).desired_width(f32::INFINITY)).accessible_name("Project details JSON. Validate and save to apply changes.");if ui.add_enabled(self.worker.is_none(),egui::Button::new("Validate and save project details")).clicked(){match serde_json::from_str(&w.metadata).map_err(anyhow::Error::from).and_then(|m|crate::projects::save_metadata(&r.project,&m)){Ok(())=>w.report="Project details saved.".into(),Err(e)=>w.report=e.to_string()}}}
                         }else{ui.label("Open a project to inspect recovery or attach references.");}
                         self.region_reread_tools(&mut w,ui,ctx);
+                        self.geometry_tools(&mut w,ui,ctx);
                     }
                     _=>{
                         ui.heading("Local activity and data");
@@ -1664,7 +2126,17 @@ impl Desktop {
                             if ui.button("High contrast").clicked(){self.state.settings.ui.dark=true;self.state.settings.ui.background=[0,0,0];self.state.settings.ui.accent=[255,255,0];self.state.settings.ui.reduced_motion=true;}
                             if ui.button("Default appearance").clicked(){let locale=self.state.settings.ui.locale;self.state.settings.ui=Appearance::default();self.state.settings.ui.locale=locale;}
                         });
-                        ui.small("Ctrl+K opens the command palette. Tab moves focus, Enter activates buttons. Review includes source zoom and disagreement markers.");
+                        ui.small(format!("{} opens the command palette. Tab moves focus, Enter activates buttons. Review includes source zoom and disagreement markers.",ctx.format_shortcut(&self.state.settings.ui.shortcuts.egui(crate::shortcuts::Action::Palette))));
+                        egui::CollapsingHeader::new("Keyboard shortcuts").show(ui,|ui| {
+                            let draft=w.shortcut_draft.get_or_insert_with(||self.state.settings.ui.shortcuts.clone());
+                            for (action,label) in crate::shortcuts::ACTIONS { ui.horizontal(|ui|{ui.label(label);ui.add(egui::TextEdit::singleline(draft.get_mut(action)).char_limit(40).desired_width(170.)).accessible_name(format!("Shortcut for {label}"));}); }
+                            ui.small("Use Ctrl, Alt, Shift and one key, for example Ctrl+Shift+S or F6. Ctrl maps to the primary Command key where applicable. Text editors keep their editing shortcuts.");
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Apply keyboard shortcuts").clicked() {match draft.validate(){Ok(())=>{self.state.settings.ui.shortcuts=draft.clone();w.report="Keyboard shortcuts applied. Review actions require the keyboard-review focus button.".into();},Err(error)=>w.report=error.to_string()}}
+                                if ui.button("Reset shortcut draft to defaults").clicked(){*draft=Default::default();}
+                                if ui.button("Reload saved shortcuts").clicked(){*draft=self.state.settings.ui.shortcuts.clone();}
+                            });
+                        });
                         self.resource_tools(&mut w,ui,ctx);
                         self.credential_tools(&mut w,ui,ctx);
                         self.redaction_tools(&mut w,ui,ctx);

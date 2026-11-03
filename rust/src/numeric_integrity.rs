@@ -68,7 +68,7 @@ pub fn check(project: &Project, c: &Control) -> Result<NumericReport> {
     let mut report = NumericReport { note: "Review observations for ASCII numeric notation, ISO dates and slash-separated dates. Locale, identifiers, version numbers and code can explain these patterns. Nothing is corrected automatically. Unit and repeated-identifier variants are available in the consistency check.".into(), ..Default::default() };
     for n in &project.manifest.pages {
         c.check()?;
-        let page = project.load(*n)?;
+        let page = crate::redactions::analysis_page(project, &project.load(*n)?, c)?;
         for (index, block) in page.content.blocks.iter().enumerate() {
             c.check()?;
             report.inspected_blocks += 1;

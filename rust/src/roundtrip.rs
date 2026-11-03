@@ -448,6 +448,7 @@ fn checkpoint(p: &Project, n: usize) -> Result<PathBuf> {
     Ok(path)
 }
 fn current_page(p: &Project, n: usize, c: &Control) -> Result<(CurrentPage, String)> {
+    crate::geometry::verify_metadata_source(p, &p.load(n)?, c)?;
     let path = checkpoint(p, n)?;
     anyhow::ensure!(
         fs::metadata(&path)?.len() <= XML_LIMIT,

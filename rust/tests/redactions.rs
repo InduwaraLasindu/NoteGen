@@ -513,6 +513,9 @@ fn sharing_transaction_has_masked_pixels_public_text_and_no_private_sidecars_or_
     assert!(shared.content.plain().contains("[redacted]"));
     assert!(shared.candidates.is_empty() && shared.manual_layers.is_empty());
     let manifest = String::from_utf8(bytes(&mut zip, "project/project.json")).unwrap();
+    let public_manifest: Manifest = serde_json::from_str(&manifest).unwrap();
+    assert!(public_manifest.settings.shared_model_store.is_relative());
+    assert!(public_manifest.settings.project_lock.is_none());
     for text in [&page_json, &manifest] {
         for secret in [
             "secret-user-name",
@@ -565,6 +568,390 @@ fn sharing_transaction_has_masked_pixels_public_text_and_no_private_sidecars_or_
         )
         .is_err()
     );
+}
+
+#[test]
+fn public_projection_uses_allowlisted_metadata_and_detects_source_or_mask_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut project = fixture(root.path());
+    let mut observed = project.load(1).unwrap();
+    observed.content.blocks[0].geometry = Some(notegen::geometry::BlockGeometry {
+        source: Some(
+            redactions::source_identity(&project, &observed, &Control::default()).unwrap(),
+        ),
+        words: vec![notegen::geometry::WordBox {
+            text: "PRIVATE GEOMETRY text outside the visible block".into(),
+            region: region(0.1, 0.05, 0.3, 0.1),
+            confidence: None,
+            line: None,
+            cell: None,
+            origin: notegen::geometry::Origin::TesseractTsv,
+        }],
+        ..Default::default()
+    });
+    project.save(&observed).unwrap();
+    add_mask(&project);
+    // An in-memory UI preference may differ from the original on-disk manifest.
+    project.manifest.settings.ui.dark = !project.manifest.settings.ui.dark;
+    let original = fingerprint(&project.load(1).unwrap()).unwrap();
+    let projection = redactions::ExportProjection::new(&project, &Control::default())
+        .unwrap()
+        .unwrap();
+    let public = projection.project();
+    assert!(public.manifest.settings.shared_model_store.is_relative());
+    assert!(public.manifest.settings.project_lock.is_none());
+    assert!(public.manifest.models.is_empty());
+    let page = public.load(1).unwrap();
+    assert!(page.confirmed_redactions.is_empty() && page.candidates.is_empty());
+    assert!(
+        page.content
+            .blocks
+            .iter()
+            .all(|block| block.alternatives.is_empty() && block.geometry.is_none())
+    );
+    let manifest = fs::read_to_string(public.root.join("project.json")).unwrap();
+    assert!(!manifest.contains("secret-user-name") && !manifest.contains("private-project"));
+    assert!(
+        !serde_json::to_string(&page)
+            .unwrap()
+            .contains("PRIVATE GEOMETRY")
+    );
+    assert_eq!(
+        image::open(public.image(1)).unwrap().to_rgb8()[(25, 25)],
+        Rgb([0, 0, 0])
+    );
+    projection
+        .verify_unchanged(&project, &Control::default())
+        .unwrap();
+    assert_eq!(fingerprint(&project.load(1).unwrap()).unwrap(), original);
+    let mut changed = project.load(1).unwrap();
+    changed.confirmed_redactions.clear();
+    project.save(&changed).unwrap();
+    assert!(
+        projection
+            .verify_unchanged(&project, &Control::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn unmasked_exports_fail_closed_when_observed_geometry_source_was_replaced() {
+    use notegen::{
+        exports::{self, Format},
+        geometry, word,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let project = fixture(root.path());
+    let mut page = project.load(1).unwrap();
+    page.content.blocks[0].geometry = Some(geometry::BlockGeometry {
+        source: Some(redactions::source_identity(&project, &page, &Control::default()).unwrap()),
+        ..Default::default()
+    });
+    project.save(&page).unwrap();
+    RgbImage::from_pixel(100, 80, Rgb([7, 8, 9]))
+        .save(project.image(1))
+        .unwrap();
+    let target = root.path().join("withheld.docx");
+    assert!(word::export(&project, &target, &Control::default()).is_err());
+    assert!(!target.exists());
+    for format in [
+        Format::Markdown,
+        Format::Html,
+        Format::Latex,
+        Format::Traceability,
+        Format::Spreadsheet,
+    ] {
+        let target = root.path().join(format!("withheld.{}", format.extension()));
+        assert!(exports::export(&project, &target, format, &Control::default()).is_err());
+        assert!(!target.exists());
+    }
+    assert_eq!(
+        project.load(1).unwrap().content.blocks[0].text,
+        "Public heading Ω"
+    );
+}
+
+#[test]
+fn ordinary_exports_omit_covered_text_original_links_and_word_import_baseline() {
+    use notegen::{
+        exports::{self, Format},
+        roundtrip, word,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let project = fixture(root.path());
+    add_mask(&project);
+    let before = fingerprint(&project.load(1).unwrap()).unwrap();
+    for format in [
+        Format::Markdown,
+        Format::Html,
+        Format::Latex,
+        Format::Traceability,
+        Format::Spreadsheet,
+    ] {
+        let target = root.path().join(format!("visible.{}", format.extension()));
+        exports::export(&project, &target, format, &Control::default()).unwrap();
+        let texts = if format == Format::Spreadsheet {
+            let mut zip = zip::ZipArchive::new(fs::File::open(&target).unwrap()).unwrap();
+            let mut result = vec![];
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).unwrap();
+                if entry.name().ends_with(".xml") || entry.name().ends_with(".rels") {
+                    let mut value = String::new();
+                    entry.read_to_string(&mut value).unwrap();
+                    result.push(value);
+                }
+            }
+            result
+        } else {
+            vec![fs::read_to_string(&target).unwrap()]
+        };
+        for text in texts {
+            for hidden in [
+                "secret-user-name",
+                "private-1250",
+                "Ungrounded private note",
+                "PRIVATE",
+                "file://",
+                "private-project",
+            ] {
+                assert!(!text.contains(hidden), "{format:?}: {hidden}");
+            }
+        }
+        assert!(exports::export(&project, &target, format, &Control::default()).is_err());
+        assert!(
+            exports::export(
+                &project,
+                &project.root.join(format!("blocked.{}", format.extension())),
+                format,
+                &Control::default()
+            )
+            .is_err()
+        );
+    }
+    let target = root.path().join("visible.docx");
+    word::export(&project, &target, &Control::default()).unwrap();
+    let mut zip = zip::ZipArchive::new(fs::File::open(&target).unwrap()).unwrap();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).unwrap();
+        assert!(!entry.name().starts_with("customXml/"));
+        if entry.name().ends_with(".xml") || entry.name().ends_with(".rels") {
+            let mut text = String::new();
+            entry.read_to_string(&mut text).unwrap();
+            assert!(
+                !text.contains("secret-user-name")
+                    && !text.contains("private-1250")
+                    && !text.contains("PRIVATE")
+            );
+        }
+    }
+    assert!(
+        roundtrip::preview(&project, &target, &Control::default())
+            .unwrap_err()
+            .to_string()
+            .contains("redacted export")
+    );
+    assert_eq!(fingerprint(&project.load(1).unwrap()).unwrap(), before);
+}
+
+#[test]
+fn read_only_reports_keep_canonical_indices_and_cannot_find_covered_strings() {
+    use notegen::{numeric_integrity, projects};
+    let root = tempfile::tempdir().unwrap();
+    let project = fixture(root.path());
+    add_mask(&project);
+    let canonical = project.load(1).unwrap();
+    let view = redactions::analysis_page(&project, &canonical, &Control::default()).unwrap();
+    assert_eq!(view.content.blocks.len(), canonical.content.blocks.len());
+    assert_eq!(view.content.blocks[0].text, "Public heading Ω");
+    assert_eq!(view.content.blocks[1].text, "[redacted]");
+    assert_eq!(
+        view.content.blocks[4].description,
+        "Public geometric figure"
+    );
+    let roots = std::slice::from_ref(&project.root);
+    assert!(
+        projects::search(roots, "secret-user-name", 20)
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+    let visible = projects::search(roots, "geometric", 20).unwrap();
+    assert_eq!(visible.hits[0].block, 4);
+    assert!(visible.hits[0].image.as_os_str().is_empty());
+    let report =
+        serde_json::to_string(&numeric_integrity::check(&project, &Control::default()).unwrap())
+            .unwrap();
+    assert!(!report.contains("private-1250") && !report.contains("secret-user-name"));
+    assert_eq!(
+        fingerprint(&project.load(1).unwrap()).unwrap(),
+        fingerprint(&canonical).unwrap()
+    );
+}
+
+#[test]
+fn prepare_only_runs_without_any_ocr_binary_and_refuses_changed_prepared_identity() {
+    use notegen::{pipeline, storage::Activity};
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.png");
+    RgbImage::from_pixel(240, 160, Rgb([255, 255, 255]))
+        .save(&source)
+        .unwrap();
+    let original = fs::read(&source).unwrap();
+    let settings = Settings {
+        preset: Preset::Fast,
+        tesseract: root.path().join("NO-OCR-EXECUTABLE"),
+        models_dir: root.path().join("isolated-models"),
+        auto_rotate: true,
+        deskew: false,
+        ..Default::default()
+    };
+    let output = root.path().join("prepared.docx");
+    let project = pipeline::prepare_for_review(
+        &source,
+        &output,
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    assert!(!output.exists());
+    let page = project.load(1).unwrap();
+    assert!(
+        page.candidates.is_empty()
+            && page.content.blocks.is_empty()
+            && page.script_detection.is_none()
+    );
+    let mut changed = settings.clone();
+    changed.dpi = 300;
+    let error = pipeline::recognize_prepared(
+        &project,
+        &output,
+        &changed,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("settings or reader versions changed"),
+        "{error}"
+    );
+    RgbImage::from_pixel(240, 160, Rgb([1, 2, 3]))
+        .save(&source)
+        .unwrap();
+    let error = pipeline::recognize_prepared(
+        &project,
+        &output,
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Prepared input changed"), "{error}");
+    assert!(!output.exists());
+    assert_ne!(fs::read(source).unwrap(), original);
+    assert!(project.load(1).unwrap().candidates.is_empty());
+}
+
+#[test]
+fn native_prepared_masks_precede_ocr_and_word_contains_only_visible_readings() {
+    use ab_glyph::FontArc;
+    use notegen::{pipeline, storage::Activity, word};
+    let root = tempfile::tempdir().unwrap();
+    let font_path = [
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    .iter()
+    .find(|path| Path::new(path).is_file())
+    .unwrap();
+    let font = FontArc::try_from_vec(fs::read(font_path).unwrap()).unwrap();
+    let mut image = RgbImage::from_pixel(1000, 650, Rgb([255, 255, 255]));
+    for (y, text) in [(60, "Public Total 1250"), (350, "secret-user-name")] {
+        imageproc::drawing::draw_text_mut(&mut image, Rgb([0, 0, 0]), 40, y, 52., &font, text);
+    }
+    let source = root.path().join("source.png");
+    image.save(&source).unwrap();
+    let original = fs::read(&source).unwrap();
+    let mut settings = Settings {
+        preset: Preset::Fast,
+        models_dir: root.path().join("isolated-models"),
+        auto_rotate: false,
+        deskew: false,
+        ..Default::default()
+    };
+    settings.assistance.ask_questions = false;
+    let output = root.path().join("recognized.docx");
+    let project = pipeline::prepare_for_review(
+        &source,
+        &output,
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    let before = project.load(1).unwrap();
+    let preview = redactions::preview_confirmation(
+        &project,
+        &before,
+        &[MaskSpec {
+            region: region(0.02, 0.45, 0.9, 0.75),
+            reason: Reason::PersonalInformation,
+        }],
+        &Control::default(),
+    )
+    .unwrap();
+    let mut after = before.clone();
+    after.confirmed_redactions = redactions::confirm(
+        &project,
+        &before,
+        &preview,
+        &preview.token,
+        &[0],
+        &Control::default(),
+    )
+    .unwrap();
+    // Match the production confirmation transaction, including visible placeholders.
+    let mut after = redactions::effective_page(&project, &after, &Control::default())
+        .unwrap()
+        .0;
+    after.edited = true;
+    review::commit(&project, &before, &after, "Confirm before recognition").unwrap();
+    let done = pipeline::recognize_prepared(
+        &project,
+        &output,
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    let recognized = done.project.load(1).unwrap();
+    assert!(
+        recognized.content.plain().contains("1250"),
+        "{}",
+        recognized.content.plain()
+    );
+    assert!(recognized.content.plain().contains("[redacted]"));
+    assert!(
+        !serde_json::to_string(&recognized)
+            .unwrap()
+            .contains("secret-user-name")
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(project.image(1)).unwrap(), original);
+    let mut zip = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+    let mut xml = String::new();
+    zip.by_name("word/document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    assert!(xml.contains("1250") && !xml.contains("secret-user-name"));
+    assert!(zip.by_name("customXml/item1.xml").is_err());
+    let second = root.path().join("resumed.docx");
+    // The export is independently repeatable; the private source is preserved.
+    word::export(&done.project, &second, &Control::default()).unwrap();
+    assert!(second.is_file());
 }
 
 #[test]
