@@ -18,7 +18,7 @@ fn draw(
     ctx: &egui::Context,
     size: Vec2,
     events: Vec<egui::Event>,
-    render: impl FnOnce(&mut Desktop, &mut egui::Ui),
+    mut render: impl FnMut(&mut Desktop, &mut egui::Ui),
 ) -> TreeUpdate {
     app.theme(ctx);
     let mut output = ctx.run_ui(

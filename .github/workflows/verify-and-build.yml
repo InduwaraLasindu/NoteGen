@@ -188,7 +188,7 @@ jobs:
         timeout-minutes: 5
         continue-on-error: true
         # Keep compiled dependencies for the next regression run. Failed checks still fail the job.
-        if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.static_checks.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry
