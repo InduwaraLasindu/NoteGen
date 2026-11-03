@@ -147,9 +147,12 @@ fn main() -> eframe::Result {
                 app.advanced_open();
             }
             if mode == "review" {
-                app.open_review(
-                    project.clone().expect("review requires PROJECT directory"),
-                    &cc.egui_ctx,
+                let project = project.clone().expect("review requires PROJECT directory");
+                assert!(
+                    app.open_review(project.clone(), &cc.egui_ctx),
+                    "Review capture could not open {}: {}",
+                    project.display(),
+                    app.notice
                 );
             }
             if let Some(tab) = [
@@ -162,7 +165,12 @@ fn main() -> eframe::Result {
             .position(|m| *m == mode)
             {
                 if let Some(project) = project.as_ref() {
-                    app.open_review(project.clone(), &cc.egui_ctx);
+                    assert!(
+                        app.open_review(project.clone(), &cc.egui_ctx),
+                        "Workbench capture could not open {}: {}",
+                        project.display(),
+                        app.notice
+                    );
                 }
                 app.tools_open(tab);
             }

@@ -10,6 +10,7 @@ use notegen::{
 };
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 use std::{
+    cell::Cell,
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -266,14 +267,18 @@ fn cancellation_during_stream_closes_owned_process() {
 struct DetachedStorage<'a> {
     attached: &'a Path,
     detached: &'a Path,
+    failure: Cell<Option<(std::io::ErrorKind, Option<i32>)>>,
 }
 impl Serialize for DetachedStorage<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        fs::rename(self.attached, self.detached).map_err(serde::ser::Error::custom)?;
+        if let Err(error) = fs::rename(self.attached, self.detached) {
+            self.failure.set(Some((error.kind(), error.raw_os_error())));
+            return Err(serde::ser::Error::custom(error));
+        }
         "new complete value".serialize(serializer)
     }
 }
-fn storage_disappears_during_atomic_publication() {
+fn atomic_publication_preserves_output_during_platform_storage_failure() {
     let root = tempfile::tempdir().unwrap();
     let attached = root.path().join("attached-storage");
     let detached = root.path().join("detached-storage");
@@ -281,19 +286,43 @@ fn storage_disappears_during_atomic_publication() {
     let target = attached.join("working.json");
     let original = b"{\"preserved\":\"working output\"}";
     fs::write(&target, original).unwrap();
-    assert!(
-        storage::atomic_json(
-            &target,
-            &DetachedStorage {
-                attached: &attached,
-                detached: &detached
-            }
-        )
-        .is_err()
-    );
-    assert!(!attached.exists());
-    assert_eq!(fs::read(detached.join("working.json")).unwrap(), original);
-    fs::rename(&detached, &attached).unwrap();
+    let injection = DetachedStorage {
+        attached: &attached,
+        detached: &detached,
+        failure: Cell::new(None),
+    };
+    let error = storage::atomic_json(&target, &injection).unwrap_err();
+    #[cfg(windows)]
+    {
+        // Windows deliberately refuses a directory rename while a descendant
+        // temporary file is open. Exercise that real I/O failure; do not claim
+        // that the backing directory disappeared on this platform.
+        assert!(
+            matches!(injection.failure.get(), Some((_, Some(5 | 32)))),
+            "expected Win32 access/sharing refusal, got {:?}: {error:#}",
+            injection.failure.get()
+        );
+        assert!(attached.is_dir() && !detached.exists());
+        assert_eq!(
+            fs::read_dir(&attached).unwrap().count(),
+            1,
+            "failed serialization left a partial staging file"
+        );
+        println!(
+            "Windows directory detachment was refused with an open staging handle; previous output and retry verified."
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            injection.failure.get(),
+            None,
+            "directory detachment failed before publication: {error:#}"
+        );
+        assert!(!attached.exists());
+        assert_eq!(fs::read(detached.join("working.json")).unwrap(), original);
+        fs::rename(&detached, &attached).unwrap();
+    }
     assert_eq!(fs::read(&target).unwrap(), original);
     storage::atomic_json(&target, &"recovered complete value").unwrap();
     assert_eq!(
@@ -301,30 +330,59 @@ fn storage_disappears_during_atomic_publication() {
         "recovered complete value"
     );
 }
-fn storage_disappears_during_protected_publication() {
+fn protected_publication_preserves_output_during_platform_storage_failure() {
     let root = tempfile::tempdir().unwrap();
     let attached = root.path().join("attached-storage");
     let detached = root.path().join("detached-storage");
     fs::create_dir(&attached).unwrap();
     fs::write(attached.join("previous.docx"), b"previous output preserved").unwrap();
     let target = attached.join("new-output.json");
-    assert!(
-        storage::protected_json(
-            &target,
-            &DetachedStorage {
-                attached: &attached,
-                detached: &detached
-            }
-        )
-        .is_err()
-    );
-    assert!(!attached.exists());
-    assert!(!detached.join("new-output.json").exists());
+    let injection = DetachedStorage {
+        attached: &attached,
+        detached: &detached,
+        failure: Cell::new(None),
+    };
+    let error = storage::protected_json(&target, &injection).unwrap_err();
+    #[cfg(windows)]
+    {
+        assert!(
+            matches!(injection.failure.get(), Some((_, Some(5 | 32)))),
+            "expected Win32 access/sharing refusal, got {:?}: {error:#}",
+            injection.failure.get()
+        );
+        assert!(attached.is_dir() && !detached.exists());
+        assert!(
+            !target.exists(),
+            "refused detachment published an incomplete final file"
+        );
+        assert_eq!(
+            fs::read_dir(&attached).unwrap().count(),
+            1,
+            "failed serialization left a partial staging file"
+        );
+        println!(
+            "Windows directory detachment was refused with an open staging handle; no new output was published and retry verified."
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            injection.failure.get(),
+            None,
+            "directory detachment failed before publication: {error:#}"
+        );
+        assert!(!attached.exists());
+        assert!(!detached.join("new-output.json").exists());
+        assert_eq!(
+            fs::read(detached.join("previous.docx")).unwrap(),
+            b"previous output preserved"
+        );
+        fs::rename(&detached, &attached).unwrap();
+    }
     assert_eq!(
-        fs::read(detached.join("previous.docx")).unwrap(),
+        fs::read(attached.join("previous.docx")).unwrap(),
         b"previous output preserved"
     );
-    fs::rename(&detached, &attached).unwrap();
     storage::protected_json(&target, &"recovered complete value").unwrap();
     assert_eq!(
         storage::read_json::<String>(&target, 1000).unwrap(),
@@ -424,12 +482,20 @@ fn main() -> ExitCode {
             cancellation_during_stream_closes_owned_process,
         ),
         (
-            "storage_disappears_during_atomic_publication",
-            storage_disappears_during_atomic_publication,
+            if cfg!(windows) {
+                "windows_open_handle_detachment_refusal_preserves_atomic_output_and_retry"
+            } else {
+                "unix_directory_detachment_preserves_atomic_output_and_retry"
+            },
+            atomic_publication_preserves_output_during_platform_storage_failure,
         ),
         (
-            "storage_disappears_during_protected_publication",
-            storage_disappears_during_protected_publication,
+            if cfg!(windows) {
+                "windows_open_handle_detachment_refusal_preserves_protected_output_and_retry"
+            } else {
+                "unix_directory_detachment_preserves_protected_output_and_retry"
+            },
+            protected_publication_preserves_output_during_platform_storage_failure,
         ),
         (
             "abrupt_writer_process_exit_keeps_working_output_and_allows_recovery",
