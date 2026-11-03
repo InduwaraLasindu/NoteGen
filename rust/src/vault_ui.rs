@@ -977,7 +977,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&draft).unwrap(), invalid);
         ui.lock(&ctx);
         wait(&mut ui, &ctx);
-        assert!(ui.copy.is_none());
+        assert!(ui.copy.is_none(), "Encrypted lock failed: {}", ui.error);
         assert!(!ui.blocks_close(), "{}", ui.error);
         assert!(!managed.exists());
         assert_eq!(

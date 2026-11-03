@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant, SystemTime},
@@ -150,13 +150,79 @@ struct SourceFile {
     source: PathBuf,
     entry: FileEntry,
     modified: SystemTime,
+    held: Option<File>,
 }
 struct Snapshot {
     files: Vec<SourceFile>,
     directories: Vec<String>,
-    _locks: Vec<File>,
     observed_directories: Vec<(PathBuf, SystemTime)>,
     total_bytes: u64,
+}
+enum SnapshotReader<'a> {
+    Held(&'a File),
+    Opened(File),
+}
+impl SnapshotReader<'_> {
+    fn file(&self) -> &File {
+        match self {
+            Self::Held(file) => file,
+            Self::Opened(file) => file,
+        }
+    }
+}
+impl Read for SnapshotReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let mut file = self.file();
+        file.read(buffer)
+    }
+}
+fn source_reader(source: &SourceFile) -> Result<SnapshotReader<'_>> {
+    no_links(&source.source)?;
+    let reader = if let Some(file) = &source.held {
+        SnapshotReader::Held(file)
+    } else {
+        SnapshotReader::Opened(File::open(&source.source).map_err(|error| {
+            fail(&format!(
+                "Cannot open snapshot data file (OS error {:?})",
+                error.raw_os_error()
+            ))
+        })?)
+    };
+    // Windows byte-range locks are mandatory for other handles, including ones
+    // opened by this process. Read the held control file through its owning
+    // handle; keep the exclusion intact during hashing/encryption/verification.
+    let mut file = reader.file();
+    file.seek(SeekFrom::Start(0))?;
+    Ok(reader)
+}
+fn source_hash(source: &SourceFile, c: &Control) -> Result<String> {
+    let mut reader = source_reader(source)?;
+    let mut hash = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        c.check()?;
+        let count = reader.read(&mut buffer).map_err(|error| {
+            fail(&format!(
+                "Snapshot source hashing failed (OS error {:?})",
+                error.raw_os_error()
+            ))
+        })?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        anyhow::ensure!(
+            total <= source.entry.bytes,
+            fail("Snapshot source grew while hashing")
+        );
+        hash.update(&buffer[..count]);
+    }
+    anyhow::ensure!(
+        total == source.entry.bytes,
+        fail("Snapshot source shrank while hashing")
+    );
+    Ok(hex::encode(hash.finalize()))
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -964,7 +1030,7 @@ fn add_file(
         before.is_file() && before.len() <= options.max_file_bytes,
         fail("Workspace entry is not a bounded regular file")
     );
-    if source
+    let held = if source
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.ends_with(".lock"))
@@ -972,24 +1038,28 @@ fn add_file(
         let lock = OpenOptions::new().read(true).write(true).open(source)?;
         lock.try_lock()
             .map_err(|_| fail("A project worker is still using the source snapshot"))?;
-        snapshot._locks.push(lock);
-    }
-    let sha256 = hash_file(source, c)?;
+        Some(lock)
+    } else {
+        None
+    };
+    let mut file = SourceFile {
+        source: source.into(),
+        entry: FileEntry {
+            path,
+            bytes: before.len(),
+            sha256: String::new(),
+        },
+        modified: before.modified()?,
+        held,
+    };
+    file.entry.sha256 = source_hash(&file, c)?;
     let after = fs::symlink_metadata(source)?;
     no_links(source)?;
     anyhow::ensure!(
         before.len() == after.len() && before.modified()? == after.modified()?,
         fail("Workspace source changed while inspecting it")
     );
-    snapshot.files.push(SourceFile {
-        source: source.into(),
-        entry: FileEntry {
-            path,
-            bytes: after.len(),
-            sha256,
-        },
-        modified: after.modified()?,
-    });
+    snapshot.files.push(file);
     anyhow::ensure!(
         snapshot.files.len() + snapshot.directories.len() <= options.max_files,
         fail("Workspace exceeds its file-count budget")
@@ -1127,10 +1197,10 @@ fn encrypt_snapshot(
     for source in &snapshot.files {
         c.check()?;
         no_links(&source.source)?;
-        let mut file = File::open(&source.source)?;
+        let mut file = source_reader(source)?;
         anyhow::ensure!(
-            file.metadata()?.len() == source.entry.bytes
-                && file.metadata()?.modified()? == source.modified,
+            file.file().metadata()?.len() == source.entry.bytes
+                && file.file().metadata()?.modified()? == source.modified,
             fail("Workspace changed after its snapshot preview")
         );
         let mut hash = Sha256::new();
@@ -1138,7 +1208,12 @@ fn encrypt_snapshot(
         while remaining > 0 {
             c.check()?;
             let count = remaining.min(buffer.len() as u64) as usize;
-            file.read_exact(&mut buffer[..count])?;
+            file.read_exact(&mut buffer[..count]).map_err(|error| {
+                fail(&format!(
+                    "Snapshot source encryption read failed (OS error {:?})",
+                    error.raw_os_error()
+                ))
+            })?;
             writer.write_all(&buffer[..count])?;
             hash.update(&buffer[..count]);
             remaining -= count as u64;
@@ -1146,7 +1221,7 @@ fn encrypt_snapshot(
         let mut extra = [0u8; 1];
         anyhow::ensure!(
             file.read(&mut extra)? == 0
-                && file.metadata()?.modified()? == source.modified
+                && file.file().metadata()?.modified()? == source.modified
                 && hex::encode(hash.finalize()) == source.entry.sha256,
             fail("Workspace changed while encrypting it")
         );
@@ -1180,7 +1255,7 @@ fn unchanged(snapshot: &Snapshot, c: &Control) -> Result<()> {
             metadata.is_file()
                 && metadata.len() == file.entry.bytes
                 && metadata.modified()? == file.modified
-                && hash_file(&file.source, c)? == file.entry.sha256,
+                && source_hash(file, c)? == file.entry.sha256,
             fail("Workspace changed before committing its encrypted snapshot")
         );
     }
@@ -1273,7 +1348,6 @@ pub fn create(
     let mut snapshot = Snapshot {
         files: vec![],
         directories: vec!["work".into()],
-        _locks: vec![],
         observed_directories: vec![],
         total_bytes: 0,
     };
@@ -1805,7 +1879,6 @@ impl WorkCopy {
         let mut snapshot = Snapshot {
             files: vec![],
             directories: vec![],
-            _locks: vec![],
             observed_directories: vec![],
             total_bytes: 0,
         };
@@ -1879,7 +1952,9 @@ impl WorkCopy {
             )?;
             // Native/project worker handles are all joined; release source locks
             // before Windows file/directory cleanup, keeping the session lock held.
-            snapshot._locks.clear();
+            for file in &mut snapshot.files {
+                file.held.take();
+            }
             let report = cleanup_copy(
                 &self.session,
                 &self.owner_hashes,
@@ -2087,6 +2162,56 @@ fn cleanup_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_reads_and_retains_control_file_bytes_without_releasing_its_exclusion() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("project.lock");
+        let bytes = b"retained nonempty control-file bytes\r\n";
+        fs::write(&path, bytes).unwrap();
+        let mut snapshot = Snapshot {
+            files: vec![],
+            directories: vec![],
+            observed_directories: vec![],
+            total_bytes: 0,
+        };
+        add_file(
+            &mut snapshot,
+            &path,
+            "work/project.lock".into(),
+            &Options::default(),
+            &Control::default(),
+        )
+        .unwrap();
+        let competitor = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(
+            competitor.try_lock().is_err(),
+            "snapshot must keep its exclusive worker guard"
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                source_hash(&snapshot.files[0], &Control::default()).unwrap(),
+                digest(bytes)
+            );
+            let mut reader = source_reader(&snapshot.files[0]).unwrap();
+            let mut actual = vec![];
+            reader.read_to_end(&mut actual).unwrap();
+            assert_eq!(actual, bytes);
+        }
+        unchanged(&snapshot, &Control::default()).unwrap();
+        assert!(
+            competitor.try_lock().is_err(),
+            "verification must not briefly release the guard"
+        );
+        drop(snapshot);
+        competitor.try_lock().unwrap();
+        competitor.unlock().unwrap();
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
 
     #[cfg(windows)]
     #[test]
