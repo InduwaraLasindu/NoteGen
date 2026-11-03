@@ -148,6 +148,8 @@ fn evidence_label(page: &Page) -> String {
 mod download_ui;
 #[path = "experience.rs"]
 mod experience;
+#[path = "project_workbench.rs"]
+mod project_workbench;
 #[path = "studio.rs"]
 mod studio;
 #[path = "vault_ui.rs"]
@@ -3463,6 +3465,22 @@ mod acceptance {
         };
         review_access_tree(&mut app, &ctx, viewport, key(false));
         assert_eq!(fingerprint(&project.load(1).unwrap()).unwrap(), baseline);
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::Key {
+                key: egui::Key::S,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..Default::default()
+                },
+            }],
+        );
         review_access_tree(&mut app, &ctx, viewport, key(true));
         assert_eq!(
             project.load(1).unwrap().content.plain(),

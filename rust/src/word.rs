@@ -344,7 +344,11 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
-    let assets = tempfile::tempdir_in(parent)?;
+    let assets = if c.private_temp_root.is_some() {
+        crate::storage::temporary_dir(c, "notegen-word-assets-")?
+    } else {
+        tempfile::tempdir_in(parent)?
+    };
     let document = assets.path().join("document.xml");
     let mut body = BufWriter::new(fs::File::create(&document)?);
     body.write_all(DOCUMENT_HEADER)?;

@@ -113,10 +113,10 @@ fn lock(p: &Project) -> Result<fs::File> {
         .map_err(|_| fail("Another review operation is active; retry after it finishes"))?;
     Ok(f)
 }
-fn page_valid(p: &Project, page: &Page) -> Result<()> {
+fn page_valid(_p: &Project, page: &Page, known: &BTreeSet<usize>) -> Result<()> {
     page.validate()?;
     anyhow::ensure!(
-        p.manifest.pages.contains(&page.page) && page.image == format!("page-{:05}.png", page.page),
+        known.contains(&page.page) && page.image == format!("page-{:05}.png", page.page),
         fail("Revision references an invalid source page")
     );
     anyhow::ensure!(
@@ -147,7 +147,7 @@ fn page_valid(p: &Project, page: &Page) -> Result<()> {
 fn empty(p: &Project) -> Result<History> {
     Ok(History {
         schema: 1,
-        project: fingerprint(&p.manifest)?,
+        project: crate::project_layout::review_anchor(p)?,
         next_id: 1,
         cursor: 0,
         revisions: vec![],
@@ -163,9 +163,10 @@ fn read_history(p: &Project) -> Result<History> {
     Ok(h)
 }
 fn validate_history(p: &Project, h: &History) -> Result<()> {
+    let known = crate::project_layout::known_pages(p)?;
     anyhow::ensure!(
         h.schema == 1
-            && h.project == fingerprint(&p.manifest)?
+            && h.project == crate::project_layout::review_anchor(p)?
             && h.cursor <= h.revisions.len()
             && h.revisions.len() <= MAX_REVISIONS,
         fail("Invalid or mismatched review history")
@@ -179,13 +180,13 @@ fn validate_history(p: &Project, h: &History) -> Result<()> {
                 && !r.label.trim().is_empty()
                 && r.label.len() <= 200
                 && (!r.changes.is_empty() || !r.files.is_empty())
-                && r.changes.len() <= p.manifest.pages.len(),
+                && r.changes.len() <= known.len(),
             fail("Invalid review revision")
         );
         let mut pages = BTreeSet::new();
         for c in &r.changes {
-            page_valid(p, &c.before)?;
-            page_valid(p, &c.after)?;
+            page_valid(p, &c.before, &known)?;
+            page_valid(p, &c.after, &known)?;
             anyhow::ensure!(
                 c.before.page == c.after.page && pages.insert(c.after.page),
                 fail("Duplicate or mismatched revision pages")
@@ -201,7 +202,7 @@ fn recover_locked(p: &Project) -> Result<()> {
     }
     let pending: Pending = read_json(&pending_path(p), HISTORY_LIMIT)?;
     anyhow::ensure!(
-        pending.schema == 1 && pending.project == fingerprint(&p.manifest)?,
+        pending.schema == 1 && pending.project == crate::project_layout::review_anchor(p)?,
         fail("Review recovery belongs to another project")
     );
     validate_history(p, &pending.history)?;
@@ -210,9 +211,10 @@ fn recover_locked(p: &Project) -> Result<()> {
         current == pending.before_history || current == fingerprint(&pending.history)?,
         fail("Review history changed during recovery; pending transaction preserved")
     );
+    let known = crate::project_layout::known_pages(p)?;
     for c in &pending.changes {
-        page_valid(p, &c.before)?;
-        page_valid(p, &c.after)?;
+        page_valid(p, &c.before, &known)?;
+        page_valid(p, &c.after, &known)?;
         anyhow::ensure!(c.before.page == c.after.page, fail("Invalid recovery page"));
         let current = fingerprint(&p.load(c.after.page)?)?;
         anyhow::ensure!(
@@ -261,9 +263,10 @@ fn transact(
     files: Vec<FileChange>,
 ) -> Result<Vec<Page>> {
     validate_history(p, &next)?;
+    let known = crate::project_layout::known_pages(p)?;
     for c in &changes {
-        page_valid(p, &c.before)?;
-        page_valid(p, &c.after)?;
+        page_valid(p, &c.before, &known)?;
+        page_valid(p, &c.after, &known)?;
         anyhow::ensure!(
             fingerprint(&p.load(c.before.page)?)? == fingerprint(&c.before)?,
             fail("Review is stale; reload the page before applying this change")
@@ -278,7 +281,7 @@ fn transact(
     }
     let pending = Pending {
         schema: 1,
-        project: fingerprint(&p.manifest)?,
+        project: crate::project_layout::review_anchor(p)?,
         before_history: fingerprint(old)?,
         history: next,
         changes,
@@ -587,7 +590,7 @@ pub fn snapshot(p: &Project, revision: u64, page: usize) -> Result<Page> {
     recover_locked(p)?;
     let h = read_history(p)?;
     anyhow::ensure!(
-        p.manifest.pages.contains(&page),
+        crate::project_layout::known_pages(p)?.contains(&page),
         fail("Unknown source page")
     );
     let cursor = if revision == 0 {
@@ -641,6 +644,10 @@ pub fn compare(before: &Page, after: &Page) -> Result<Vec<Difference>> {
         "agreement",
         "source_warnings",
         "candidates",
+        "manual_layers",
+        "confirmed_redactions",
+        "script_detection",
+        "region_languages",
     ] {
         if a[field] != b[field] {
             out.push(Difference {
@@ -703,6 +710,7 @@ pub fn compare(before: &Page, after: &Page) -> Result<Vec<Difference>> {
             "interpretation",
             "uncertain",
             "alternatives",
+            "geometry",
         ] {
             if av[field] != bv[field] {
                 out.push(Difference {

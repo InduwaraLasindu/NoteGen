@@ -361,6 +361,8 @@ fn templates_roundtrip_policy_and_protect_existing_outputs() {
     s.writer.id = Some("writer-123".into());
     s.writer.root = f.root.join("private-writers");
     s.models_dir = f.root.join("private-models");
+    s.shared_model_store = f.root.join("private-user-model-store");
+    s.project_lock = Some(f.root.join("private-project/model-lock.json"));
     s.assistance.sources.push(notegen::assistance::WebSource {
         title: "Private context".into(),
         excerpt: "Not portable".into(),
@@ -375,7 +377,21 @@ fn templates_roundtrip_policy_and_protect_existing_outputs() {
     assert!(template.settings.writer.id.is_none());
     assert!(template.settings.assistance.sources.is_empty());
     assert_ne!(template.settings.models_dir, s.models_dir);
+    assert_eq!(
+        template.settings.shared_model_store,
+        std::path::PathBuf::from("models/shared")
+    );
+    assert!(template.settings.project_lock.is_none());
     let bytes = std::fs::read(&output).unwrap();
+    let json = String::from_utf8(bytes.clone()).unwrap();
+    for private in [
+        "private-user-model-store",
+        "private-project",
+        "private-writers",
+        "private-models",
+    ] {
+        assert!(!json.contains(private), "{private}");
+    }
     assert!(projects::save_template(&output, "Overwrite", &s).is_err());
     assert_eq!(std::fs::read(&output).unwrap(), bytes);
 }

@@ -245,7 +245,17 @@ pub fn run(action: Action, settings: &Settings, c: &Control) -> Result<()> {
                         );
                         continue;
                     }
-                    let _guard = work.begin_worker()?;
+                    let private = if matches!(&operation, Operation::Export { .. }) {
+                        Some(work.begin_private_worker(c)?)
+                    } else {
+                        None
+                    };
+                    let _guard = if private.is_none() {
+                        Some(work.begin_worker()?)
+                    } else {
+                        None
+                    };
+                    let c = private.as_ref().map_or(c, |(_, control)| control);
                     let project = Project::read(work.project_path())?;
                     match operation {
                         Operation::Inspect => super::print(&project.manifest)?,

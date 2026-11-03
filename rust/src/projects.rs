@@ -627,6 +627,8 @@ pub fn save_template(output: &Path, name: &str, settings: &Settings) -> Result<(
     portable.pdfium = defaults.pdfium;
     portable.server = "runtime/llama-server.exe".into();
     portable.models_dir = defaults.models_dir;
+    portable.shared_model_store = PathBuf::from("models/shared");
+    portable.project_lock = None;
     portable.writer.root = defaults.writer.root;
     portable.writer.id = None;
     portable.writer_reference = None;

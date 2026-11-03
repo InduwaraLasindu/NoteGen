@@ -12,6 +12,7 @@ struct WordPreview {
 }
 
 enum Report {
+    Code(PathBuf, Box<crate::code_transcription::CodePreview>),
     Routing(PathBuf, Box<crate::language_routing::RereadPreview>),
     Catalog(Vec<crate::projects::Entry>),
     Search(crate::projects::SearchReport),
@@ -71,6 +72,9 @@ pub(super) struct Workbench {
     route_line: bool,
     route_preview: Option<crate::language_routing::RereadPreview>,
     geometry_project: Option<PathBuf>,
+    code_options: crate::code_transcription::CodeOptions,
+    code_preview: Option<crate::code_transcription::CodePreview>,
+    project_tools: super::project_workbench::ProjectTools,
     rx: Option<mpsc::Receiver<std::result::Result<Report, String>>>,
 }
 impl Drop for Workbench {
@@ -113,6 +117,16 @@ impl Workbench {
         if let Some(value) = value {
             self.rx = None;
             match value {
+                Ok(Report::Code(project, preview)) => {
+                    if self.geometry_project.as_ref() == Some(&project) {
+                        self.code_preview = Some(*preview);
+                        self.report = "Code OCR preview is ready. Compare spacing, indentation, punctuation and line numbers with the source.".into();
+                    } else {
+                        self.report =
+                            "Code preview belongs to another project; reopen it and preview again."
+                                .into();
+                    }
+                }
                 Ok(Report::Routing(project, preview)) => {
                     if self.geometry_project.as_ref() == Some(&project) {
                         self.report="Regional OCR preview is ready. Compare its source and visible text before applying.".into();
@@ -550,6 +564,7 @@ impl Desktop {
             w.geometry_project = Some(project.root.clone());
             w.grid_preview = None;
             w.route_preview = None;
+            w.code_preview = None;
             w.line_shapes.clear();
             w.grid_repair.clear();
         }
@@ -580,6 +595,17 @@ impl Desktop {
             ui.label("The selected block has no word/cell geometry. Only supplied source bounds are shown.");
         }
         ui.small("Review overlays show supplied word confidence scores, line outlines and table grids. Native confidence scores are not calibrated error probabilities. Previewed grid repairs are shown before application.");
+        egui::CollapsingHeader::new("Literal code transcription").show(ui, |ui| {
+            ui.label("Select a whole text/code block with source bounds. This OCR path preserves native whitespace and punctuation. Confirm spacing against the source; it never repairs or executes code.");
+            let mut calibrated = matches!(w.code_options.indentation, crate::code_transcription::Indentation::Monospace { .. });
+            if ui.checkbox(&mut calibrated, "Use an explicitly measured monospace indentation grid").changed() { w.code_options.indentation = if calibrated { crate::code_transcription::Indentation::Monospace { left_margin_pixels: 0, space_width_pixels: 12. } } else { crate::code_transcription::Indentation::Native }; w.code_preview = None; }
+            if let crate::code_transcription::Indentation::Monospace { left_margin_pixels, space_width_pixels } = &mut w.code_options.indentation { ui.add(egui::DragValue::new(left_margin_pixels).range(0..=20_000).prefix("Crop left margin in pixels: ")); ui.add(egui::DragValue::new(space_width_pixels).range(1.0..=512.0).prefix("Measured space width in pixels: ")); }
+            let mut separate = matches!(w.code_options.line_numbers, crate::code_transcription::LineNumbers::SeparateSequential { .. });
+            if ui.checkbox(&mut separate, "Separate a verified consecutive line-number gutter").changed() { w.code_options.line_numbers = if separate { crate::code_transcription::LineNumbers::SeparateSequential { first: 1, separator: " ".into() } } else { crate::code_transcription::LineNumbers::Keep }; w.code_preview = None; }
+            if let crate::code_transcription::LineNumbers::SeparateSequential { first, separator } = &mut w.code_options.line_numbers { ui.add(egui::DragValue::new(first).range(0..=1_000_000).prefix("First source line number: ")); ui.add(egui::TextEdit::singleline(separator).char_limit(8).hint_text("Literal gutter separator")).accessible_name("Exact separator after each source line number"); }
+            if ui.add_enabled(ready, egui::Button::new("Preview literal code OCR")).clicked() { let project = project.clone(); let page = page.clone(); let options = w.code_options.clone(); let settings = self.state.settings.clone(); w.code_preview = None; w.task(ctx, move || Ok(Report::Code(project.root.clone(), Box::new(crate::code_transcription::preview(&project, &page, index, &options, &settings, &Control::default())?)))); }
+            if let Some(preview) = w.code_preview.clone() { ui.label(&preview.note); let text = preview.after.content.plain(); ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_rows(8).desired_width(f32::INFINITY)).accessible_name("Read-only literal code preview including retained line-number evidence"); if ui.add_enabled(ready, egui::Button::new("Apply reviewed code transcription")).clicked() { match crate::code_transcription::apply_preview(&project, &page, &preview, &preview.token, &Control::default()) { Ok(revision) => { w.code_preview = None; w.report = format!("Code transcription saved as revision {revision}"); let _ = self.open_review(project.root.clone(), ctx); }, Err(error) => w.report = error.to_string() } } }
+        });
         egui::CollapsingHeader::new("Mixed-language region recognition").show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut w.route_codes)
@@ -1985,7 +2011,7 @@ impl Desktop {
     }
     pub fn tools_open(&mut self, tab: usize) {
         self.workbench.open = true;
-        self.workbench.tab = tab.min(3);
+        self.workbench.tab = tab.min(4);
         self.workbench.catalog_loaded = false;
     }
     pub(super) fn global_shortcut(
@@ -2020,6 +2046,9 @@ impl Desktop {
             ))
             .open(&mut open)
             .default_width(440.)
+            .max_height(ctx.content_rect().height() * 0.9)
+            .constrain_to(ctx.content_rect().shrink(8.))
+            .vscroll(true)
             .show(ctx, |ui| {
                 let search = ui
                     .add(
@@ -2033,7 +2062,7 @@ impl Desktop {
                 }
                 let query = self.workbench.palette_query.to_lowercase();
                 for (id, label) in [
-                    "Import scans · Ctrl+O",
+                    "Import scans",
                     "Projects and search",
                     "Exports and correction rules",
                     "Recovery and references",
@@ -2041,6 +2070,17 @@ impl Desktop {
                     "Settings",
                     "Review results",
                     "Studio",
+                    "Download manager · bandwidth, metered networks, UTC windows",
+                    "Encrypted workspace · password, recovery, lock",
+                    "Confirm masks · redactions and sharing copies",
+                    "Language regions · script detection and multilingual OCR",
+                    "Line and table repairs · source geometry and cell grids",
+                    "Writer fonts · Unicode, ligatures and proof sheets",
+                    "AI models · installed readers and updates",
+                    "Hardware trials · memory budgets and performance",
+                    "Keyboard shortcuts · bindings and focus",
+                    "Chemical notation · formulas and reactions",
+                    "Organize pages · migrate, undo layout, reuse duplicates",
                 ]
                 .iter()
                 .enumerate()
@@ -2051,7 +2091,19 @@ impl Desktop {
                             1..=4 => self.tools_open(id - 1),
                             5 => self.settings_open(0),
                             6 => self.review_open = true,
-                            _ => self.studio.open = true,
+                            7 => self.studio.open = true,
+                            8 => self.downloads_open(),
+                            9 => {
+                                self.release_warm_reader();
+                                self.vault.open();
+                            }
+                            10 | 16 => self.tools_open(3),
+                            11 | 12 | 17 => self.tools_open(2),
+                            13 => self.studio_open(1),
+                            14 => self.studio_open(2),
+                            15 => self.settings_open(2),
+                            18 => self.tools_open(4),
+                            _ => unreachable!(),
                         }
                         self.workbench.palette = false;
                     }
@@ -2081,7 +2133,7 @@ impl Desktop {
         let mut open = true;
         let mut jump = None;
         egui::Window::new("Project workbench").open(&mut open).default_size([850.,680.]).resizable(true).show(ctx,|ui| {
-            ui.horizontal_wrapped(|ui| {for (i,label) in ["Projects & search","Export & rules","Recovery & references","Privacy & readability"].iter().enumerate(){ui.selectable_value(&mut w.tab,i,*label);}});
+            ui.horizontal_wrapped(|ui| {for (i,label) in ["Projects & search","Export & rules","Recovery & references","Privacy & readability","Organize pages"].iter().enumerate(){ui.selectable_value(&mut w.tab,i,*label);}});
             ui.separator();
             if w.tab != 3 { w.clear_secret(ctx); }
             if w.rx.is_some(){ui.spinner();ui.small("Reading local project data…");ctx.request_repaint_after(std::time::Duration::from_millis(100));}
@@ -2116,6 +2168,11 @@ impl Desktop {
                         }else{ui.label("Open a project to inspect recovery or attach references.");}
                         self.region_reread_tools(&mut w,ui,ctx);
                         self.geometry_tools(&mut w,ui,ctx);
+                    }
+                    4=>{
+                        let project=self.review.as_ref().map(|r|r.project.clone());
+                        let ready=self.worker.is_none()&&w.rx.is_none()&&self.review.as_ref().is_none_or(|r|!r.dirty&&!r.raw_open)&&!self.vault.blocks_close();
+                        if let Some(path)=w.project_tools.ui(ui,ctx,project,&self.state.settings,&self.state.recent,ready){jump=Some((path,None));}
                     }
                     _=>{
                         ui.heading("Local activity and data");

@@ -214,6 +214,15 @@ fn read_source(
 pub fn source_identity(project: &Project, page: &Page, c: &Control) -> Result<SourceIdentity> {
     Ok(read_source(project, page, c)?.0)
 }
+/// Private layout transformations need original pixels and their identity from
+/// the same bounded read. Never use this in a public export or reader request.
+pub(crate) fn source_original(
+    project: &Project,
+    page: &Page,
+    c: &Control,
+) -> Result<(SourceIdentity, DynamicImage)> {
+    read_source(project, page, c)
+}
 pub fn recognition_view(
     project: &Project,
     page: &Page,
@@ -568,9 +577,7 @@ impl ExportProjection {
                 && disk_manifest.pages == original.manifest.pages,
             fail("Project source identity changed before export")
         );
-        let directory = tempfile::Builder::new()
-            .prefix("notegen-redacted-export-")
-            .tempdir()?;
+        let directory = crate::storage::temporary_dir(c, "notegen-redacted-export-")?;
         let settings = Settings {
             server: "runtime/llama-server.exe".into(),
             tesseract: "tesseract".into(),

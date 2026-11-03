@@ -877,44 +877,7 @@ fn convert_internal(
             )
         );
     }
-    // A restored CAS copy of the exact same files must keep the same prepared
-    // identity. Pin content and effective reader selection, not storage paths.
-    let mut cache_settings = recognition_settings(s);
-    cache_settings.server = PathBuf::new();
-    cache_settings.models_dir = PathBuf::new();
-    cache_settings.shared_model_store = PathBuf::new();
-    cache_settings.project_lock = None;
-    cache_settings.automatic_models = false;
-    cache_settings.backend = plan.backend;
-    cache_settings.model_ids = plan.models.iter().map(|model| model.id.clone()).collect();
-    let runtime_identity =
-        if !s.external_server && plan.models.iter().any(|model| model.endpoint.is_none()) {
-            Some(crate::canary::runtime_identity(&s.server, c)?.fingerprint)
-        } else {
-            None
-        };
-    let key = fingerprint(&(
-        3,
-        cache_settings,
-        runtime_identity,
-        &writer_digest,
-        &language_digest,
-        (plan.image_edge, plan.context, plan.dpi, plan.image_tokens),
-        &plan
-            .models
-            .iter()
-            .map(|m| {
-                (
-                    &m.id,
-                    fs::metadata(&m.weights).ok().map(|v| v.len()),
-                    &m.sha256,
-                    &m.endpoint,
-                    &m.alias,
-                    &m.revision,
-                )
-            })
-            .collect::<Vec<_>>(),
-    ))?;
+    let key = cache_identity(s, &plan, &writer_digest, &language_digest, c)?;
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1039,6 +1002,7 @@ fn convert_internal(
     }
     if new_project {
         crate::project_lock::ensure_conversion_lock(&project, &plan.models, s, c)?;
+        crate::project_layout::initialize_new(&project, source, c)?;
     }
     let mut metadata = crate::projects::metadata(&project)?;
     if metadata.source.is_none() {
@@ -1355,7 +1319,7 @@ fn convert_internal(
             verify_reader_source(&project, &page, &identity, c)?;
             match reading {
                 Ok(mut content) => {
-                    crate::geometry::bind_content(&mut content, &identity)?;
+                    crate::geometry::bind_reader_content(&mut content, &identity)?;
                     page.candidates.push(Candidate {
                         region: None,
                         model_id: model.id.clone(),
@@ -1483,6 +1447,7 @@ fn convert_internal(
                         );
                     }
                     if let Ok(mut candidate) = reading {
+                        crate::geometry::bind_reader_content(&mut candidate, &identity)?;
                         crate::geometry::map_content(&mut candidate, &bbox, &identity)?;
                         page.candidates.push(Candidate {
                             region: Some(bbox.clone()),
@@ -1754,6 +1719,146 @@ pub fn recognition_settings(s: &Settings) -> Settings {
     value.preserve_figures = true;
     value
 }
+fn ocr_executable(s: &Settings) -> Option<PathBuf> {
+    if s.tesseract.is_file() {
+        return s.tesseract.canonicalize().ok();
+    }
+    if s.tesseract.components().count() != 1 {
+        return None;
+    }
+    let paths = std::env::var_os("PATH")?;
+    for folder in std::env::split_paths(&paths) {
+        let path = folder.join(&s.tesseract);
+        if path.is_file() {
+            return path.canonicalize().ok();
+        }
+        if cfg!(windows) {
+            let exe = path.with_extension("exe");
+            if exe.is_file() {
+                return exe.canonicalize().ok();
+            }
+        }
+    }
+    None
+}
+fn cache_identity(
+    s: &Settings,
+    plan: &Plan,
+    writer_digest: &str,
+    language_digest: &str,
+    c: &Control,
+) -> Result<String> {
+    let mut settings = recognition_settings(s);
+    settings.server = PathBuf::new();
+    settings.models_dir = PathBuf::new();
+    settings.shared_model_store = PathBuf::new();
+    settings.project_lock = None;
+    settings.automatic_models = false;
+    settings.backend = plan.backend;
+    settings.model_ids = plan.models.iter().map(|m| m.id.clone()).collect();
+    let runtime = if !s.external_server && plan.models.iter().any(|m| m.endpoint.is_none()) {
+        Some(crate::canary::runtime_identity(&s.server, c)?.fingerprint)
+    } else {
+        None
+    };
+    let ocr = ocr_executable(s)
+        .map(|path| hash_file(&path, c))
+        .transpose()?;
+    fingerprint(&(
+        4,
+        settings,
+        runtime,
+        ocr,
+        writer_digest,
+        language_digest,
+        (plan.image_edge, plan.context, plan.dpi, plan.image_tokens),
+        plan.models
+            .iter()
+            .map(|m| {
+                (
+                    &m.id,
+                    fs::metadata(&m.weights).ok().map(|v| v.len()),
+                    &m.sha256,
+                    &m.endpoint,
+                    &m.alias,
+                    &m.revision,
+                )
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PlannedIdentity {
+    pub input_sha256: String,
+    pub fingerprint: String,
+    pub model_ids: Vec<String>,
+    pub external_readers: bool,
+    pub ocr_executable_verified: bool,
+    pub pages: Vec<usize>,
+}
+/// Read-only duplicate admission uses the exact same key as conversion. Local
+/// executable/model bytes are checked; an HTTP alias cannot prove a version.
+pub fn planned_identity(
+    source: &Path,
+    settings: &Settings,
+    c: &Control,
+) -> Result<PlannedIdentity> {
+    settings.validate()?;
+    let resolved = crate::project_lock::resolve_settings(settings, c)?;
+    let s = resolved.as_ref().map_or(settings, |r| &r.settings);
+    let language = if s.tessdata_dir.as_os_str().is_empty() {
+        String::new()
+    } else {
+        crate::languages::verify_selection(&s.tessdata_dir, &s.languages, c)?;
+        fingerprint(&(s.languages.clone(), include_str!("../languages.json")))?
+    };
+    let writer = if s.preset != Preset::Fast && s.writer.use_examples {
+        crate::writers::digest(&s.writer.root, s.writer.id.as_deref())?
+    } else {
+        String::new()
+    };
+    let installed = if let Some(lock) = &resolved {
+        lock.models.clone()
+    } else if s.preset == Preset::Fast {
+        vec![]
+    } else {
+        runtime::inventory_available(&s.models_dir)?.0
+    };
+    let mut plan = planning::build(&hardware::detect_for(s, c), s, &installed)?;
+    for model in &mut plan.models {
+        if model.endpoint.is_none() {
+            let hash = fingerprint(&(
+                hash_file(&model.weights, c)?,
+                hash_file(&model.projector, c)?,
+            ))?;
+            anyhow::ensure!(
+                model.sha256.is_empty() || model.sha256 == hash,
+                Fault::new("NG200", "Model checksum changed; duplicate reuse withheld")
+            );
+            model.sha256 = hash;
+        }
+    }
+    let input = crate::inputs::hash(source, c)?;
+    let total = crate::inputs::selected_page_count(source, &s.pdfium, "")?;
+    let pages = pages_range(&s.page_range, total)?;
+    if let Some(lock) = &resolved {
+        anyhow::ensure!(
+            lock.input_sha256 == input,
+            Fault::new(
+                "NG500",
+                "Selected model lock belongs to different source bytes"
+            )
+        );
+    }
+    Ok(PlannedIdentity {
+        input_sha256: input,
+        fingerprint: cache_identity(s, &plan, &writer, &language, c)?,
+        model_ids: plan.models.iter().map(|m| m.id.clone()).collect(),
+        external_readers: s.external_server || plan.models.iter().any(|m| m.endpoint.is_some()),
+        ocr_executable_verified: ocr_executable(s).is_some(),
+        pages,
+    })
+}
 
 /// Balanced skips a vision pass only after independent full-page agreement.
 pub fn should_read(id: &str, role: &str, page: &Page, s: &Settings) -> bool {
@@ -1912,7 +2017,7 @@ pub fn reconsider(
                 None,
             ));
         }
-        let content = if private {
+        let mut content = if private {
             server.read_masked(
                 &image,
                 &identity,
@@ -1926,6 +2031,7 @@ pub fn reconsider(
         } else {
             server.read(&image, "", &subject, &s, c, log, n)?
         };
+        crate::geometry::bind_reader_content(&mut content, &identity)?;
         verify_reader_source(project, &page, &identity, c)?;
         save_context_reading(project, &page, &content, &model)?;
         count += 1;
@@ -2089,17 +2195,42 @@ pub fn attach_region_reading(
     let mut mapped = content.clone();
     let width = region.right - region.left;
     let height = region.bottom - region.top;
-    for block in &mut mapped.blocks {
-        block.bbox = Some(if let Some(b) = &block.bbox {
-            BoxRect {
-                left: region.left + b.left * width,
-                top: region.top + b.top * height,
-                right: (region.left + b.right * width).min(1.0),
-                bottom: (region.top + b.bottom * height).min(1.0),
-            }
-        } else {
-            region.clone()
+    let source = identity
+        .clone()
+        .or_else(|| page.script_detection.as_ref().map(|s| s.source.clone()))
+        .or_else(|| {
+            page.content
+                .blocks
+                .iter()
+                .find_map(|b| b.geometry.as_ref().and_then(|g| g.source.clone()))
+        })
+        .or_else(|| {
+            content
+                .blocks
+                .iter()
+                .find_map(|b| b.geometry.as_ref().and_then(|g| g.source.clone()))
         });
+    if let Some(source) = source {
+        for block in &mut mapped.blocks {
+            if block.bbox.is_none() {
+                block.bbox = Some(BoxRect::full());
+            }
+        }
+        crate::geometry::bind_reader_content(&mut mapped, &source)?;
+        crate::geometry::map_content(&mut mapped, region, &source)?;
+    } else {
+        for block in &mut mapped.blocks {
+            block.bbox = Some(if let Some(b) = &block.bbox {
+                BoxRect {
+                    left: region.left + b.left * width,
+                    top: region.top + b.top * height,
+                    right: (region.left + b.right * width).min(1.0),
+                    bottom: (region.top + b.bottom * height).min(1.0),
+                }
+            } else {
+                region.clone()
+            });
+        }
     }
     mapped.validate()?;
     let mut disagreement = false;
@@ -2354,7 +2485,7 @@ fn reread_view(
         "",
     );
     let server = Server::start(&model, &plan, &s, c, log, &project.root)?;
-    let content = if private && request.task == "table" {
+    let mut content = if private && request.task == "table" {
         server.read_table_masked(
             &crop,
             &identity,
@@ -2381,6 +2512,7 @@ fn reread_view(
     } else {
         server.read(&crop, &evidence, &context, &s, c, log, request.page)?
     };
+    crate::geometry::bind_reader_content(&mut content, &identity)?;
     c.check()?;
     verify_reader_source(project, &before, &identity, c)?;
     let mut after = before.clone();

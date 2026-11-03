@@ -233,6 +233,18 @@ name = "geometry_language"
 path = "rust/tests/geometry_language.rs"
 
 [[test]]
+name = "migrations"
+path = "rust/tests/migrations.rs"
+
+[[test]]
+name = "project_layout"
+path = "rust/tests/project_layout.rs"
+
+[[test]]
+name = "project_reuse"
+path = "rust/tests/project_reuse.rs"
+
+[[test]]
 name = "model_store"
 path = "rust/tests/model_store.rs"
 
@@ -243,4 +255,8 @@ path = "rust/tests/canary.rs"
 [[test]]
 name = "project_lock"
 path = "rust/tests/project_lock.rs"
+
+[[test]]
+name = "code_transcription"
+path = "rust/tests/code_transcription.rs"
 

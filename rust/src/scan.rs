@@ -40,9 +40,11 @@ pub fn run_with_threads(
     threads: usize,
 ) -> Result<(bool, String, String)> {
     c.check()?;
-    let mut out = tempfile::tempfile()?;
-    let mut err = tempfile::tempfile()?;
-    let mut child = command(exe)
+    let mut out = crate::storage::temporary_file(c)?;
+    let mut err = crate::storage::temporary_file(c)?;
+    let mut process = command(exe);
+    crate::storage::configure_temporary_environment(&mut process, c)?;
+    let mut child = process
         .args(args)
         .env("OMP_THREAD_LIMIT", threads.clamp(1, 512).to_string())
         .stdin(Stdio::null())
@@ -65,8 +67,16 @@ pub fn run_with_threads(
             )
             .into());
         }
-        if let Some(s) = child.try_wait()? {
-            break s;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                // Do not release a private worker's scratch while a native
+                // process may still be using it after an observation failure.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
         }
         std::thread::sleep(Duration::from_millis(30));
     };
@@ -268,7 +278,7 @@ pub fn parse_tsv(text: &str) -> Vec<Word> {
         })
         .collect()
 }
-fn checked_words(text: &str, width: u32, height: u32) -> Result<Vec<Word>> {
+pub(crate) fn checked_words(text: &str, width: u32, height: u32) -> Result<Vec<Word>> {
     let mut native = 0usize;
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b'\t')
@@ -326,7 +336,7 @@ fn word_region(word: &Word, width: u32, height: u32) -> Option<BoxRect> {
         bottom: bottom as f32 / height as f32,
     })
 }
-fn observed_geometry(
+pub(crate) fn observed_geometry(
     words: &[&Word],
     width: u32,
     height: u32,
@@ -530,6 +540,8 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
         let mut rows = vec![vec![String::new(); xs.len() - 1]; ys.len() - 1];
         let mut confidences = vec![];
         let mut table_words = vec![];
+        // ResultIterator TSV is already in logical reading order, including
+        // mixed RTL words/numbers. Never sort cell words by their physical x.
         for word in words {
             let x = word.x + word.w / 2;
             let y = word.y + word.h / 2;
@@ -589,7 +601,7 @@ pub fn printed_with_layout(
     c: &Control,
     layout: PrintedLayout,
 ) -> Result<PageContent> {
-    let dir = tempfile::tempdir()?;
+    let dir = crate::storage::temporary_dir(c, "notegen-ocr-")?;
     let within_budget_pool =
         rayon::current_thread_index().is_some() && rayon::current_num_threads() <= s.cpu_threads;
     let mut gray = if s.cpu_threads == 0 || within_budget_pool {
@@ -648,11 +660,15 @@ pub fn printed_with_layout(
         )
     );
     let words = checked_words(&text, im.width(), im.height())?;
-    let mut blocks = tables(&original, &words);
+    Ok(assemble_printed(&original, &words))
+}
+fn assemble_printed(original: &GrayImage, words: &[Word]) -> PageContent {
+    let (width, height) = original.dimensions();
+    let mut blocks = tables(original, words);
     let mut groups: BTreeMap<(u32, u32), Vec<&Word>> = BTreeMap::new();
-    for w in &words {
-        let x = (w.x + w.w / 2) as f32 / im.width() as f32;
-        let y = (w.y + w.h / 2) as f32 / im.height() as f32;
+    for w in words {
+        let x = (w.x + w.w / 2) as f32 / width as f32;
+        let y = (w.y + w.h / 2) as f32 / height as f32;
         if blocks.iter().any(|b| {
             b.bbox
                 .as_ref()
@@ -663,6 +679,8 @@ pub fn printed_with_layout(
         groups.entry((w.group.0, w.group.1)).or_default().push(w);
     }
     for group in groups.values() {
+        // Native logical order, not visual x order: sorting reverses RTL words
+        // and can scramble otherwise LTR numeric runs inside an RTL paragraph.
         let text = group
             .iter()
             .map(|w| w.text.as_str())
@@ -676,17 +694,17 @@ pub fn printed_with_layout(
             kind: "text".into(),
             text,
             bbox: Some(BoxRect {
-                left: x as f32 / im.width() as f32,
-                top: y as f32 / im.height() as f32,
-                right: (r as f32 / im.width() as f32).min(1.),
-                bottom: (b as f32 / im.height() as f32).min(1.),
+                left: x as f32 / width as f32,
+                top: y as f32 / height as f32,
+                right: (r as f32 / width as f32).min(1.),
+                bottom: (b as f32 / height as f32).min(1.),
             }),
             confidence: Some(group.iter().map(|w| w.confidence).sum::<f32>() / group.len() as f32),
-            geometry: Some(observed_geometry(group, im.width(), im.height(), None)),
+            geometry: Some(observed_geometry(group, width, height, None)),
             ..Default::default()
         });
     }
-    blocks.extend(graphics(&original, &words, &blocks));
+    blocks.extend(graphics(original, words, &blocks));
     blocks.sort_by(|a, b| {
         a.bbox
             .as_ref()
@@ -704,7 +722,7 @@ pub fn printed_with_layout(
             .push("No printed text recognized; AI or manual transcription is required.".into());
     }
     result.summary = result.plain().chars().take(2000).collect();
-    Ok(result)
+    result
 }
 pub struct OrientationResult {
     pub image: DynamicImage,
@@ -728,7 +746,7 @@ pub fn detect_script_with_timeout(
         !timeout.is_zero() && timeout <= Duration::from_secs(20),
         Fault::new("NG110", "Invalid script detection time budget")
     );
-    let d = tempfile::tempdir()?;
+    let d = crate::storage::temporary_dir(c, "notegen-script-")?;
     let p = d.path().join("osd.png");
     im.thumbnail(1800, 1800).save(&p)?;
     let r = run_with_threads(
@@ -1015,6 +1033,35 @@ pub fn graphics(source: &GrayImage, words: &[Word], blocks: &[Block]) -> Vec<Blo
 mod geometry_tests {
     use super::*;
     const HEADER: &str = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n";
+    #[test]
+    fn rtl_tsv_logical_words_and_mixed_numbers_stay_in_order_in_paragraphs_and_cells() {
+        let tsv = format!(
+            "{HEADER}5\t1\t1\t1\t1\t1\t145\t30\t30\t15\t99\tשלום\n5\t1\t1\t1\t1\t2\t95\t30\t35\t15\t99\t1250.50\n5\t1\t1\t1\t1\t3\t30\t30\t40\t15\t99\tעולם\n"
+        );
+        let words = checked_words(&tsv, 420, 220).unwrap();
+        let blank = GrayImage::from_pixel(420, 220, Luma([255]));
+        let paragraph = assemble_printed(&blank, &words);
+        assert_eq!(paragraph.blocks[0].text, "שלום 1250.50 עולם");
+        let precision = paragraph.blocks[0].geometry.as_ref().unwrap();
+        assert_eq!(precision.words[0].text, "שלום");
+        assert!(precision.words[0].region.left > precision.words[2].region.left);
+        let mut grid = blank;
+        for y in [10, 100, 200] {
+            for x in 10..=400 {
+                grid.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for x in [10, 200, 400] {
+            for y in 10..=200 {
+                grid.put_pixel(x, y, Luma([0]));
+            }
+        }
+        let cells = tables(&grid, &words);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].rows[0][0], "שלום 1250.50 עולם");
+        assert_eq!(cells[0].rows[0][1], "");
+        assert_eq!(cells[0].geometry.as_ref().unwrap().words[1].text, "1250.50");
+    }
     #[test]
     fn native_tsv_keeps_actual_word_line_geometry_and_rejects_corrupt_precision() {
         let text = format!(

@@ -762,7 +762,7 @@ impl VaultUi {
                 });
             }
             if ui.add_enabled(!dirty,egui::Button::new("Export external Word copy")).clicked() && let Some(output)=rfd::FileDialog::new().set_file_name("workspace-export.docx").add_filter("Word",&["docx"]).save_file(){
-                self.copy_task(ctx,move|copy,c|{let _worker=copy.begin_worker()?;let output=external_output(copy,&output)?;let project=Project::read(copy.project_path())?;word::export(&project,&output,c)?;
+                self.copy_task(ctx,move|copy,c|{let (_worker,private)=copy.begin_private_worker(c)?;let output=external_output(copy,&output)?;let project=Project::read(copy.project_path())?;word::export(&project,&output,&private)?;
                     Ok(CopyUpdate::Text(format!("External plaintext Word copy exported to {}. It remains outside encrypted-workspace cleanup and protection.",output.display()))) });
             }
         });

@@ -809,6 +809,10 @@ pub fn run(
                             options.page,
                         )
                     };
+                    let result = result.and_then(|mut content| {
+                        crate::geometry::bind_reader_content(&mut content, &source_identity)?;
+                        Ok(content)
+                    });
                     trial.read_seconds = Some(read.elapsed().as_secs_f64());
                     trial.elapsed_seconds = started.elapsed().as_secs_f64();
                     trial.memory = sampler.finish();
@@ -817,7 +821,8 @@ pub fn run(
                     let sampler = MemorySampler::start(None, false, options.sample_interval_ms)?;
                     let read = Instant::now();
                     let result =
-                        crate::scan::printed(&image, &selected, inner).and_then(|content| {
+                        crate::scan::printed(&image, &selected, inner).and_then(|mut content| {
+                            crate::geometry::bind_content(&mut content, &source_identity)?;
                             crate::redactions::enforce_view(
                                 &content,
                                 &source_identity,

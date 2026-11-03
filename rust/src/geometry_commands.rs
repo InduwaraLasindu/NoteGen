@@ -7,6 +7,21 @@ use notegen::{
 use std::path::PathBuf;
 #[derive(Subcommand)]
 pub enum Action {
+    /// Literal code OCR on a selected grounded text/code block; options are explicit JSON.
+    PreviewCode {
+        project: PathBuf,
+        page: usize,
+        block: usize,
+        options: PathBuf,
+    },
+    ApplyCode {
+        project: PathBuf,
+        page: usize,
+        block: usize,
+        options: PathBuf,
+        #[arg(long)]
+        confirmation_token: String,
+    },
     Inspect {
         project: PathBuf,
         page: usize,
@@ -80,6 +95,48 @@ struct Selection {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::PreviewCode {
+            project,
+            page,
+            block,
+            options,
+        } => {
+            let project = Project::read(project)?;
+            let page = project.load(page)?;
+            super::print(notegen::code_transcription::preview(
+                &project,
+                &page,
+                block,
+                &read_json(&options, 100_000)?,
+                s,
+                c,
+            )?)
+        }
+        Action::ApplyCode {
+            project,
+            page,
+            block,
+            options,
+            confirmation_token,
+        } => {
+            let project = Project::read(project)?;
+            let page = project.load(page)?;
+            let preview = notegen::code_transcription::preview(
+                &project,
+                &page,
+                block,
+                &read_json(&options, 100_000)?,
+                s,
+                c,
+            )?;
+            super::print(notegen::code_transcription::apply_preview(
+                &project,
+                &page,
+                &preview,
+                &confirmation_token,
+                c,
+            )?)
+        }
         Action::Inspect { project, page } => {
             let project = Project::read(project)?;
             let page = notegen::redactions::analysis_page(&project, &project.load(page)?, c)?;

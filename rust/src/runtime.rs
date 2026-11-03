@@ -234,7 +234,7 @@ impl Server {
         );
         let safe = crate::redactions::private_recognition_settings(settings);
         let image = crate::redactions::mask_view(image, identity, masks, source_view, c)?;
-        let result = if table {
+        let mut result = if table {
             self.read_table(
                 &image,
                 "",
@@ -255,6 +255,7 @@ impl Server {
                 page,
             )
         }?;
+        crate::geometry::bind_reader_content(&mut result, identity)?;
         Ok(crate::redactions::enforce_view(&result, identity, masks, source_view, c)?.0)
     }
     /// Logical reset for the pinned b12032 single-slot runtime. Erasing KV alone
@@ -492,6 +493,7 @@ impl Server {
             "",
         );
         let mut process = command(&s.server);
+        crate::storage::configure_temporary_environment(&mut process, c)?;
         if api_key.is_some() {
             // Warm compatibility covers the explicit owned command. Inherited native
             // model/LoRA/template/cache/log settings must not add unhashed files or

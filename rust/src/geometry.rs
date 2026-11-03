@@ -315,6 +315,30 @@ pub fn bind_content(content: &mut PageContent, source: &SourceIdentity) -> Resul
     }
     Ok(())
 }
+/// Bind untrusted reader geometry to verified pixels without accepting claims
+/// that its coordinates came from native OCR, grid detection or human review.
+/// Native OCR and explicit human transactions use `bind_content` instead.
+pub fn bind_reader_content(content: &mut PageContent, source: &SourceIdentity) -> Result<()> {
+    validate_source(source)?;
+    for block in &mut content.blocks {
+        if let Some(data) = &mut block.geometry {
+            data.source = Some(source.clone());
+            for word in &mut data.words {
+                word.origin = Origin::ReaderSupplied;
+            }
+            for cell in &mut data.cells {
+                cell.origin = Origin::ReaderSupplied;
+            }
+            for line in &mut data.lines {
+                line.origin = Origin::ReaderSupplied;
+            }
+            if let Some(grid) = &mut data.grid {
+                grid.origin = Origin::ReaderSupplied;
+            }
+        }
+    }
+    content.validate()
+}
 /// Verify fine-grained metadata against today's actual immutable PNG before
 /// rendering/export/rereading it. Legacy text-only pages without such metadata
 /// do not acquire a new source-file requirement.
@@ -644,4 +668,111 @@ pub fn heatmap(
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    fn native_content() -> PageContent {
+        PageContent {
+            blocks: vec![Block {
+                kind: "table".into(),
+                rows: vec![vec!["1250".into()]],
+                bbox: Some(BoxRect::full()),
+                geometry: Some(BlockGeometry {
+                    words: vec![WordBox {
+                        text: "1250".into(),
+                        region: BoxRect::full(),
+                        confidence: Some(0.925),
+                        line: Some(0),
+                        cell: Some(CellAddress { row: 0, col: 0 }),
+                        origin: Origin::TesseractTsv,
+                    }],
+                    cells: vec![CellBox {
+                        row: 0,
+                        col: 0,
+                        region: BoxRect::full(),
+                        origin: Origin::DetectedGrid,
+                    }],
+                    lines: vec![LineRegion {
+                        ordinal: 0,
+                        shape: Quad::rectangle(&BoxRect::full()),
+                        origin: Origin::TesseractTsv,
+                    }],
+                    grid: Some(TableGrid {
+                        row_edges: vec![0., 1.],
+                        column_edges: vec![0., 1.],
+                        origin: Origin::DetectedGrid,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reader_reply_cannot_claim_human_or_native_geometry_provenance() {
+        let actual = SourceIdentity {
+            page: 1,
+            sha256: "a".repeat(64),
+            width: 100,
+            height: 80,
+        };
+        let mut native = native_content();
+        bind_content(&mut native, &actual).unwrap();
+        let observed = native.blocks[0].geometry.as_ref().unwrap();
+        assert_eq!(observed.words[0].origin, Origin::TesseractTsv);
+        assert_eq!(observed.cells[0].origin, Origin::DetectedGrid);
+        assert_eq!(observed.lines[0].origin, Origin::TesseractTsv);
+        assert_eq!(observed.grid.as_ref().unwrap().origin, Origin::DetectedGrid);
+
+        let mut reply = native_content();
+        let claimed = reply.blocks[0].geometry.as_mut().unwrap();
+        claimed.source = Some(SourceIdentity {
+            page: 99,
+            sha256: "untrusted claimed identity".into(),
+            width: 1,
+            height: 1,
+        });
+        claimed.words[0].origin = Origin::HumanConfirmed;
+        claimed.cells[0].origin = Origin::TesseractTsv;
+        claimed.lines[0].origin = Origin::HumanConfirmed;
+        claimed.grid.as_mut().unwrap().origin = Origin::HumanConfirmed;
+        let mut parsed: PageContent =
+            serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        bind_reader_content(&mut parsed, &actual).unwrap();
+        let normalized = parsed.blocks[0].geometry.as_ref().unwrap();
+        assert_eq!(normalized.source.as_ref(), Some(&actual));
+        assert_eq!(normalized.words[0].origin, Origin::ReaderSupplied);
+        assert_eq!(normalized.cells[0].origin, Origin::ReaderSupplied);
+        assert_eq!(normalized.lines[0].origin, Origin::ReaderSupplied);
+        assert_eq!(
+            normalized.grid.as_ref().unwrap().origin,
+            Origin::ReaderSupplied
+        );
+        assert_eq!(normalized.words[0].text, "1250");
+        assert_eq!(normalized.words[0].confidence, Some(0.925));
+        assert_eq!(normalized.words[0].region, BoxRect::full());
+        assert_eq!(
+            normalized.words[0].cell,
+            Some(CellAddress { row: 0, col: 0 })
+        );
+        assert_eq!(normalized.lines[0].shape, Quad::rectangle(&BoxRect::full()));
+        assert_eq!(normalized.grid.as_ref().unwrap().row_edges, vec![0., 1.]);
+        assert_eq!(parsed.blocks[0].rows, vec![vec!["1250"]]);
+        parsed.validate().unwrap();
+
+        let mut invalid = native_content();
+        invalid.blocks[0].geometry.as_mut().unwrap().words[0]
+            .region
+            .right = 2.;
+        assert!(bind_reader_content(&mut invalid, &actual).is_err());
+        let before = native.blocks[0].clone();
+        let bad_source = SourceIdentity { width: 0, ..actual };
+        assert!(bind_reader_content(&mut native, &bad_source).is_err());
+        assert_eq!(native.blocks[0], before);
+    }
 }

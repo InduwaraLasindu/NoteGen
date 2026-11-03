@@ -425,6 +425,81 @@ fn busy_cancelled_or_modified_owner_copies_are_kept_and_unknown_plaintext_is_rep
 }
 
 #[test]
+fn managed_native_scratch_is_private_scoped_and_expires_before_lock_cleanup() {
+    let _serial = CRYPTO.lock().unwrap_or_else(|error| error.into_inner());
+    let f = Fixture::new();
+    let original = tree(&f.project);
+    f.create();
+    let mut copy = f.open();
+    let base = Control::default();
+    let previous_environment = ["TEMP", "TMP", "TMPDIR"].map(std::env::var_os);
+    let (guard, private) = copy.begin_private_worker(&base).unwrap();
+    let scratch = private.private_temp_root.as_ref().unwrap().clone();
+    assert_eq!(
+        scratch.parent(),
+        Some(copy.work_root().join("work").as_path())
+    );
+    assert!(std::sync::Arc::ptr_eq(&private.cancelled, &base.cancelled));
+    assert!(std::sync::Arc::ptr_eq(&private.paused, &base.paused));
+    assert!(copy.begin_worker().is_err());
+    assert!(
+        copy.commit_and_lock(Duration::ZERO, &base).is_err(),
+        "locking must not race the native worker or its scratch"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&scratch).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    #[cfg(windows)]
+    let (executable, arguments) = (
+        PathBuf::from("powershell.exe"),
+        vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "$root=[Environment]::GetEnvironmentVariable('TMPDIR'); [IO.File]::WriteAllText([IO.Path]::Combine($root,'native-secret.txt'),'PRIVATE_NATIVE_SCRATCH'); $bytes=[Text.Encoding]::UTF8.GetBytes($root); [Console]::OpenStandardOutput().Write($bytes,0,$bytes.Length)".into(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (executable, arguments) = (
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".into(),
+            "printf '%s' 'PRIVATE_NATIVE_SCRATCH' > \"$TMPDIR/native-secret.txt\"; printf '%s' \"$TMPDIR\"".into(),
+        ],
+    );
+    let (ok, stdout, stderr) =
+        notegen::scan::run(&executable, &arguments, Duration::from_secs(20), &private).unwrap();
+    assert!(ok, "native scratch fixture failed: {stderr}");
+    assert_eq!(PathBuf::from(stdout), scratch);
+    assert_eq!(
+        fs::read(scratch.join("native-secret.txt")).unwrap(),
+        b"PRIVATE_NATIVE_SCRATCH"
+    );
+    assert_eq!(
+        ["TEMP", "TMP", "TMPDIR"].map(std::env::var_os),
+        previous_environment,
+        "child overrides must not mutate this process environment"
+    );
+    drop(guard);
+    assert!(!scratch.exists());
+    assert!(notegen::storage::temporary_file(&private).is_err());
+    assert!(notegen::storage::temporary_dir(&private, "expired-").is_err());
+    let mut child = std::process::Command::new(&executable);
+    assert!(notegen::storage::configure_temporary_environment(&mut child, &private).is_err());
+    assert!(
+        copy.commit_and_lock(Duration::from_secs(1), &base)
+            .unwrap()
+            .fully_locked
+    );
+    assert_eq!(tree(&f.project), original);
+}
+
+#[test]
 fn bounded_inputs_and_external_destinations_fail_without_mutating_project_or_key() {
     let _serial = CRYPTO.lock().unwrap_or_else(|error| error.into_inner());
     let f = Fixture::new();

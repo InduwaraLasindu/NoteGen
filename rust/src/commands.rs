@@ -12,6 +12,8 @@ mod download_commands;
 mod geometry_commands;
 #[path = "lock_commands.rs"]
 mod lock_commands;
+#[path = "project_commands.rs"]
+mod project_commands;
 #[path = "redaction_commands.rs"]
 mod redaction_commands;
 #[path = "vault_commands.rs"]
@@ -37,6 +39,11 @@ impl SupportRequest {
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Organize source pages, migrate supported data and inspect compatible duplicates.
+    Project {
+        #[command(subcommand)]
+        command: project_commands::Action,
+    },
     Geometry {
         #[command(subcommand)]
         command: geometry_commands::Action,
@@ -563,6 +570,7 @@ fn format(value: &str) -> Result<exports::Format> {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::Project { command } => project_commands::run(command, s, c),
         Action::Geometry { command } => geometry_commands::run(command, s, c),
         Action::ProjectLock { command } => lock_commands::run(command, s, c),
         Action::Vault { command } => vault_commands::run(command, s, c),

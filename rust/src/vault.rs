@@ -1,6 +1,7 @@
 //! Opt-in authenticated workspace snapshots. age owns encryption, KDFs and nonces.
-//! Original projects are never adopted for cleanup. Unlocked/native/OS temporary
-//! files, pagefile and crash dumps are outside encrypted-at-rest protection.
+//! Original projects are never adopted for cleanup. Managed application scratch
+//! stays in the guarded work copy; unlocked files, native/OS caches, pagefile and
+//! crash dumps are outside encrypted-at-rest protection.
 use crate::{
     sessions::{self, Session},
     storage::{Activity, Control},
@@ -32,7 +33,7 @@ const HARD_FILES: usize = 50_000;
 const HARD_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const HARD_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const WORK_MARKER: &str = "notegen-vault-work.json";
-pub const LIMITS_NOTE: &str = "Only the selected project snapshot and managed source/work copy are encrypted. Originals, external references and exported documents remain where you put them. Unlocked files, native/OS temporary files, pagefile and crash dumps are not protected by this container. Cleanup is ordinary deletion, not secure erasure. Unknown, changed or busy work files are retained and reported. Older encrypted backups remain readable with their old keys after rotation.";
+pub const LIMITS_NOTE: &str = "Only the selected project snapshot and managed source/work copy are encrypted. Originals, external references and exported documents remain where you put them. App-owned OCR/reader scratch for managed operations stays in the guarded plaintext work copy while unlocked. Native libraries, OS/driver caches, pagefile and crash dumps remain outside this container's guarantees. Cleanup is ordinary deletion, not secure erasure. Unknown, changed or busy work files are retained and reported. Older encrypted backups remain readable with their old keys after rotation.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -247,9 +248,15 @@ struct Workers {
 pub struct WorkerGuard {
     workers: Arc<Workers>,
     _file: Option<File>,
+    temporary: Option<tempfile::TempDir>,
 }
 impl Drop for WorkerGuard {
     fn drop(&mut self) {
+        // Readers must be joined before their guard is released. Keep the worker
+        // count/lock held until owned temporary artifacts have been removed; a
+        // failed deletion stays under the managed root for lock's retained report.
+        drop(self.temporary.take());
+        drop(self._file.take());
         let mut state = self.workers.state.lock().unwrap_or_else(|e| e.into_inner());
         state.active = state.active.saturating_sub(1);
         self.workers.changed.notify_all();
@@ -1791,11 +1798,41 @@ impl WorkCopy {
         Ok(WorkerGuard {
             workers: self.workers.clone(),
             _file: file,
+            temporary: None,
         })
     }
     /// Hold for every direct project operation, including saves and native readers.
     pub fn begin_worker(&self) -> Result<WorkerGuard> {
         self.worker()
+    }
+    /// Hold until all native children/readers have exited. The returned control
+    /// routes application scratch and native-child temporary variables to a fresh
+    /// guarded directory, removed before this worker is released. A cloned control
+    /// must not outlive the guard; expired roots fail closed instead of falling back.
+    pub fn begin_private_worker(&self, base: &Control) -> Result<(WorkerGuard, Control)> {
+        base.check()?;
+        let mut guard = self.worker()?;
+        self.owner_valid(base)?;
+        let parent = self.session.root.join("work");
+        no_links(&parent)?;
+        private_directories(&parent)?;
+        let temporary = tempfile::Builder::new()
+            .prefix(".notegen-private-")
+            .tempdir_in(&parent)?;
+        let protected = protect_new(
+            temporary.path(),
+            true,
+            self.options.allow_inherited_permissions && !self.private_permissions,
+            base,
+        )?;
+        anyhow::ensure!(
+            protected || !self.private_permissions,
+            fail("Private temporary storage could not retain work-copy permissions")
+        );
+        let mut control = base.clone();
+        control.private_temp_root = Some(temporary.path().to_owned());
+        guard.temporary = Some(temporary);
+        Ok((guard, control))
     }
     /// Each conversion gets a fresh child Session under the private work tree.
     /// Its own lock is distinct from the parent worker guard, so old absolute-
@@ -1807,11 +1844,11 @@ impl WorkCopy {
         c: &Control,
         log: &Activity,
     ) -> Result<sessions::RunReport> {
-        let _worker = self.worker()?;
+        let (_worker, private) = self.begin_private_worker(c)?;
         let parent = self.session.root.join("work");
         private_directories(&parent)?;
-        let child = Session::create(&parent, c)?;
-        let report = sessions::run(&child, input, settings, c, log)?;
+        let child = Session::create(&parent, &private)?;
+        let report = sessions::run(&child, input, settings, &private, log)?;
         if report.success
             && let Some(project) = &report.project
         {
