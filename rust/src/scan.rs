@@ -835,51 +835,6 @@ pub fn save_scan(path: &Path, im: &DynamicImage) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod geometry_tests {
-    use super::*;
-    const HEADER: &str = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n";
-    #[test]
-    fn native_tsv_keeps_actual_word_line_geometry_and_rejects_corrupt_precision() {
-        let text = format!(
-            "{HEADER}5\t1\t2\t3\t4\t1\t10\t20\t30\t40\t92.5\t1250\n5\t1\t2\t3\t4\t2\t50\t20\t20\t40\t40\tword\n"
-        );
-        let words = checked_words(&text, 100, 100).unwrap();
-        let refs = words.iter().collect::<Vec<_>>();
-        let data = observed_geometry(&refs, 100, 100, None);
-        assert_eq!(data.words.len(), 2);
-        assert_eq!(data.lines.len(), 1);
-        assert_eq!(data.words[0].text, "1250");
-        assert_eq!(data.words[0].confidence, Some(0.925));
-        assert_eq!(
-            data.words[0].region,
-            BoxRect {
-                left: 0.1,
-                top: 0.2,
-                right: 0.4,
-                bottom: 0.6
-            }
-        );
-        assert_eq!(
-            data.lines[0].shape.bounds(),
-            BoxRect {
-                left: 0.1,
-                top: 0.2,
-                right: 0.7,
-                bottom: 0.6
-            }
-        );
-        for record in [
-            "5\t1\t1\t1\t1\t1\t90\t0\t30\t20\t90\toutside\n",
-            "5\t1\t1\t1\t1\t1\t0\t0\t10\t20\tNaN\tnan\n",
-            "5\t1\t1\t1\t1\t1\t4294967295\t0\t20\t20\t90\toverflow\n",
-        ] {
-            assert!(checked_words(&format!("{HEADER}{record}"), 100, 100).is_err());
-        }
-        assert!(checked_words("not a TSV header\n", 100, 100).is_err());
-    }
-}
-
 pub fn deskew(im: DynamicImage, enabled: bool, max_pixels: u32) -> DynamicImage {
     if !enabled {
         return im;
@@ -1054,4 +1009,49 @@ pub fn graphics(source: &GrayImage, words: &[Word], blocks: &[Block]) -> Vec<Blo
         }
     }
     out
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    const HEADER: &str = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n";
+    #[test]
+    fn native_tsv_keeps_actual_word_line_geometry_and_rejects_corrupt_precision() {
+        let text = format!(
+            "{HEADER}5\t1\t2\t3\t4\t1\t10\t20\t30\t40\t92.5\t1250\n5\t1\t2\t3\t4\t2\t50\t20\t20\t40\t40\tword\n"
+        );
+        let words = checked_words(&text, 100, 100).unwrap();
+        let refs = words.iter().collect::<Vec<_>>();
+        let data = observed_geometry(&refs, 100, 100, None);
+        assert_eq!(data.words.len(), 2);
+        assert_eq!(data.lines.len(), 1);
+        assert_eq!(data.words[0].text, "1250");
+        assert_eq!(data.words[0].confidence, Some(0.925));
+        assert_eq!(
+            data.words[0].region,
+            BoxRect {
+                left: 0.1,
+                top: 0.2,
+                right: 0.4,
+                bottom: 0.6
+            }
+        );
+        assert_eq!(
+            data.lines[0].shape.bounds(),
+            BoxRect {
+                left: 0.1,
+                top: 0.2,
+                right: 0.7,
+                bottom: 0.6
+            }
+        );
+        for record in [
+            "5\t1\t1\t1\t1\t1\t90\t0\t30\t20\t90\toutside\n",
+            "5\t1\t1\t1\t1\t1\t0\t0\t10\t20\tNaN\tnan\n",
+            "5\t1\t1\t1\t1\t1\t4294967295\t0\t20\t20\t90\toverflow\n",
+        ] {
+            assert!(checked_words(&format!("{HEADER}{record}"), 100, 100).is_err());
+        }
+        assert!(checked_words("not a TSV header\n", 100, 100).is_err());
+    }
 }

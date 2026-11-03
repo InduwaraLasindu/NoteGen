@@ -17,6 +17,8 @@ fn default_summary_excludes_private_fields_and_ignores_unselected_sources() {
         subject: "PRIVATE_TOPIC".into(),
         models_dir: "PRIVATE_MODEL_PATH".into(),
         server: "PRIVATE_SERVER_PATH".into(),
+        shared_model_store: "C:/Users/PRIVATE_USERNAME/PRIVATE_SHARED_MODEL_STORE".into(),
+        project_lock: Some("C:/Users/PRIVATE_USERNAME/PRIVATE_PROJECT_LOCK.json".into()),
         ..Default::default()
     };
     s.writer.root = "PRIVATE_WRITER_PATH".into();
@@ -40,13 +42,44 @@ fn default_summary_excludes_private_fields_and_ignores_unselected_sources() {
         "PRIVATE_MODEL_PATH",
         "PRIVATE_SERVER_PATH",
         "PRIVATE_WRITER_PATH",
+        "PRIVATE_USERNAME",
+        "PRIVATE_SHARED_MODEL_STORE",
+        "PRIVATE_PROJECT_LOCK",
         "password",
     ] {
         assert!(!text.contains(secret));
     }
     let summary: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(summary["settings"].get("endpoint").is_none());
+    assert!(summary["settings"].get("shared_model_store").is_none());
+    assert!(summary["settings"].get("project_lock").is_none());
     assert!(!p.files[0].document_content);
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("support.zip");
+    export_support(
+        &input,
+        &p,
+        &p.token,
+        &["settings-summary.json".into()],
+        &output,
+        &Control::default(),
+    )
+    .unwrap();
+    let mut zip = zip::ZipArchive::new(fs::File::open(output).unwrap()).unwrap();
+    for index in 0..zip.len() {
+        let mut contents = String::new();
+        zip.by_index(index)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        for secret in [
+            "PRIVATE_USERNAME",
+            "PRIVATE_SHARED_MODEL_STORE",
+            "PRIVATE_PROJECT_LOCK",
+        ] {
+            assert!(!contents.contains(secret));
+        }
+    }
 }
 #[test]
 fn activity_preview_is_an_allowlist_and_never_contains_raw_messages_or_drafts() {
@@ -281,6 +314,67 @@ fn repair_settings(root: &std::path::Path) -> Settings {
         models_dir: root.join("models"),
         server: root.join("runtime/llama-server.exe"),
         ..Default::default()
+    }
+}
+#[test]
+fn extracted_runtime_preview_requires_the_entire_real_pinned_bundle_without_guessing_binary_hashes()
+{
+    let pins: Vec<setup::Download> =
+        serde_json::from_str(include_str!("../runtime-downloads.json")).unwrap();
+    notegen::maintenance::validate_runtime_release("b12032", &pins).unwrap();
+    for (backend, count) in [("cpu", 1), ("vulkan", 1), ("cuda12", 2), ("cuda13", 2)] {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root
+            .path()
+            .join("runtime/ai-backends")
+            .join(format!("{backend}-b12032-test"));
+        fs::create_dir_all(&folder).unwrap();
+        let server = folder.join("llama-server.exe");
+        fs::write(&server, b"DAMAGED SERVER RETAINED").unwrap();
+        let settings = Settings {
+            server: server.clone(),
+            models_dir: root.path().join("models"),
+            ..Default::default()
+        };
+        let preview = repair_preview(
+            &RepairInput {
+                settings: &settings,
+                model_ids: &[],
+                runtime_backend: Some(backend),
+            },
+            &Control::default(),
+        )
+        .unwrap();
+        let archives = preview
+            .files
+            .iter()
+            .filter(|file| file.key.starts_with("runtime-archive/"))
+            .collect::<Vec<_>>();
+        assert_eq!(archives.len(), count);
+        assert!(
+            preview
+                .files
+                .iter()
+                .all(|file| !file.key.starts_with("runtime-file/"))
+        );
+        for file in archives {
+            let pin = pins
+                .iter()
+                .find(|pin| file.key == format!("runtime-archive/{}", pin.file))
+                .unwrap();
+            assert_eq!(file.expected_bytes, pin.bytes);
+            assert_eq!(file.expected_sha256, pin.sha256);
+            assert_eq!(file.health, AssetHealth::Missing);
+            assert!(pin.url.contains("/b12032/"));
+        }
+        assert!(
+            preview
+                .notes
+                .iter()
+                .any(|note| note.contains("hashes are unavailable"))
+        );
+        assert_eq!(fs::read(server).unwrap(), b"DAMAGED SERVER RETAINED");
+        assert!(!root.path().join("runtime/downloads").exists());
     }
 }
 #[test]

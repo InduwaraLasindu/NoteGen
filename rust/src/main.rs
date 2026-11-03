@@ -15,12 +15,7 @@ fn main() -> eframe::Result {
     let args = Args::parse();
     let data_dir = args
         .data_dir
-        .map(|path| {
-            notegen::watch::no_links(&path)?;
-            std::fs::create_dir_all(&path)?;
-            notegen::watch::no_links(&path)?;
-            path.canonicalize().map_err(anyhow::Error::from)
-        })
+        .map(|path| notegen::desktop::Desktop::prepare_data_directory(&path))
         .transpose()
         .map_err(|error| eframe::Error::AppCreation(error.into()))?;
     if let Some(parent) = std::env::current_exe()

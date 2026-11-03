@@ -1103,6 +1103,12 @@ fn add_tree(
             let name = name
                 .to_str()
                 .ok_or_else(|| fail("Workspace names must be valid Unicode"))?;
+            anyhow::ensure!(
+                !name.eq_ignore_ascii_case("project-transaction.json"),
+                fail(
+                    "A project migration is incomplete; recover its pending transaction before creating an encrypted snapshot"
+                )
+            );
             let relative = format!("{relative}/{name}");
             anyhow::ensure!(data_path(&relative), fail("Workspace path is not portable"));
             no_links(&entry.path())?;
@@ -2211,6 +2217,41 @@ mod tests {
         competitor.try_lock().unwrap();
         competitor.unlock().unwrap();
         assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    #[test]
+    fn encrypted_snapshot_refuses_pending_rebased_migration_journals_without_touching_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = temp.path().join("project-transaction.json");
+        fs::write(
+            temp.path().join("project.json"),
+            b"original project metadata",
+        )
+        .unwrap();
+        fs::write(&journal, b"pending canonical-bound migration").unwrap();
+        let mut snapshot = Snapshot {
+            files: vec![],
+            directories: vec![],
+            observed_directories: vec![],
+            total_bytes: 0,
+        };
+        assert!(
+            add_tree(
+                &mut snapshot,
+                temp.path(),
+                "work/project",
+                &Options::default(),
+                &Control::default()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(journal).unwrap(),
+            b"pending canonical-bound migration"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("project.json")).unwrap(),
+            b"original project metadata"
+        );
     }
 
     #[cfg(windows)]

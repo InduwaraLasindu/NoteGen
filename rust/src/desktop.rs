@@ -440,6 +440,12 @@ pub struct Desktop {
     warm_preference: (bool, u64),
 }
 impl Desktop {
+    pub fn prepare_data_directory(path: &Path) -> Result<PathBuf> {
+        crate::watch::no_links(path)?;
+        fs::create_dir_all(path)?;
+        crate::watch::no_links(path)?;
+        Ok(path.canonicalize()?)
+    }
     fn tr<'a>(&self, key: &'a str) -> &'a str {
         crate::localization::text(self.state.settings.ui.locale, key)
     }

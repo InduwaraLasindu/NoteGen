@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Seek, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -485,6 +485,18 @@ pub struct RepairPreview {
 struct RepairAsset {
     path: PathBuf,
     download: setup::Download,
+    runtime: Option<RuntimeMember>,
+}
+#[derive(Clone)]
+struct RuntimeMember {
+    archive: PathBuf,
+    pin: setup::Download,
+    index: usize,
+    name: String,
+}
+struct RepairSnapshot {
+    assets: BTreeMap<String, RepairAsset>,
+    preview: RepairPreview,
 }
 fn plain_path(path: &Path) -> Result<()> {
     let absolute = std::path::absolute(path)?;
@@ -508,7 +520,403 @@ fn plain_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn repair_assets(input: &RepairInput<'_>) -> Result<BTreeMap<String, RepairAsset>> {
+fn runtime_key(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfkc()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+fn runtime_component(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    !name.is_empty()
+        && name.len() <= 240
+        && !name.ends_with(['.', ' '])
+        && !name
+            .chars()
+            .any(|ch| ch.is_control() || "\\:<>\"|?*".contains(ch))
+        && !["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+        && !matches!(
+            stem.strip_prefix("COM")
+                .or_else(|| stem.strip_prefix("LPT")),
+            Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        )
+}
+/// Reject large central directories/ZIP64 before the ZIP reader can allocate
+/// metadata from an attacker-controlled entry count. Published x64 pins fit ZIP32.
+fn runtime_zip_count(file: &mut fs::File) -> Result<usize> {
+    let length = file.metadata()?.len();
+    let tail_len = length.min(65_577) as usize;
+    anyhow::ensure!(tail_len >= 22, support_fault("Truncated runtime ZIP"));
+    file.seek(SeekFrom::End(-(tail_len as i64)))?;
+    let mut tail = vec![0u8; tail_len];
+    file.read_exact(&mut tail)?;
+    let offset = (0..=tail.len() - 22)
+        .rev()
+        .find(|start| {
+            &tail[*start..*start + 4] == b"PK\x05\x06"
+                && *start
+                    + 22
+                    + usize::from(u16::from_le_bytes([tail[*start + 20], tail[*start + 21]]))
+                    == tail.len()
+        })
+        .ok_or_else(|| support_fault("Runtime ZIP has no bounded end record"))?;
+    let u16_at =
+        |index: usize| u16::from_le_bytes([tail[offset + index], tail[offset + index + 1]]);
+    let u32_at = |index: usize| {
+        u32::from_le_bytes(
+            tail[offset + index..offset + index + 4]
+                .try_into()
+                .expect("bounded ZIP footer"),
+        )
+    };
+    let count = usize::from(u16_at(10));
+    let directory_bytes = u64::from(u32_at(12));
+    let directory_offset = u64::from(u32_at(16));
+    anyhow::ensure!(
+        u16_at(4) == 0
+            && u16_at(6) == 0
+            && usize::from(u16_at(8)) == count
+            && (1..=1000).contains(&count)
+            && directory_bytes <= 4_000_000
+            && directory_offset
+                .checked_add(directory_bytes)
+                .is_some_and(|end| end <= length - tail_len as u64 + offset as u64)
+            && !(offset >= 20 && &tail[offset - 20..offset - 16] == b"PK\x06\x07"),
+        support_fault("Runtime ZIP metadata exceeds supported single-volume ZIP32 bounds")
+    );
+    file.seek(SeekFrom::Start(0))?;
+    Ok(count)
+}
+fn verified_runtime_archive(
+    path: &Path,
+    pin: &setup::Download,
+    c: &Control,
+) -> Result<Option<fs::File>> {
+    c.check()?;
+    plain_path(path)?;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != pin.bytes {
+        return Ok(None);
+    }
+    file.try_lock_shared().map_err(|_| {
+        support_fault(
+            "Pinned runtime archive is busy; wait for its writer before inspecting binary repairs",
+        )
+    })?;
+    let actual = match repair_hash(&mut file, pin.bytes, c) {
+        Ok(hash) => hash,
+        Err(error)
+            if error
+                .downcast_ref::<Fault>()
+                .is_some_and(|fault| fault.code == "NG900") =>
+        {
+            return Err(error);
+        }
+        Err(_) => return Ok(None),
+    };
+    if !actual.eq_ignore_ascii_case(&pin.sha256) {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(Some(file))
+}
+fn managed_runtime_target(
+    settings: &Settings,
+    backend: &str,
+    build: &str,
+) -> Result<Option<PathBuf>> {
+    let server = std::path::absolute(&settings.server)?;
+    plain_path(&server)?;
+    if !server
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("llama-server.exe"))
+    {
+        return Ok(None);
+    }
+    let Some(parent) = server.parent() else {
+        return Ok(None);
+    };
+    let root = std::path::absolute(setup::runtime_root(settings))?.join("ai-backends");
+    plain_path(&root)?;
+    if !root.is_dir() || !parent.is_dir() {
+        return Ok(None);
+    }
+    let parent = parent.canonicalize()?;
+    let root = root.canonicalize()?;
+    let prefix = format!("{backend}-{build}-");
+    if parent.parent() != Some(root.as_path())
+        || !parent
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.starts_with(&prefix) && value.len() > prefix.len())
+    {
+        return Ok(None);
+    }
+    Ok(Some(parent))
+}
+fn member_name(entry: &zip::read::ZipFile<'_, fs::File>) -> Result<Option<String>> {
+    use std::path::Component;
+    let path = entry
+        .enclosed_name()
+        .ok_or_else(|| support_fault("Runtime archive contains an escaping path"))?;
+    anyhow::ensure!(
+        !entry.is_symlink()
+            && entry
+                .unix_mode()
+                .is_none_or(|mode| matches!(mode & 0o170000, 0 | 0o100000 | 0o040000)),
+        support_fault("Runtime archive contains a link or special file")
+    );
+    anyhow::ensure!(path.as_os_str().len()<=4096&&path.components().all(|part|matches!(part,Component::Normal(value)if value.to_str().is_some_and(runtime_component))),support_fault("Runtime archive contains an unportable path"));
+    if entry.is_dir() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        entry
+            .unix_mode()
+            .is_none_or(|mode| mode & 0o170000 != 0o040000),
+        support_fault("Runtime archive directory metadata is inconsistent")
+    );
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| support_fault("Runtime archive filename is not Unicode"))?;
+    let lower = name.to_ascii_lowercase();
+    // setup copies these from the application AFTER archive extraction. Their
+    // installed authority is the verified application bundle, not this ZIP.
+    if [
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "concrt140.dll",
+    ]
+    .contains(&lower.as_str())
+    {
+        return Ok(None);
+    }
+    if !lower.ends_with(".dll") && lower != "llama-server.exe" {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        name.is_ascii() && runtime_component(name) && (1..=2_000_000_000).contains(&entry.size()),
+        support_fault("Runtime binary name or size exceeds its supported bounds")
+    );
+    Ok(Some(name.into()))
+}
+fn runtime_binary_assets(
+    settings: &Settings,
+    backend: &str,
+    build: &str,
+    pins: &[setup::Download],
+    c: &Control,
+) -> Result<(BTreeMap<String, RepairAsset>, Vec<String>)> {
+    let Some(target) = managed_runtime_target(settings, backend, build)? else {
+        return Ok((
+            BTreeMap::new(),
+            vec![format!(
+                "Extracted runtime inspection omitted: selected server is not in a matching managed {backend}-{build}-* folder. Custom/other-version binaries are never mixed with these pins."
+            )],
+        ));
+    };
+    let cache = std::path::absolute(setup::runtime_root(settings))?.join("downloads");
+    plain_path(&cache)?;
+    anyhow::ensure!(
+        pins.len() == if backend.starts_with("cuda") { 2 } else { 1 },
+        support_fault("Pinned runtime bundle is incomplete")
+    );
+    let mut sources = vec![];
+    for pin in pins {
+        let path = cache.join(&pin.file);
+        let Some(file) = verified_runtime_archive(&path, pin, c)? else {
+            return Ok((BTreeMap::new(),vec!["Extracted runtime hashes are unavailable until every source archive is publisher-verified. Repair the listed runtime archives first, then refresh the preview.".into()]));
+        };
+        sources.push((pin.clone(), path, file));
+    }
+    let mut members = BTreeMap::<String, RepairAsset>::new();
+    let mut expanded = 0u64;
+    for (pin, path, mut file) in sources {
+        let count = runtime_zip_count(&mut file)?;
+        let mut zip = zip::ZipArchive::new(file)?;
+        anyhow::ensure!(
+            zip.len() == count,
+            support_fault("Runtime ZIP entry count changed")
+        );
+        for index in 0..zip.len() {
+            c.check()?;
+            let mut entry = zip.by_index(index)?;
+            let Some(name) = member_name(&entry)? else {
+                continue;
+            };
+            expanded = expanded
+                .checked_add(entry.size())
+                .ok_or_else(|| support_fault("Runtime expanded size overflow"))?;
+            anyhow::ensure!(
+                expanded <= 4_000_000_000,
+                support_fault("Runtime bundle exceeds 4 GB binary extraction budget")
+            );
+            let bytes = entry.size();
+            let raw_name = entry.name().to_owned();
+            let sha256 = repair_hash(&mut entry, bytes, c)?;
+            let key = runtime_key(&name);
+            if let Some(previous) = members.get(&key) {
+                anyhow::ensure!(
+                    previous.download.file == name
+                        && previous.download.bytes == bytes
+                        && previous.download.sha256 == sha256,
+                    support_fault(
+                        "Runtime archive has conflicting flattened filenames or case aliases"
+                    )
+                );
+                continue;
+            }
+            members.insert(
+                key,
+                RepairAsset {
+                    path: target.join(&name),
+                    download: setup::Download {
+                        file: name,
+                        bytes,
+                        sha256,
+                        url: pin.url.clone(),
+                    },
+                    runtime: Some(RuntimeMember {
+                        archive: path.clone(),
+                        pin: pin.clone(),
+                        index,
+                        name: raw_name,
+                    }),
+                },
+            );
+        }
+        let mut file = zip.into_inner();
+        file.seek(SeekFrom::Start(0))?;
+        anyhow::ensure!(
+            repair_hash(&mut file, pin.bytes, c)?.eq_ignore_ascii_case(&pin.sha256),
+            support_fault("Runtime archive changed while deriving binary hashes")
+        );
+    }
+    anyhow::ensure!(
+        members.contains_key("llama-server.exe"),
+        support_fault("Verified runtime bundle contains no llama-server.exe")
+    );
+    let mut existing = BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut count = 0usize;
+    for entry in fs::read_dir(&target)? {
+        c.check()?;
+        count += 1;
+        anyhow::ensure!(
+            count <= 5000,
+            support_fault("Managed runtime folder exceeds its inspection entry budget")
+        );
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(support_fault(
+                "Managed runtime folder contains non-Unicode names",
+            ));
+        };
+        existing
+            .entry(runtime_key(name))
+            .or_default()
+            .push(entry.path());
+    }
+    let mut result = BTreeMap::new();
+    for (key, mut asset) in members {
+        if let Some(paths) = existing.get(&key) {
+            anyhow::ensure!(
+                paths.len() == 1
+                    && paths[0]
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|name| name.is_ascii()
+                            && name.eq_ignore_ascii_case(&asset.download.file)),
+                support_fault(
+                    "Managed runtime contains ambiguous filename aliases; preserve them and resolve the conflict manually"
+                )
+            );
+            asset.path = paths[0].clone();
+        }
+        plain_path(&asset.path)?;
+        result.insert(
+            format!(
+                "runtime-file/{backend}/{}",
+                asset.download.file.to_ascii_lowercase()
+            ),
+            asset,
+        );
+    }
+    Ok((result,vec![format!("Extracted {build}/{backend} binary sizes/hashes were derived only from the complete verified publisher archive bundle. Close readers before repair; busy files are not forcibly unlocked. Active/previous pointers, registrations and unknown files stay untouched."),"App-local MSVC dependencies are installer-serviced; they are not inferred from llama.cpp archives.".into()]))
+}
+fn stage_runtime_member(
+    member: &RuntimeMember,
+    expected: &setup::Download,
+    staged: &Path,
+    c: &Control,
+) -> Result<()> {
+    let mut source = verified_runtime_archive(&member.archive, &member.pin, c)?
+        .ok_or_else(|| support_fault("Runtime source archive is no longer publisher-verified"))?;
+    let count = runtime_zip_count(&mut source)?;
+    let mut zip = zip::ZipArchive::new(source)?;
+    anyhow::ensure!(
+        zip.len() == count,
+        support_fault("Runtime ZIP entry count changed")
+    );
+    let mut entry = zip.by_index(member.index)?;
+    anyhow::ensure!(
+        entry.name() == member.name
+            && member_name(&entry)?.as_deref() == Some(expected.file.as_str())
+            && entry.size() == expected.bytes,
+        support_fault("Runtime source member changed after preview")
+    );
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(staged)?;
+    let mut hash = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        c.check()?;
+        let count = entry.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        anyhow::ensure!(
+            total <= expected.bytes,
+            support_fault("Runtime member grew beyond its verified size")
+        );
+        hash.update(&buffer[..count]);
+        output.write_all(&buffer[..count])?;
+    }
+    anyhow::ensure!(
+        total == expected.bytes && hex::encode(hash.finalize()) == expected.sha256,
+        support_fault("Staged runtime binary does not match publisher-derived bytes")
+    );
+    output.flush()?;
+    output.sync_all()?;
+    c.check()?;
+    Ok(())
+}
+fn repair_assets(
+    input: &RepairInput<'_>,
+    c: &Control,
+) -> Result<(BTreeMap<String, RepairAsset>, Vec<String>)> {
+    let pins: Vec<setup::Download> =
+        serde_json::from_str(include_str!("../runtime-downloads.json"))?;
+    repair_assets_with_pins(input, &pins, "b12032", c)
+}
+fn repair_assets_with_pins(
+    input: &RepairInput<'_>,
+    runtime_pins: &[setup::Download],
+    build: &str,
+    c: &Control,
+) -> Result<(BTreeMap<String, RepairAsset>, Vec<String>)> {
     input.settings.validate()?;
     let ids = input.model_ids.iter().collect::<BTreeSet<_>>();
     anyhow::ensure!(
@@ -520,6 +928,7 @@ fn repair_assets(input: &RepairInput<'_>) -> Result<BTreeMap<String, RepairAsset
     );
     let pins: Vec<Value> = serde_json::from_str(include_str!("../downloads.json"))?;
     let mut assets = BTreeMap::new();
+    let mut notes = vec![];
     for id in ids {
         let (_, update) = setup::pinned(id)?;
         let pin = pins
@@ -537,6 +946,7 @@ fn repair_assets(input: &RepairInput<'_>) -> Result<BTreeMap<String, RepairAsset
                         .join(&update.revision)
                         .join(file),
                     download,
+                    runtime: None,
                 },
             );
         }
@@ -553,19 +963,32 @@ fn repair_assets(input: &RepairInput<'_>) -> Result<BTreeMap<String, RepairAsset
                 ));
             }
         };
-        let downloads: Vec<setup::Download> =
-            serde_json::from_str(include_str!("../runtime-downloads.json"))?;
-        for download in downloads.into_iter().filter(|d| d.file.contains(marker)) {
+        crate::maintenance::validate_runtime_release(build, runtime_pins)?;
+        let selected = runtime_pins
+            .iter()
+            .filter(|d| d.file.contains(marker))
+            .cloned()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !selected.is_empty(),
+            support_fault("Pinned runtime archive selection is empty")
+        );
+        for download in &selected {
             assets.insert(
                 format!("runtime-archive/{}", download.file),
                 RepairAsset {
                     path: std::path::absolute(setup::runtime_root(input.settings))?
                         .join("downloads")
                         .join(&download.file),
-                    download,
+                    download: download.clone(),
+                    runtime: None,
                 },
             );
         }
+        let (binary_assets, binary_notes) =
+            runtime_binary_assets(input.settings, backend, build, &selected, c)?;
+        assets.extend(binary_assets);
+        notes.extend(binary_notes);
     }
     anyhow::ensure!(
         !assets.is_empty(),
@@ -577,11 +1000,21 @@ fn repair_assets(input: &RepairInput<'_>) -> Result<BTreeMap<String, RepairAsset
     for asset in assets.values() {
         plain_path(&asset.path)?;
     }
-    Ok(assets)
+    Ok((assets, notes))
 }
 pub fn repair_preview(input: &RepairInput<'_>, c: &Control) -> Result<RepairPreview> {
+    Ok(repair_snapshot(input, c)?.preview)
+}
+fn repair_snapshot(input: &RepairInput<'_>, c: &Control) -> Result<RepairSnapshot> {
+    let (assets, notes) = repair_assets(input, c)?;
+    repair_snapshot_from_assets(assets, notes, c)
+}
+fn repair_snapshot_from_assets(
+    assets: BTreeMap<String, RepairAsset>,
+    extra_notes: Vec<String>,
+    c: &Control,
+) -> Result<RepairSnapshot> {
     c.check()?;
-    let assets = repair_assets(input)?;
     let mut files = vec![];
     for (key, asset) in &assets {
         c.check()?;
@@ -590,7 +1023,12 @@ pub fn repair_preview(input: &RepairInput<'_>, c: &Control) -> Result<RepairPrev
                 (None, None, AssetHealth::Missing)
             }
             Err(_) => (None, None, AssetHealth::Unreadable),
-            Ok(meta) if !meta.is_file() => (Some(meta.len()), None, AssetHealth::Unreadable),
+            Ok(meta)
+                if !meta.is_file()
+                    || (key.starts_with("runtime-") && meta.len() > 2_000_000_000) =>
+            {
+                (Some(meta.len()), None, AssetHealth::Unreadable)
+            }
             Ok(meta) => match hash_file(&asset.path, c) {
                 Ok(hash) => {
                     let healthy = meta.len() == asset.download.bytes
@@ -620,20 +1058,22 @@ pub fn repair_preview(input: &RepairInput<'_>, c: &Control) -> Result<RepairPrev
             health,
         });
     }
-    let notes=vec!["Repairs only compiled-pinned model weight/projector files and verified runtime download archives. Custom readers and registrations are not rewritten.".into(),
-        "Runtime archive repair does not activate or verify extracted runtime binaries; use verified runtime installation afterward.".into(),
+    let mut notes=vec!["Repairs compiled-pinned model assets, runtime download archives and extracted runtime binaries whose exact size/SHA was derived from a fully verified publisher archive. Custom readers and registrations are not rewritten.".into(),
+        "Extracted binaries appear only for the matching managed pinned build/backend and verified cached source archives. Missing/corrupt source archives must be repaired first, then preview refreshed. No preview downloads or runtime execution.".into(),
         "A damaged file is retained in a uniquely named adjacent .notegen-repair-recovery-* directory. Healthy selected files need no download.".into()];
+    notes.extend(extra_notes);
     let binding = assets
         .iter()
         .map(|(key, a)| (key, a.path.to_string_lossy().to_string()))
         .collect::<Vec<_>>();
     let token = fingerprint(&(1, &files, &notes, binding))?;
-    Ok(RepairPreview {
+    let preview = RepairPreview {
         schema: 1,
         files,
         notes,
         token,
-    })
+    };
+    Ok(RepairSnapshot { assets, preview })
 }
 fn repair_hash(reader: impl Read, expected_bytes: u64, c: &Control) -> Result<String> {
     let mut reader = reader.take(expected_bytes.saturating_add(1));
@@ -788,7 +1228,26 @@ pub fn repair_selected(
     log: &Activity,
 ) -> Result<Vec<String>> {
     c.check()?;
-    let current = repair_preview(input, c)?;
+    repair_from_snapshot(
+        repair_snapshot(input, c)?,
+        expected,
+        token,
+        selected,
+        c,
+        log,
+    )
+}
+fn repair_from_snapshot(
+    snapshot: RepairSnapshot,
+    expected: &RepairPreview,
+    token: &str,
+    selected: &[String],
+    c: &Control,
+    log: &Activity,
+) -> Result<Vec<String>> {
+    c.check()?;
+    let current = snapshot.preview;
+    let assets = snapshot.assets;
     anyhow::ensure!(
         token == expected.token && *expected == current,
         Fault::new(
@@ -808,7 +1267,6 @@ pub fn repair_selected(
             "Select unique assets from the inspected repair preview"
         )
     );
-    let assets = repair_assets(input)?;
     let mut repaired = vec![];
     for key in selected {
         c.check()?;
@@ -831,21 +1289,25 @@ pub fn repair_selected(
             .prefix(".notegen-repair-")
             .tempdir_in(parent)?;
         let staged = tempfile::TempPath::try_from_path(staging.path().join("verified-asset"))?;
-        models::download(
-            &asset.download.url,
-            &staged,
-            &models::Asset {
-                file: asset.download.file.clone(),
-                bytes: asset.download.bytes,
-                sha256: asset.download.sha256.clone(),
-            },
-            c,
-            log,
-        )?;
+        if let Some(member) = &asset.runtime {
+            stage_runtime_member(member, &asset.download, &staged, c)?;
+        } else {
+            models::download(
+                &asset.download.url,
+                &staged,
+                &models::Asset {
+                    file: asset.download.file.clone(),
+                    bytes: asset.download.bytes,
+                    sha256: asset.download.sha256.clone(),
+                },
+                c,
+                log,
+            )?;
+        }
         anyhow::ensure!(
             staged.metadata()?.len() == asset.download.bytes
                 && hash_file(&staged, c)? == asset.download.sha256,
-            Fault::new("NG730", "Downloaded repair failed publisher verification")
+            Fault::new("NG730", "Staged repair failed publisher verification")
         );
         let backup = publish_repair(staged, &asset.path, info, c)?;
         repaired.push(key.clone());
@@ -866,6 +1328,396 @@ pub fn repair_selected(
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    fn synthetic_runtime(
+        root: &Path,
+        entries: &[(&str, &[u8])],
+    ) -> (Settings, Vec<setup::Download>) {
+        let server = root.join("runtime/ai-backends/cpu-b1-synthetic/llama-server.exe");
+        fs::create_dir_all(server.parent().unwrap()).unwrap();
+        let archive = root.join("runtime/downloads/llama-b1-bin-win-cpu-x64.zip");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        zip.set_comment("bounded deterministic synthetic fixture ".repeat(45));
+        for (name, bytes) in entries {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().sync_all().unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        let pin=setup::Download{file:"llama-b1-bin-win-cpu-x64.zip".into(),bytes:bytes.len()as u64,sha256:digest(&bytes),url:"https://github.com/ggml-org/llama.cpp/releases/download/b1/llama-b1-bin-win-cpu-x64.zip".into()};
+        (
+            Settings {
+                server,
+                models_dir: root.join("models"),
+                ..Default::default()
+            },
+            vec![pin],
+        )
+    }
+    fn synthetic_snapshot(
+        settings: &Settings,
+        pins: &[setup::Download],
+        c: &Control,
+    ) -> Result<RepairSnapshot> {
+        let input = RepairInput {
+            settings,
+            model_ids: &[],
+            runtime_backend: Some("cpu"),
+        };
+        let (assets, notes) = repair_assets_with_pins(&input, pins, "b1", c)?;
+        repair_snapshot_from_assets(assets, notes, c)
+    }
+    #[test]
+    fn extracted_runtime_repair_uses_publisher_derived_bytes_and_preserves_every_unselected_file() {
+        let root = tempfile::tempdir().unwrap();
+        let (settings, pins) = synthetic_runtime(
+            root.path(),
+            &[
+                ("bin/llama-server.exe", b"publisher server"),
+                ("bin/ggml.dll", b"publisher ggml"),
+                (
+                    "ignored/vcruntime140.dll",
+                    b"archive MSVC must not override app",
+                ),
+            ],
+        );
+        let folder = settings.server.parent().unwrap();
+        fs::write(&settings.server, b"unselected current server").unwrap();
+        fs::write(folder.join("ggml.dll"), b"damaged original").unwrap();
+        fs::write(folder.join("vcruntime140.dll"), b"APP SERVICED").unwrap();
+        fs::write(folder.join("manual.txt"), b"UNKNOWN RETAINED").unwrap();
+        fs::create_dir_all(&settings.models_dir).unwrap();
+        let registration = settings.models_dir.join("reader.notegen.json");
+        fs::write(&registration, b"REGISTRATION UNCHANGED").unwrap();
+        let active = root.path().join("runtime/active-ai-runtime.json");
+        let previous = root.path().join("runtime/previous-ai-runtime.json");
+        fs::write(&active, b"ACTIVE POINTER").unwrap();
+        fs::write(&previous, b"PREVIOUS POINTER").unwrap();
+        let snapshot = synthetic_snapshot(&settings, &pins, &Control::default()).unwrap();
+        let expected = snapshot.preview.clone();
+        let file = expected
+            .files
+            .iter()
+            .find(|file| file.key == "runtime-file/cpu/ggml.dll")
+            .unwrap();
+        assert_eq!(file.expected_bytes, 14);
+        assert_eq!(file.expected_sha256, digest(b"publisher ggml"));
+        assert_eq!(file.health, AssetHealth::Corrupt);
+        assert!(
+            !expected
+                .files
+                .iter()
+                .any(|file| file.key.ends_with("vcruntime140.dll"))
+        );
+        assert!(
+            !serde_json::to_string(&expected)
+                .unwrap()
+                .contains(&root.path().to_string_lossy().to_string())
+        );
+        let repaired = repair_from_snapshot(
+            snapshot,
+            &expected,
+            &expected.token,
+            &["runtime-file/cpu/ggml.dll".into()],
+            &Control::default(),
+            &Activity::default(),
+        )
+        .unwrap();
+        assert_eq!(repaired, vec!["runtime-file/cpu/ggml.dll"]);
+        assert_eq!(
+            fs::read(folder.join("ggml.dll")).unwrap(),
+            b"publisher ggml"
+        );
+        assert_eq!(
+            fs::read(&settings.server).unwrap(),
+            b"unselected current server"
+        );
+        assert_eq!(
+            fs::read(folder.join("vcruntime140.dll")).unwrap(),
+            b"APP SERVICED"
+        );
+        assert_eq!(
+            fs::read(folder.join("manual.txt")).unwrap(),
+            b"UNKNOWN RETAINED"
+        );
+        assert_eq!(fs::read(&registration).unwrap(), b"REGISTRATION UNCHANGED");
+        assert_eq!(fs::read(active).unwrap(), b"ACTIVE POINTER");
+        assert_eq!(fs::read(previous).unwrap(), b"PREVIOUS POINTER");
+        let backups = fs::read_dir(folder)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".notegen-repair-recovery-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            fs::read(backups[0].path().join("ggml.dll")).unwrap(),
+            b"damaged original"
+        );
+    }
+    #[test]
+    fn runtime_inventory_never_trusts_a_local_manifest_or_unverified_archive_and_never_fetches() {
+        let root = tempfile::tempdir().unwrap();
+        let (settings, pins) = synthetic_runtime(
+            root.path(),
+            &[
+                ("llama-server.exe", b"verified server"),
+                ("ggml.dll", b"verified ggml"),
+            ],
+        );
+        let archive = root.path().join("runtime/downloads").join(&pins[0].file);
+        fs::write(&archive, b"not the pinned archive").unwrap();
+        fs::write(
+            settings
+                .server
+                .parent()
+                .unwrap()
+                .join("invented-runtime-manifest.json"),
+            br#"{"ggml.dll":{"bytes":7,"sha256":"fake"}}"#,
+        )
+        .unwrap();
+        let snapshot = synthetic_snapshot(&settings, &pins, &Control::default()).unwrap();
+        assert!(
+            snapshot
+                .preview
+                .files
+                .iter()
+                .all(|file| file.key.starts_with("runtime-archive/"))
+        );
+        assert!(
+            snapshot
+                .preview
+                .notes
+                .iter()
+                .any(|note| note.contains("hashes are unavailable"))
+        );
+        assert_eq!(fs::read(archive).unwrap(), b"not the pinned archive");
+        assert!(!settings.server.is_file());
+    }
+    #[test]
+    fn identical_flat_duplicates_deduplicate_but_conflicts_aliases_and_traversal_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let (settings, pins) = synthetic_runtime(
+            root.path(),
+            &[
+                ("bin/llama-server.exe", b"server"),
+                ("first/ggml.dll", b"same"),
+                ("second/ggml.dll", b"same"),
+            ],
+        );
+        let snapshot = synthetic_snapshot(&settings, &pins, &Control::default()).unwrap();
+        assert_eq!(
+            snapshot
+                .preview
+                .files
+                .iter()
+                .filter(|file| file.key == "runtime-file/cpu/ggml.dll")
+                .count(),
+            1
+        );
+        for entries in [
+            vec![
+                ("llama-server.exe", b"server".as_slice()),
+                ("a/ggml.dll", b"one".as_slice()),
+                ("b/ggml.dll", b"two".as_slice()),
+            ],
+            vec![
+                ("llama-server.exe", b"server".as_slice()),
+                ("ggml.dll", b"same".as_slice()),
+                ("GGML.DLL", b"same".as_slice()),
+            ],
+            vec![
+                ("llama-server.exe", b"server".as_slice()),
+                ("../escape.dll", b"evil".as_slice()),
+            ],
+            vec![
+                ("llama-server.exe", b"server".as_slice()),
+                ("nested/CON.dll", b"evil".as_slice()),
+            ],
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (settings, pins) = synthetic_runtime(root.path(), &entries);
+            assert!(synthetic_snapshot(&settings, &pins, &Control::default()).is_err());
+            assert!(!root.path().join("escape.dll").exists());
+            assert!(!settings.server.is_file());
+        }
+    }
+    #[test]
+    fn runtime_source_tamper_and_stale_target_cannot_publish_missing_or_corrupt_binaries() {
+        let root = tempfile::tempdir().unwrap();
+        let (settings, pins) = synthetic_runtime(
+            root.path(),
+            &[
+                ("llama-server.exe", b"verified server"),
+                ("ggml.dll", b"verified ggml"),
+            ],
+        );
+        let folder = settings.server.parent().unwrap();
+        fs::write(folder.join("ggml.dll"), b"damaged").unwrap();
+        let snapshot = synthetic_snapshot(&settings, &pins, &Control::default()).unwrap();
+        let expected = snapshot.preview.clone();
+        // The fresh preview still matches, but a concurrently replaced archive is
+        // reauthenticated through its held file before any target is captured.
+        fs::write(
+            root.path().join("runtime/downloads").join(&pins[0].file),
+            b"replaced",
+        )
+        .unwrap();
+        assert!(
+            repair_from_snapshot(
+                snapshot,
+                &expected,
+                &expected.token,
+                &["runtime-file/cpu/ggml.dll".into()],
+                &Control::default(),
+                &Activity::default()
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(folder.join("ggml.dll")).unwrap(), b"damaged");
+        let (settings, pins) = synthetic_runtime(
+            root.path(),
+            &[
+                ("llama-server.exe", b"verified server"),
+                ("ggml.dll", b"verified ggml"),
+            ],
+        );
+        let snapshot = synthetic_snapshot(&settings, &pins, &Control::default()).unwrap();
+        let expected = snapshot.preview.clone();
+        fs::write(folder.join("ggml.dll"), b"concurrent replacement").unwrap();
+        assert!(
+            repair_from_snapshot(
+                snapshot,
+                &expected,
+                &expected.token,
+                &["runtime-file/cpu/ggml.dll".into()],
+                &Control::default(),
+                &Activity::default()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(folder.join("ggml.dll")).unwrap(),
+            b"concurrent replacement"
+        );
+        let snapshot = synthetic_snapshot(&settings, &pins, &Control::default()).unwrap();
+        let expected = snapshot.preview.clone();
+        let cancelled = Control::default();
+        cancelled.cancelled.store(true, Ordering::Relaxed);
+        assert!(
+            repair_from_snapshot(
+                snapshot,
+                &expected,
+                &expected.token,
+                &["runtime-file/cpu/llama-server.exe".into()],
+                &cancelled,
+                &Activity::default()
+            )
+            .is_err()
+        );
+        assert!(!settings.server.exists());
+    }
+    #[test]
+    fn runtime_zip_metadata_budgets_reject_oversized_directory_count_before_parsing() {
+        let root = tempfile::tempdir().unwrap();
+        let (settings, _) = synthetic_runtime(root.path(), &[("llama-server.exe", b"server")]);
+        let archive = root
+            .path()
+            .join("runtime/downloads/llama-b1-bin-win-cpu-x64.zip");
+        let mut bytes = fs::read(&archive).unwrap();
+        let end = bytes
+            .windows(4)
+            .rposition(|part| part == b"PK\x05\x06")
+            .unwrap();
+        bytes[end + 8..end + 10].copy_from_slice(&1001u16.to_le_bytes());
+        bytes[end + 10..end + 12].copy_from_slice(&1001u16.to_le_bytes());
+        fs::write(&archive, &bytes).unwrap();
+        assert!(runtime_zip_count(&mut fs::File::open(archive).unwrap()).is_err());
+        assert!(!settings.server.exists());
+    }
+    #[test]
+    fn runtime_symlink_and_unicode_target_aliases_never_become_repair_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let (settings, mut pins) = synthetic_runtime(
+            root.path(),
+            &[("llama-server.exe", b"server"), ("ggml.dll", b"verified")],
+        );
+        let archive = root.path().join("runtime/downloads").join(&pins[0].file);
+        let mut zip = zip::ZipWriter::new_append(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&archive)
+                .unwrap(),
+        )
+        .unwrap();
+        zip.set_comment("bounded synthetic symlink fixture ".repeat(45));
+        zip.add_symlink(
+            "link.dll",
+            "outside",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        pins[0].bytes = bytes.len() as u64;
+        pins[0].sha256 = digest(&bytes);
+        assert!(synthetic_snapshot(&settings, &pins, &Control::default()).is_err());
+        assert!(!settings.server.exists());
+        let (settings, pins) = synthetic_runtime(
+            root.path(),
+            &[("llama-server.exe", b"server"), ("ggml.dll", b"verified")],
+        );
+        let alias = settings.server.parent().unwrap().join("ｇｇｍｌ.dll");
+        fs::write(&alias, b"manual Unicode alias").unwrap();
+        assert!(synthetic_snapshot(&settings, &pins, &Control::default()).is_err());
+        assert_eq!(fs::read(alias).unwrap(), b"manual Unicode alias");
+    }
+    #[test]
+    fn selected_missing_runtime_binary_is_published_without_executing_it_or_changing_other_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let (settings, pins) = synthetic_runtime(
+            root.path(),
+            &[("llama-server.exe", b"synthetic verified server bytes")],
+        );
+        let snapshot = synthetic_snapshot(&settings, &pins, &Control::default()).unwrap();
+        let expected = snapshot.preview.clone();
+        assert_eq!(
+            expected
+                .files
+                .iter()
+                .find(|file| file.key == "runtime-file/cpu/llama-server.exe")
+                .unwrap()
+                .health,
+            AssetHealth::Missing
+        );
+        repair_from_snapshot(
+            snapshot,
+            &expected,
+            &expected.token,
+            &["runtime-file/cpu/llama-server.exe".into()],
+            &Control::default(),
+            &Activity::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&settings.server).unwrap(),
+            b"synthetic verified server bytes"
+        );
+        assert!(!root.path().join("runtime/active-ai-runtime.json").exists());
+        assert!(
+            !root
+                .path()
+                .join("runtime/previous-ai-runtime.json")
+                .exists()
+        );
+    }
 
     fn repair_file(original: &[u8]) -> RepairFile {
         RepairFile {
