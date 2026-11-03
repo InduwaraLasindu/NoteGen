@@ -184,13 +184,13 @@ fn compatible(
     if project.root.join("input-invalidated.json").exists() {
         reasons.push("Source was invalidated during an earlier conversion.".into());
     }
-    if let Some(layout) = crate::project_layout::catalog(project)? {
-        if project.manifest.pages != layout.states[0].order {
-            reasons.push(
-                "The active page organization differs from the original input; reuse is withheld."
-                    .into(),
-            );
-        }
+    if let Some(layout) = crate::project_layout::catalog(project)?
+        && project.manifest.pages != layout.states[0].order
+    {
+        reasons.push(
+            "The active page organization differs from the original input; reuse is withheld."
+                .into(),
+        );
     }
     let mut review = 0;
     for n in &project.manifest.pages {

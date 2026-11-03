@@ -19,6 +19,8 @@ pub type Clarifier =
 pub struct Control {
     pub cancelled: Arc<AtomicBool>,
     pub paused: Arc<AtomicBool>,
+    /// Scheduling request, observed only after an explicitly durable stage.
+    pub yield_requested: Arc<AtomicBool>,
     pub clarify: Option<Clarifier>,
     pub downloads: Option<crate::downloads::Manager>,
     pub transfer_cancelled: Option<Arc<AtomicBool>>,
@@ -80,6 +82,16 @@ pub fn configure_temporary_environment(
 }
 
 impl Control {
+    /// Call only after a checkpoint is fully published. Ordinary checks never
+    /// interrupt a request merely because a higher priority job arrived.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.check()?;
+        anyhow::ensure!(
+            !self.yield_requested.load(Ordering::Acquire),
+            Fault::new("NG901", "Yielded after a saved stage for urgent work")
+        );
+        Ok(())
+    }
     /// A nonblocking cancellation check for open HTTP responses. Pausing a
     /// transfer must drop its response before waiting, rather than hold a socket.
     pub fn check_cancelled(&self) -> Result<()> {
@@ -394,6 +406,32 @@ impl Project {
 #[cfg(test)]
 mod private_temp_tests {
     use super::*;
+    #[test]
+    fn urgent_work_is_observed_only_at_a_durable_boundary_and_cancel_wins() {
+        let control = Control::default();
+        control.yield_requested.store(true, Ordering::Release);
+        control.check().unwrap();
+        assert_eq!(
+            control
+                .checkpoint()
+                .unwrap_err()
+                .downcast_ref::<Fault>()
+                .unwrap()
+                .code,
+            "NG901"
+        );
+        control.cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(
+            control
+                .checkpoint()
+                .unwrap_err()
+                .downcast_ref::<Fault>()
+                .unwrap()
+                .code,
+            "NG900"
+        );
+        assert!(!Control::default().yield_requested.load(Ordering::Acquire));
+    }
     #[test]
     fn temporary_artifacts_and_child_environment_stay_under_the_selected_private_root() {
         let root = tempfile::tempdir().unwrap();

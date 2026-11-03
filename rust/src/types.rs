@@ -59,6 +59,7 @@ impl Fault {
                 "Inspect the marked session and keep its artifacts. Export completed output or a recovery ZIP before selecting any cleanup; recover an interrupted cleanup first."
             }
             "NG900" => "Completed work is saved. Resume the same input and settings.",
+            "NG901" => "Saved stages will resume automatically after urgent queue work finishes.",
             _ => "Open the local activity log for the stage and error code.",
         }
     }

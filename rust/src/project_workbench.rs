@@ -4,7 +4,7 @@ use crate::{migrations, project_layout as layout, project_reuse as reuse};
 
 enum Preview {
     Migration(Box<migrations::Plan>),
-    Layout(Project, Box<layout::LayoutPreview>),
+    Layout(Box<Project>, Box<layout::LayoutPreview>),
     Reuse(Box<reuse::Preview>),
 }
 enum Reply {
@@ -255,7 +255,7 @@ impl ProjectTools {
                 let project = project.clone(); let source = self.source.clone(); let roots = self.roots.clone(); let settings = settings.clone(); let settings_file = self.settings_file.clone(); let receipt = self.receipt.clone();
                 self.task(ctx, move |c| {
                     let preview = match action {
-                        0..=4 => { let p = project.ok_or_else(|| anyhow::anyhow!("Open a project"))?; let preview = layout::preview(&p, operation.unwrap()?, &c)?; Preview::Layout(p, Box::new(preview)) }
+                        0..=4 => { let p = project.ok_or_else(|| anyhow::anyhow!("Open a project"))?; let preview = layout::preview(&p, operation.unwrap()?, &c)?; Preview::Layout(Box::new(p), Box::new(preview)) }
                         5 => Preview::Migration(Box::new(migrations::preview_project_sources(&project.ok_or_else(|| anyhow::anyhow!("Open a project"))?, &c)?)),
                         6 => Preview::Reuse(Box::new(reuse::preview(&source.ok_or_else(|| anyhow::anyhow!("Choose the original input"))?, &settings, &roots, &c)?)),
                         7 => Preview::Migration(Box::new(migrations::preview_settings(&settings_file.ok_or_else(|| anyhow::anyhow!("Choose a settings file"))?, &c)?)),

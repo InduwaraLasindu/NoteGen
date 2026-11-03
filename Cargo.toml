@@ -260,3 +260,7 @@ path = "rust/tests/project_lock.rs"
 name = "code_transcription"
 path = "rust/tests/code_transcription.rs"
 
+[[test]]
+name = "urgent_yield"
+path = "rust/tests/urgent_yield.rs"
+

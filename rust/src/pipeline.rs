@@ -954,6 +954,7 @@ fn convert_internal(
         if changed {
             rendered.push(n);
         }
+        control.checkpoint()?;
         Ok(())
     };
     // PDFium remains on this caller thread; only one page's OCR/preprocessing runs at a time.
@@ -1501,6 +1502,7 @@ fn convert_internal(
                 total,
                 "",
             );
+            c.checkpoint()?;
         }
         if let Some(job) = warm_job.as_mut() {
             job.finish_reader(server, c, &log);
@@ -1564,6 +1566,7 @@ fn convert_internal(
             }
             update_pending(&project, &p)?;
         }
+        c.checkpoint()?;
     }
     log.work(
         Work::new(Phase::Finalize, pages, pages, 100, false),
@@ -1630,7 +1633,7 @@ fn convert_internal(
             })
             .count();
     }
-    c.check()?;
+    c.checkpoint()?;
     log.emit(
         "export",
         "Writing editable Word document",
@@ -1765,7 +1768,7 @@ fn cache_identity(
         .map(|path| hash_file(&path, c))
         .transpose()?;
     fingerprint(&(
-        4,
+        5,
         settings,
         runtime,
         ocr,
@@ -2532,6 +2535,30 @@ fn reread_view(
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
+    #[test]
+    fn overlapping_preparation_yields_after_publication_and_joins_both_stages() {
+        let c = Control::default();
+        let root = tempfile::tempdir().unwrap();
+        let saved = root.path().join("durable.json");
+        let error = bounded_preparation(
+            &c,
+            |_, send| {
+                for n in 0..100 {
+                    send(n)?;
+                }
+                Ok(())
+            },
+            |n: usize, control| {
+                atomic_json(&saved, &n)?;
+                c.yield_requested.store(true, Ordering::Release);
+                control.checkpoint()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG901");
+        assert_eq!(read_json::<usize>(&saved, 100).unwrap(), 0);
+        assert!(!c.cancelled.load(Ordering::Relaxed));
+    }
     use std::sync::atomic::AtomicUsize;
 
     fn await_cancel(control: &Control) -> Result<()> {

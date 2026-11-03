@@ -19,7 +19,7 @@ pub enum Axis {
     Vertical,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     Reorder { pages: Vec<usize> },
     Remove { pages: Vec<usize> },

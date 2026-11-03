@@ -37,6 +37,13 @@ pub struct Job {
     pub detail: String,
     #[serde(default)]
     pub priority: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeJob>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResumeJob {
+    pub output: PathBuf,
+    pub settings: Box<Settings>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,6 +85,7 @@ impl Workspace {
             project: None,
             detail: String::new(),
             priority: 0,
+            resume: None,
         });
         true
     }
@@ -88,6 +96,14 @@ impl Workspace {
             .filter(|(_, j)| j.status == JobStatus::Pending)
             .max_by_key(|(i, j)| (j.priority.min(2), std::cmp::Reverse(*i)))
             .map(|(i, _)| i)
+    }
+    pub fn urgent_waiting(&self, active: usize) -> bool {
+        self.queue
+            .get(active)
+            .is_some_and(|job| job.status == JobStatus::Running && job.priority.min(2) < 2)
+            && self.queue.iter().enumerate().any(|(i, job)| {
+                i != active && job.status == JobStatus::Pending && job.priority.min(2) == 2
+            })
     }
     pub fn apply(&mut self, raw: &str) -> Result<()> {
         let next: Settings = serde_json::from_str(raw)?;
@@ -629,6 +645,15 @@ impl Desktop {
         });
     }
     fn poll(&mut self, ctx: &egui::Context) {
+        let urgent = self.running_queue
+            && !self.paused()
+            && self.studio.pending.is_none()
+            && self
+                .active
+                .is_some_and(|active| self.state.urgent_waiting(active));
+        self.control
+            .yield_requested
+            .store(urgent, Ordering::Release);
         let now = self.clock.elapsed().as_secs_f64();
         if self.running_queue
             && let Some(batch) = &mut self.batch
@@ -752,8 +777,11 @@ impl Desktop {
                     self.busy_setup = false;
                     self.studio.pending = None;
                     let cancelled = code == "NG900";
+                    let yielded = code == "NG901";
                     if let Some(i) = self.active.take() {
-                        self.state.queue[i].status = if cancelled {
+                        self.state.queue[i].status = if yielded {
+                            JobStatus::Pending
+                        } else if cancelled {
                             JobStatus::Cancelled
                         } else {
                             JobStatus::Failed
@@ -762,13 +790,17 @@ impl Desktop {
                     }
                     self.notice = detail;
                     self.error_code = code;
-                    self.stage = if cancelled {
+                    self.stage = if yielded {
+                        "Saved stage · urgent input starts next"
+                    } else if cancelled {
                         "Cancelled · checkpoints preserved"
                     } else {
                         "Needs attention"
                     }
                     .into();
-                    self.running_queue = false;
+                    if !yielded {
+                        self.running_queue = false;
+                    }
                     self.finished();
                 }
                 Message::Notice(s) => {
@@ -810,7 +842,12 @@ impl Desktop {
             self.running_queue = false;
             return;
         };
-        if let Err(e) = self.state.settings.validate() {
+        if let Err(e) = self.state.queue[i]
+            .resume
+            .as_ref()
+            .map_or(&self.state.settings, |resume| resume.settings.as_ref())
+            .validate()
+        {
             self.notice = e.to_string();
             self.running_queue = false;
             return;
@@ -835,7 +872,13 @@ impl Desktop {
             .map(|(i, j)| (i, j.input.clone()))
             .collect::<Vec<_>>();
         let input = self.state.queue[i].input.clone();
-        let folder = if self.state.output_dir.trim().is_empty() {
+        let folder = if let Some(folder) = self.state.queue[i]
+            .resume
+            .as_ref()
+            .and_then(|resume| resume.output.parent())
+        {
+            folder.to_path_buf()
+        } else if self.state.output_dir.trim().is_empty() {
             input.parent().unwrap_or(Path::new(".")).to_path_buf()
         } else {
             PathBuf::from(&self.state.output_dir)
@@ -849,8 +892,16 @@ impl Desktop {
             self.running_queue = false;
             return;
         }
-        let output = output_name(&input, &folder);
-        let s = self.state.settings.clone();
+        let resume = self.state.queue[i]
+            .resume
+            .clone()
+            .unwrap_or_else(|| ResumeJob {
+                output: output_name(&input, &folder),
+                settings: Box::new(self.state.settings.clone()),
+            });
+        let output = resume.output.clone();
+        let s = *resume.settings.clone();
+        self.state.queue[i].resume = Some(resume);
         if let Err(error) = self.sync_warm_reader_preferences() {
             self.notice = error.to_string();
             self.running_queue = false;
@@ -1473,6 +1524,7 @@ impl Desktop {
         let mut review = None;
         let mut remove = None;
         let mut move_job = None;
+        ui.small("Urgent inputs start after the active page stage is saved. The interrupted input then resumes with its original settings and output folder. An active OCR or AI request finishes before yielding.");
         let queue_len = self.state.queue.len();
         for (i, j) in self.state.queue.iter_mut().enumerate() {
             ui.push_id(i, |ui| {
@@ -2671,6 +2723,7 @@ fn code_static(s: &str) -> &'static str {
         "NG640" => "NG640",
         "NG650" => "NG650",
         "NG900" => "NG900",
+        "NG901" => "NG901",
         _ => "NG500",
     }
 }
@@ -2740,6 +2793,39 @@ fn open_path(path: &Path) {
 mod acceptance {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn urgent_jobs_preempt_lower_priorities_only_and_resume_identity_survives_restart() {
+        let mut workspace = Workspace::default();
+        assert!(workspace.enqueue(PathBuf::from("first.png")));
+        assert!(workspace.enqueue(PathBuf::from("urgent.png")));
+        workspace.queue[0].status = JobStatus::Running;
+        workspace.queue[1].priority = 1;
+        assert!(!workspace.urgent_waiting(0));
+        workspace.queue[1].priority = 2;
+        assert!(workspace.urgent_waiting(0));
+        let settings = Settings {
+            subject: "Original private job context".into(),
+            ..Default::default()
+        };
+        workspace.queue[0].resume = Some(ResumeJob {
+            output: PathBuf::from("original output/first.docx"),
+            settings: Box::new(settings),
+        });
+        workspace.settings.subject = "New context for the urgent job".into();
+        let mut restored: Workspace =
+            serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
+        restored.recover();
+        assert_eq!(restored.next(), Some(1));
+        let resume = restored.queue[0].resume.as_ref().unwrap();
+        assert_eq!(resume.settings.subject, "Original private job context");
+        assert_eq!(resume.output, PathBuf::from("original output/first.docx"));
+        restored.queue[1].status = JobStatus::Complete;
+        assert_eq!(restored.next(), Some(0));
+        restored.queue[0].status = JobStatus::Running;
+        restored.queue[0].priority = 2;
+        restored.queue[1].status = JobStatus::Pending;
+        assert!(!restored.urgent_waiting(0));
+    }
     fn draw(app: &mut Desktop, ctx: &egui::Context) {
         let mut result = ctx.run_ui(
             egui::RawInput {

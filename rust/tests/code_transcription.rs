@@ -8,6 +8,54 @@ use notegen::{
 use std::{fs, path::Path};
 
 #[test]
+fn structured_code_retains_exact_characters_and_spacing_differences_require_review() {
+    use notegen::{consensus, parsing};
+    let original = "1\tif (O0 != ０) {\r\n2\t    value += 1250; // x_y\r\n3\t}\r\n";
+    let raw = serde_json::json!({"blocks":[{"kind":"code","text":original}]}).to_string();
+    let reading = parsing::structured_reader(&raw).unwrap();
+    assert_eq!(reading.blocks[0].text, original);
+    let candidate = |id: &str, content: PageContent| Candidate {
+        model_id: id.into(),
+        family: id.into(),
+        view: "full".into(),
+        content,
+        reliability: 0.8,
+        region: None,
+    };
+    let exact = vec![
+        candidate("a", reading.clone()),
+        candidate("b", reading.clone()),
+    ];
+    let (selected, agreement) = consensus::select(&exact, 2, 0.9);
+    assert_eq!(agreement, 1.);
+    assert_eq!(selected.blocks[0].text, original);
+    for changed in [
+        original.replace("    value", "value"),
+        original.replace("\t", "    "),
+        original.replace("０", "0"),
+        original.replace("+=", "="),
+        original.replace("2\t", "4\t"),
+    ] {
+        let mut other = reading.clone();
+        other.blocks[0].text = changed.clone();
+        let (selected, agreement) = consensus::select(
+            &[candidate("a", reading.clone()), candidate("b", other)],
+            2,
+            0.9,
+        );
+        assert_eq!(agreement, 0.);
+        assert!(selected.blocks[0].uncertain);
+        assert!(selected.blocks[0].text == original || selected.blocks[0].text == changed);
+        assert!(
+            selected
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("Code readings differ"))
+        );
+    }
+}
+
+#[test]
 fn native_printed_code_has_calibrated_indentation_literal_evidence_and_source_bound_undo() {
     let font_path = [
         "C:/Windows/Fonts/consola.ttf",
