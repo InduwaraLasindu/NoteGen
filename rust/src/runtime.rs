@@ -11,7 +11,7 @@ use std::{
     fs,
     io::{Cursor, Read},
     net::TcpListener,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
         Arc, Mutex,
@@ -108,6 +108,26 @@ pub fn register(dir: &Path, id: &str, weights: &Path, projector: &Path) -> Resul
     crate::models::attach_catalog_metadata(&mut m);
     crate::storage::atomic_json(&dir.join(format!("{id}.notegen.json")), &m)?;
     Ok(m)
+}
+fn private_server_args(args: &mut Vec<String>, root: &Path, key: &str) -> Result<PathBuf> {
+    crate::watch::no_links(root)?;
+    anyhow::ensure!(
+        root.is_dir(),
+        Fault::new("NG200", "Owned reader temporary directory is unavailable")
+    );
+    let slots = root.join("slot-reset");
+    crate::watch::no_links(&slots)?;
+    // b12032 gates erase as well as save/restore behind --slot-save-path.
+    // The owning ReaderLease retains this empty directory until process release.
+    // NoteGen sends only authenticated erase requests, never save or restore.
+    fs::create_dir(&slots)?;
+    args.extend([
+        "--api-key".into(),
+        key.into(),
+        "--slot-save-path".into(),
+        slots.to_string_lossy().into_owned(),
+    ]);
+    Ok(slots)
 }
 pub struct Server {
     child: Option<Arc<Mutex<Child>>>,
@@ -454,7 +474,7 @@ impl Server {
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let mut args = server_args(model, plan, s, port);
         if let Some(key) = &api_key {
-            args.extend(["--api-key".into(), key.clone()]);
+            private_server_args(&mut args, root, key)?;
         }
         let log_path = root.join(format!("server-{}.log", model.id));
         let file = fs::File::create(&log_path)?;
@@ -972,4 +992,44 @@ pub fn page_schema() -> Value {
             }
         }}
     }})
+}
+
+#[cfg(test)]
+mod private_startup_tests {
+    use super::*;
+    #[test]
+    fn owned_startup_enables_authenticated_erase_in_a_new_retained_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut args = vec!["--parallel".into(), "1".into()];
+        let key = "a".repeat(64);
+        let slots = private_server_args(&mut args, directory.path(), &key).unwrap();
+        assert_eq!(slots, directory.path().join("slot-reset"));
+        assert!(slots.is_dir());
+        assert!(fs::read_dir(&slots).unwrap().next().is_none());
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--api-key" && pair[1] == key)
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--slot-save-path" && Path::new(&pair[1]) == slots)
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| ["save", "restore"].contains(&arg.as_str()))
+        );
+        // Reopening a lease cannot adopt or overwrite an unexpected directory.
+        fs::write(slots.join("unexpected.bin"), b"preserve unexpected bytes").unwrap();
+        assert!(private_server_args(&mut vec![], directory.path(), &key).is_err());
+        assert_eq!(
+            fs::read(slots.join("unexpected.bin")).unwrap(),
+            b"preserve unexpected bytes"
+        );
+        drop(directory);
+        assert!(
+            !slots.exists(),
+            "slot directory must live only as long as its owner"
+        );
+    }
 }

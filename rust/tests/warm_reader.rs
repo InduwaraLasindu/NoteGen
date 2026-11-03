@@ -13,6 +13,25 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct NativeEvidence(Option<tempfile::TempDir>);
+impl NativeEvidence {
+    fn path(&self) -> &std::path::Path {
+        self.0.as_ref().unwrap().path()
+    }
+}
+impl Drop for NativeEvidence {
+    fn drop(&mut self) {
+        if thread::panicking()
+            && let Some(directory) = self.0.take()
+        {
+            eprintln!(
+                "NATIVE_WARM_FAILURE_EVIDENCE {}",
+                directory.keep().display()
+            );
+        }
+    }
+}
+
 fn source(amount: &str) -> DynamicImage {
     let font = [
         "C:/Windows/Fonts/arial.ttf",
@@ -58,10 +77,12 @@ fn stopped(endpoint: &str) -> bool {
 fn native_warm_reader_reuses_pid_with_fresh_context_and_bounded_lifecycle() {
     let root = PathBuf::from(std::env::var("NOTEGEN_LIVE_ROOT").expect("Set NOTEGEN_LIVE_ROOT"));
     fs::create_dir_all(&root).unwrap();
-    let root = tempfile::Builder::new()
-        .prefix("warm-isolation-")
-        .tempdir_in(root)
-        .unwrap();
+    let root = NativeEvidence(Some(
+        tempfile::Builder::new()
+            .prefix("warm-isolation-")
+            .tempdir_in(root)
+            .unwrap(),
+    ));
     let id = std::env::var("NOTEGEN_LIVE_ID").unwrap_or_else(|_| "glm-ocr".into());
     let mut model = planning::catalog()
         .into_iter()
@@ -88,7 +109,11 @@ fn native_warm_reader_reuses_pid_with_fresh_context_and_bounded_lifecycle() {
     let first_control = Control::default();
     let first_log = Activity {
         path: Some(root.path().join("first/activity.jsonl")),
-        callback: None,
+        callback: Some(std::sync::Arc::new(|event| {
+            if !event.code.is_empty() {
+                eprintln!("NATIVE_WARM_DIAGNOSTIC {} {}", event.code, event.message);
+            }
+        })),
     };
     fs::create_dir_all(root.path().join("first")).unwrap();
     let (first_pid, endpoint) = pool

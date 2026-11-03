@@ -217,6 +217,7 @@ jobs:
           name: Native-AI-model-evidence
           path: |
             build/ai-smoke/NoteGen/results/**/*.json
+            build/ai-smoke/NoteGen/results/**/*.jsonl
             build/ai-smoke/NoteGen/results/**/*.log
             build/ai-smoke/NoteGen/results/**/*.txt
             build/ai-smoke/NoteGen/maximum-smoke.docx

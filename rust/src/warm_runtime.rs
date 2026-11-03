@@ -369,28 +369,28 @@ impl WarmJob<'_> {
         if !reader.healthy() {
             self.tainted = true;
         }
-        let logs_bounded = reader.directory.as_ref().is_some_and(|directory| {
-            fs::read_dir(directory.path()).is_ok_and(|mut entries| {
-                entries.all(|entry| {
-                    entry.is_ok_and(|entry| {
-                        entry.metadata().is_ok_and(|meta| meta.len() <= 4_000_000)
-                    })
-                })
-            })
-        });
+        let logs_bounded = reader
+            .directory
+            .as_ref()
+            .is_some_and(|directory| owned_files_bounded(directory.path()));
         if !self.tainted && reader.key.is_some() && logs_bounded && self.current().is_ok() {
-            if reader.reset_for_reuse(c).is_ok() && reader.bind_control(None).is_ok() {
-                self.candidate = Some(reader);
-                return;
+            match reader
+                .reset_for_reuse(c)
+                .and_then(|()| reader.bind_control(None))
+            {
+                Ok(()) => {
+                    self.candidate = Some(reader);
+                    return;
+                }
+                Err(error) => log.emit(
+                    "model",
+                    format!("Reader reset could not be verified; process released: {error}"),
+                    0,
+                    0,
+                    0,
+                    "NG200",
+                ),
             }
-            log.emit(
-                "model",
-                "Reader reset could not be verified; process released",
-                0,
-                0,
-                0,
-                "NG200",
-            );
             self.tainted = true;
         }
         drop(reader);
@@ -445,6 +445,27 @@ impl Drop for WarmJob<'_> {
 }
 fn memory_admitted(s: &Settings, plan: &Plan, c: &Control) -> bool {
     memory_fits(&hardware::detect_for(s, c), s, plan)
+}
+fn owned_files_bounded(root: &Path) -> bool {
+    fs::read_dir(root).is_ok_and(|mut entries| {
+        entries.all(|entry| {
+            entry.is_ok_and(|entry| {
+                if crate::watch::no_links(&entry.path()).is_err() {
+                    return false;
+                }
+                fs::symlink_metadata(entry.path()).is_ok_and(|meta| {
+                    if meta.is_dir() {
+                        entry.file_name() == "slot-reset"
+                            && !meta.file_type().is_symlink()
+                            && fs::read_dir(entry.path())
+                                .is_ok_and(|mut files| files.next().is_none())
+                    } else {
+                        meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 4_000_000
+                    }
+                })
+            })
+        })
+    })
 }
 fn memory_fits(hw: &hardware::Hardware, s: &Settings, plan: &Plan) -> bool {
     // Deliberately no credit for resident/mapped weights: available RAM can already
@@ -522,6 +543,30 @@ fn compatibility_key(model: &Model, plan: &Plan, s: &Settings, c: &Control) -> R
 mod tests {
     use super::*;
     use std::sync::mpsc;
+    #[test]
+    fn owned_runtime_allows_only_empty_slot_reset_storage_and_bounded_logs() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("slot-reset")).unwrap();
+        fs::write(
+            root.path().join("server.log"),
+            b"bounded synthetic diagnostic",
+        )
+        .unwrap();
+        assert!(owned_files_bounded(root.path()));
+        fs::write(
+            root.path().join("slot-reset/kv.bin"),
+            b"unexpected saved prompt cache",
+        )
+        .unwrap();
+        assert!(
+            !owned_files_bounded(root.path()),
+            "saved slot bytes must prevent warm cache admission"
+        );
+        fs::remove_file(root.path().join("slot-reset/kv.bin")).unwrap();
+        assert!(owned_files_bounded(root.path()));
+        fs::create_dir(root.path().join("unknown-child")).unwrap();
+        assert!(!owned_files_bounded(root.path()));
+    }
     #[test]
     fn warm_lifetime_is_explicit_and_bounded_and_shutdown_is_final() {
         assert!(WarmPool::new(Duration::ZERO).is_err());
