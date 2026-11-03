@@ -38,6 +38,9 @@ fn project(root: &Path, pages: Vec<usize>) -> Project {
     .unwrap()
 }
 fn pdf(path: &Path, im: &RgbImage) {
+    pdf_with_pages(path, im, 1);
+}
+fn pdf_with_pages(path: &Path, im: &RgbImage, page_count: usize) {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = vec![0];
     let w = im.width();
@@ -47,7 +50,16 @@ fn pdf(path: &Path, im: &RgbImage) {
         w as f32 * 72. / 150.,
         h as f32 * 72. / 150.
     );
-    let objects=vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",w as f32*72./150.,h as f32*72./150.).into_bytes(),[format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",im.as_raw().len()).into_bytes(),im.as_raw().clone(),b"\nendstream".to_vec()].concat(),format!("<< /Length {} >>\nstream\n{}\nendstream",contents.len(),contents).into_bytes()];
+    assert!((1..=4).contains(&page_count));
+    let kids = std::iter::once(3)
+        .chain((0..page_count - 1).map(|i| i + 6))
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut objects=vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),format!("<< /Type /Pages /Count {page_count} /Kids [{kids}] >>").into_bytes(),format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",w as f32*72./150.,h as f32*72./150.).into_bytes(),[format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",im.as_raw().len()).into_bytes(),im.as_raw().clone(),b"\nendstream".to_vec()].concat(),format!("<< /Length {} >>\nstream\n{}\nendstream",contents.len(),contents).into_bytes()];
+    for _ in 1..page_count {
+        objects.push(objects[2].clone());
+    }
     for (i, obj) in objects.into_iter().enumerate() {
         offsets.push(out.len());
         out.extend(format!("{} 0 obj\n", i + 1).as_bytes());
@@ -324,7 +336,8 @@ fn native_word_has_real_merges_and_embedded_figure() {
         ..Default::default()
     })
     .unwrap();
-    let target = t.path().join("notes.docx");
+    let exported = tempfile::tempdir().unwrap();
+    let target = exported.path().join("notes.docx");
     word::export(&p, &target, &Control::default()).unwrap();
     let mut z = zip::ZipArchive::new(fs::File::open(&target).unwrap()).unwrap();
     let mut text = String::new();
@@ -648,6 +661,25 @@ fn pdf_bounds_and_real_tesseract_pipeline() {
             .content
             .plain()
             .contains("1500")
+    );
+    let mut invalid: Page =
+        notegen::storage::read_json(&repaired.project.page_path(1), 32_000_000).unwrap();
+    invalid.agreement = 1.5;
+    notegen::storage::atomic_json(&repaired.project.page_path(1), &invalid).unwrap();
+    let validated = notegen::pipeline::convert(
+        &source,
+        &t.path().join("notes5.docx"),
+        &s,
+        &Control::default(),
+        &Activity::default(),
+    )
+    .unwrap();
+    let cache: Page =
+        notegen::storage::read_json(&validated.project.page_path(1), 32_000_000).unwrap();
+    cache.validate().unwrap();
+    assert_eq!(
+        validated.project.load(1).unwrap().content.plain(),
+        "Human correction 1500"
     );
 }
 #[test]
@@ -1097,6 +1129,340 @@ fn valid_reader_boxes_are_preserved_without_repair() {
     );
 }
 #[test]
+fn native_qwen_invalid_merges_keep_every_cell_and_raw_response() {
+    // Exact synthetic-fixture response from Windows run 41499768733, artifact
+    // 13170838495, qwen35-2b-page-00001-W9tCzs.txt (no response edits).
+    let raw = include_str!("fixtures/qwen35-2b-invalid-table-merges.json");
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        hex::encode(Sha256::digest(raw.as_bytes())),
+        "856b9dc8639661b8c8b8aad711da301aa04c4652cc70ac541b9f9e9c2fd0ae91"
+    );
+    let original: PageContent = serde_json::from_str(raw).unwrap();
+    assert_eq!(original.blocks[0].merges.len(), 4);
+    let mut merge_only = original.blocks[0].clone();
+    merge_only.bbox = None;
+    assert!(
+        merge_only
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid table merge")
+    );
+    assert!(parsing::structured(raw).is_err());
+
+    let page = parsing::structured_reader(raw).unwrap();
+    page.validate().unwrap();
+    assert_eq!(page.blocks.len(), original.blocks.len());
+    assert_eq!(page.summary, original.summary);
+    assert!(page.warnings.starts_with(&original.warnings));
+    assert!(page.warnings.iter().any(|w| w.contains("Table blocks 1")
+        && w.contains("All merge claims")
+        && w.contains("every cell remains")
+        && w.contains("Review")));
+    for (index, (actual, mut expected)) in page.blocks.iter().zip(original.blocks).enumerate() {
+        // Both raw source boxes are invalid, independently of the bad merges.
+        expected.bbox = None;
+        expected.uncertain = true;
+        if index == 0 {
+            expected.merges.clear();
+        }
+        assert_eq!(actual, &expected);
+    }
+    assert_eq!(
+        page.blocks[0].rows,
+        vec![vec!["Item", "Amount"], vec!["Sales", "1250"]]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = Activity {
+        path: Some(dir.path().join("activity.jsonl")),
+        callback: None,
+    };
+    log.capture_response("qwen35-2b", 1, raw).unwrap();
+    let evidence = fs::read_dir(dir.path().join("responses"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(fs::read(evidence).unwrap(), raw.as_bytes());
+    let source_page = Page {
+        page: 1,
+        image: "page-00001.png".into(),
+        content: page,
+        agreement: 1.,
+        ..Default::default()
+    };
+    assert!(source_page.needs_review(0.5));
+    let project = project(&dir.path().join("project"), vec![1]);
+    project.save(&source_page).unwrap();
+    let output = dir.path().join("recovered.docx");
+    word::export(&project, &output, &Control::default()).unwrap();
+    let mut archive = zip::ZipArchive::new(fs::File::open(output).unwrap()).unwrap();
+    let mut xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    let document = roxmltree::Document::parse(&xml).unwrap();
+    let cells = document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name((
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "tc",
+            ))
+        })
+        .map(|cell| {
+            cell.descendants()
+                .filter(|node| {
+                    node.has_tag_name((
+                        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                        "t",
+                    ))
+                })
+                .filter_map(|node| node.text())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cells, ["Item", "Amount", "Sales", "1250"]);
+    assert!(!xml.contains("<w:gridSpan") && !xml.contains("<w:vMerge"));
+    assert!(xml.contains("All merge claims") && xml.contains("REVIEW NEEDED"));
+}
+
+#[test]
+fn recovered_table_review_status_survives_agreeing_full_and_crop_readers() {
+    let parsed =
+        parsing::structured_reader(include_str!("fixtures/qwen35-2b-invalid-table-merges.json"))
+            .unwrap();
+    let region = BoxRect {
+        left: 0.1,
+        top: 0.25,
+        right: 0.9,
+        bottom: 0.6,
+    };
+    let recovered = Candidate {
+        region: None,
+        model_id: "recovered-qwen".into(),
+        family: "qwen".into(),
+        view: "full".into(),
+        content: parsed.clone(),
+        reliability: 0.95,
+    };
+    let mut independent = recovered.clone();
+    independent.model_id = "independent-reader".into();
+    independent.family = "independent".into();
+    independent.reliability = 0.9;
+    independent.content.warnings.clear();
+    for block in &mut independent.content.blocks {
+        block.uncertain = false;
+    }
+    independent.content.blocks[0].bbox = Some(region.clone());
+    let full = vec![recovered, independent.clone()];
+    let (selected, agreement) = consensus::select(&full, 2, 0.92);
+    assert_eq!(agreement, 1.);
+    assert!(selected.blocks[0].uncertain);
+    assert_eq!(selected.blocks[0].bbox, Some(region.clone()));
+    assert_eq!(selected.warnings, parsed.warnings);
+
+    let mut candidates = full;
+    for (id, family) in [("crop-a", "crop-family-a"), ("crop-b", "crop-family-b")] {
+        candidates.push(Candidate {
+            region: Some(region.clone()),
+            model_id: id.into(),
+            family: family.into(),
+            view: "crop".into(),
+            content: PageContent {
+                blocks: vec![independent.content.blocks[0].clone()],
+                ..Default::default()
+            },
+            reliability: 0.9,
+        });
+    }
+    let mut page = Page {
+        content: selected,
+        candidates,
+        agreement,
+        ..Default::default()
+    };
+    consensus::refine_regions(&mut page, &Settings::default());
+    assert_eq!(page.content.blocks[0].rows, parsed.blocks[0].rows);
+    assert_eq!(page.content.blocks[0].bbox, Some(region));
+    assert!(page.content.blocks[0].merges.is_empty());
+    assert!(page.content.blocks[0].uncertain);
+    assert_eq!(page.content.blocks[0].alternatives.len(), 2);
+    assert_eq!(page.content.warnings, parsed.warnings);
+    assert!(page.needs_review(0.5));
+}
+
+#[test]
+fn agreeing_crops_preserve_prior_and_selected_reader_uncertainty() {
+    for kind in ["text", "table"] {
+        for (prior, crop) in [(true, false), (false, true), (false, false)] {
+            let parsed = parsing::structured_reader(
+                &serde_json::json!({"blocks":[{
+                    "kind": kind,
+                    "text": "Amount 1250 Ω",
+                    "rows": [["Amount", "1250 Ω"]],
+                    "box": {"left":0.1,"top":0.2,"right":0.9,"bottom":0.6},
+                    "uncertain": crop,
+                    "confidence": 0.99
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+            let mut original = parsed.blocks[0].clone();
+            original.uncertain = prior;
+            let mut page = Page {
+                content: PageContent {
+                    blocks: vec![original.clone()],
+                    ..Default::default()
+                },
+                candidates: [("a", "one"), ("b", "two")]
+                    .into_iter()
+                    .map(|(id, family)| Candidate {
+                        region: original.bbox.clone(),
+                        model_id: id.into(),
+                        family: family.into(),
+                        view: "crop".into(),
+                        content: parsed.clone(),
+                        reliability: 0.9,
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            consensus::refine_regions(&mut page, &Settings::default());
+            let block = &page.content.blocks[0];
+            assert_eq!(block.uncertain, prior || crop, "{kind} {prior} {crop}");
+            assert_eq!(block.plain(), original.plain());
+            assert_eq!(block.bbox, original.bbox);
+            assert_eq!(block.alternatives.len(), 2);
+            block.validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn reader_merge_recovery_discards_all_claims_only_for_affected_tables() {
+    let table = Block {
+        kind: "table".into(),
+        rows: vec![
+            vec!["Item Ω".into(), "Amount".into()],
+            vec!["Sales".into(), "1250.00".into()],
+        ],
+        text: "Additional exact reader text".into(),
+        bbox: Some(BoxRect::full()),
+        confidence: Some(0.91),
+        header_rows: 1,
+        description: "Exact description".into(),
+        interpretation: "Qualified reading".into(),
+        alternatives: vec!["125O.00?".into()],
+        ..Default::default()
+    };
+    let merge = |row, col, rowspan, colspan| Merge {
+        row,
+        col,
+        rowspan,
+        colspan,
+    };
+    let valid_merge = merge(0, 0, 1, 1);
+    let mut valid_table = table.clone();
+    valid_table.merges = vec![valid_merge.clone()];
+    let valid_page = PageContent {
+        blocks: vec![valid_table.clone()],
+        ..Default::default()
+    };
+    let valid_raw = serde_json::to_string(&valid_page).unwrap();
+    let valid_result = parsing::structured_reader(&valid_raw).unwrap();
+    assert_eq!(valid_result.blocks, valid_page.blocks);
+    assert!(valid_result.warnings.is_empty());
+    assert!(parsing::structured(&valid_raw).is_ok());
+
+    for invalid in [
+        merge(0, 0, 0, 1),
+        merge(0, 0, 1, 0),
+        merge(2, 0, 1, 1),
+        merge(0, 2, 1, 1),
+        merge(0, 1, 1, 2),
+        merge(1, 0, 2, 1),
+        merge(usize::MAX, 0, 2, 1),
+        merge(0, usize::MAX, 1, 2),
+        merge(0, 0, usize::MAX, 1),
+        merge(0, 0, 1, usize::MAX),
+        // An individually valid span overlaps the preceding 1x1 claim.
+        merge(0, 0, 1, 2),
+    ] {
+        let mut bad_table = table.clone();
+        bad_table.merges = vec![valid_merge.clone(), invalid.clone()];
+        let original = PageContent {
+            blocks: vec![Block::text("Before"), bad_table, valid_table.clone()],
+            warnings: vec!["Original reader warning".into()],
+            summary: "Exact summary".into(),
+        };
+        let raw = serde_json::to_string(&original).unwrap();
+        assert!(parsing::structured(&raw).is_err(), "{invalid:?}");
+        let recovered = parsing::structured_reader(&raw).unwrap();
+        recovered.validate().unwrap();
+        let mut expected = original.blocks.clone();
+        expected[1].merges.clear();
+        expected[1].uncertain = true;
+        assert_eq!(recovered.blocks, expected, "{invalid:?}");
+        assert_eq!(recovered.summary, original.summary);
+        assert_eq!(recovered.warnings.len(), 2);
+        assert_eq!(recovered.warnings[0], original.warnings[0]);
+        assert!(recovered.warnings[1].contains("Table blocks 2 contain"));
+    }
+
+    // Merge recovery must not admit a malformed table or other invalid fields.
+    for change in 0..4 {
+        let mut invalid = table.clone();
+        invalid.merges = vec![merge(0, 1, 1, 2)];
+        match change {
+            0 => {
+                invalid.rows[1].pop().unwrap();
+            }
+            1 => {
+                invalid.header_rows = 3;
+            }
+            2 => {
+                invalid.confidence = Some(1.1);
+            }
+            _ => {
+                invalid.text = "x".repeat(120000);
+            }
+        };
+        let raw = serde_json::to_string(&PageContent {
+            blocks: vec![invalid],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(parsing::structured_reader(&raw).is_err());
+    }
+
+    // A page at the block limit still gets a single bounded, source-linked notice.
+    let mut invalid = table;
+    invalid.merges = vec![merge(0, 1, 1, 2)];
+    let raw = serde_json::to_string(&PageContent {
+        blocks: vec![invalid; 500],
+        ..Default::default()
+    })
+    .unwrap();
+    let recovered = parsing::structured_reader(&raw).unwrap();
+    assert_eq!(recovered.blocks.len(), 500);
+    assert_eq!(recovered.warnings.len(), 1);
+    assert!(recovered.warnings[0].contains("499, 500 contain"));
+    assert!(recovered.warnings[0].len() <= 8000);
+    assert!(
+        recovered
+            .blocks
+            .iter()
+            .all(|block| block.uncertain && block.merges.is_empty())
+    );
+}
+
+#[test]
 fn raw_reader_evidence_is_retained_with_safe_unique_names() {
     let dir = tempfile::tempdir().unwrap();
     let log = Activity {
@@ -1171,4 +1537,292 @@ fn recovery_never_increases_manual_resource_limits() {
     );
     assert_eq!(retry.gpu_layers, 0);
     assert_eq!(BoxRect::full().pixels(0, 0), (0, 0, 0, 0));
+}
+
+#[test]
+fn preparation_overlap_requires_opt_in_cpu_and_reserved_memory_headroom() {
+    use notegen::pipeline::{PreparationMode, preparation_admission};
+    let mut settings = Settings {
+        cpu_threads: 4,
+        max_pixels: 1_000_000,
+        reserve_ram_mib: 1024,
+        ram_fraction: 0.8,
+        ..Default::default()
+    };
+    let mut hardware = notegen::hardware::Hardware {
+        logical_cores: 8,
+        physical_cores: 4,
+        ram_mib: 16000,
+        free_ram_mib: 8000,
+        ..Default::default()
+    };
+    let admitted = preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware);
+    assert!(admitted.enabled);
+    assert_eq!(admitted.ocr_threads, 3);
+    assert!(!preparation_admission(PreparationMode::Sequential, 2, &settings, &hardware).enabled);
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 1, &settings, &hardware).enabled
+    );
+    hardware.free_ram_mib = admitted.required_mib + settings.reserve_ram_mib;
+    assert!(
+        preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    hardware.free_ram_mib -= 1;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    hardware.free_ram_mib = 8000;
+    settings.cpu_threads = 1;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    settings.cpu_threads = 0;
+    hardware.physical_cores = 1;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+    hardware.physical_cores = 4;
+    hardware.ram_mib = 1024;
+    assert!(
+        !preparation_admission(PreparationMode::BoundedOverlap, 2, &settings, &hardware).enabled
+    );
+}
+
+#[test]
+fn native_two_page_overlap_matches_sequential_ocr_and_preserves_review_on_resume() {
+    use notegen::pipeline::{PreparationMode, convert_with_preparation};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-pages.pdf");
+    pdf_with_pages(&source, &fixture(), 2);
+    let sequential_dir = directory.path().join("sequential");
+    let overlap_dir = directory.path().join("overlap");
+    fs::create_dir_all(&sequential_dir).unwrap();
+    fs::create_dir_all(&overlap_dir).unwrap();
+    let settings = Settings {
+        preset: Preset::Fast,
+        pdfium: pdfium(),
+        cpu_threads: 2,
+        auto_rotate: false,
+        deskew: false,
+        dpi: 150,
+        max_pixels: 1_200_000,
+        reserve_ram_mib: 0,
+        ram_fraction: 0.98,
+        ..Default::default()
+    };
+    let sequential = convert_with_preparation(
+        &source,
+        &sequential_dir.join("output.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+        PreparationMode::Sequential,
+    )
+    .unwrap();
+    let overlap = convert_with_preparation(
+        &source,
+        &overlap_dir.join("output.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+        PreparationMode::BoundedOverlap,
+    )
+    .unwrap();
+    assert!(
+        overlap.preparation.enabled,
+        "Native overlap gate needs at least two CPU cores and {} MiB available RAM; {}",
+        overlap.preparation.required_mib, overlap.preparation.reason
+    );
+    assert_eq!(sequential.project.manifest.pages, vec![1, 2]);
+    assert_eq!(overlap.project.manifest.pages, vec![1, 2]);
+    for number in [1, 2] {
+        let first = sequential.project.load(number).unwrap();
+        let second = overlap.project.load(number).unwrap();
+        assert_eq!(
+            serde_json::to_value(first.content).unwrap(),
+            serde_json::to_value(second.content).unwrap()
+        );
+        assert_eq!(
+            hash_file(&sequential.project.image(number), &Control::default()).unwrap(),
+            hash_file(&overlap.project.image(number), &Control::default()).unwrap()
+        );
+        assert!(
+            overlap
+                .project
+                .load(number)
+                .unwrap()
+                .content
+                .plain()
+                .contains("1250")
+        );
+    }
+    let before = overlap.project.load(1).unwrap();
+    let mut approved = before.clone();
+    approved.content.blocks = vec![Block::text("Human reviewed value 1500")];
+    approved.reviewed = true;
+    notegen::review::commit(&overlap.project, &before, &approved, "Human correction").unwrap();
+    let original = fs::read(overlap.project.page_path(1)).unwrap();
+    let resumed = convert_with_preparation(
+        &source,
+        &overlap_dir.join("resumed.docx"),
+        &settings,
+        &Control::default(),
+        &Activity::default(),
+        PreparationMode::BoundedOverlap,
+    )
+    .unwrap();
+    assert_eq!(resumed.project.root, overlap.project.root);
+    assert_eq!(fs::read(resumed.project.page_path(1)).unwrap(), original);
+    assert_eq!(
+        resumed.project.load(1).unwrap().content.plain(),
+        "Human reviewed value 1500"
+    );
+    assert!(resumed.project.load(1).unwrap().reviewed);
+    let report: serde_json::Value =
+        read_json(&resumed.project.root.join("preparation-report.json"), 16384).unwrap();
+    assert_eq!(report["requested_mode"], "bounded_overlap");
+    assert_eq!(report["enabled"], true);
+}
+
+#[test]
+fn cli_large_command_tree_help_version_and_usage_exit_codes() {
+    let directory = tempfile::tempdir().unwrap();
+    let cases: &[(&[&str], &str)] = &[
+        (&["--help"], "tools"),
+        (&["tools", "--help"], "session-create"),
+        (&["tools", "region-read", "--help"], "<REQUEST>"),
+        (&["convert", "--help"], "--overlap-preparation"),
+    ];
+    for (arguments, expected) in cases {
+        let output = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+            .args(*arguments)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(expected),
+            "{arguments:?}: missing {expected}"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let version = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .arg("--version")
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        version.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        format!("notegen-cli {}", env!("CARGO_PKG_VERSION"))
+    );
+    let invalid = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .arg("not-a-real-command")
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        invalid.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("unrecognized subcommand"));
+}
+
+#[test]
+fn cli_defaults_and_nested_tool_dispatch_complete_on_the_bounded_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let defaults = directory.path().join("defaults.json");
+    let output = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .args(["defaults", "-o"])
+        .arg(&defaults)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settings: Settings = read_json(&defaults, 1_000_000).unwrap();
+    settings.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(&settings).unwrap(),
+        serde_json::to_value(Settings::default()).unwrap()
+    );
+    let source = directory.path().join("source.png");
+    RgbImage::from_pixel(20, 40, Rgb([255, 255, 255]))
+        .save(&source)
+        .unwrap();
+    let result = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .args(["--settings"])
+        .arg(&defaults)
+        .args(["tools", "preflight"])
+        .arg(&source)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["width"], 20);
+    assert_eq!(report["height"], 40);
+    assert!(report["observations"].is_array());
+}
+
+#[test]
+fn cli_preexisting_cancel_marker_preserves_cancellation_code_and_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.png");
+    RgbImage::from_pixel(20, 40, Rgb([255, 255, 255]))
+        .save(&source)
+        .unwrap();
+    let original = fs::read(&source).unwrap();
+    let cancel = directory.path().join("cancel");
+    fs::write(&cancel, b"cancel").unwrap();
+    let target = directory.path().join("cancelled.docx");
+    let result = notegen::hardware::command(env!("CARGO_BIN_EXE_notegen-cli"))
+        .arg("--cancel-file")
+        .arg(&cancel)
+        .arg("convert")
+        .arg(&source)
+        .args(["--preset", "fast", "-o"])
+        .arg(&target)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("NG900"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!target.exists());
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert!(cancel.exists());
 }

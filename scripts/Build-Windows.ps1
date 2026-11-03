@@ -5,7 +5,7 @@ $ErrorActionPreference='Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 $sourceRoot=(Get-Location).Path
 if(-not $SkipBuild){
- & cargo build --locked --release --features desktop --bins -j 2
+ & "$PSScriptRoot/Build-Reproducible.ps1"
  if($LASTEXITCODE -ne 0){throw 'Rust release compilation failed'}
 }
 $stage=Join-Path (Get-Location) ('build/rust-package-'+[guid]::NewGuid().ToString())
@@ -14,8 +14,14 @@ New-Item -ItemType Directory -Force $package,"$package/runtime","$package/runtim
 Copy-Item target/release/NoteGen.exe,target/release/notegen-cli.exe $package
 Copy-Item scripts/Setup-Runtime.ps1,scripts/Install-Models.ps1 "$package/scripts"
 Copy-Item rust/downloads.json "$package/assets/model-downloads.json"
-Copy-Item README.md,LICENSE,THIRD_PARTY_NOTICES.md $package
+Copy-Item rust/languages.json "$package/assets/ocr-language-downloads.json"
+Copy-Item README.md,LICENSE,THIRD_PARTY_NOTICES.md,CONTRIBUTING.md $package
 Copy-Item docs/WINDOWS.md,docs/TESTING.md,docs/RUST_PLAN.md,docs/STUDIO.md,docs/RELEASE_0.4.0.md,docs/RELEASE_0.4.1.md "$package/docs"
+Copy-Item docs/WORKBENCH.md,docs/FEATURES_0.5.0.md,docs/RELEASE_0.5.0.md,docs/INSTALLER.md,docs/ACCESSIBILITY.md "$package/docs"
+Copy-Item docs/SOURCE_REVIEW.md,docs/PROJECT_OPERATIONS.md,docs/CONFIRMED_REFERENCES.md,docs/BUILD_PROVENANCE.md "$package/docs"
+New-Item -ItemType Directory -Force "$package/docs/images" | Out-Null
+Copy-Item docs/images/notegen-banner.svg "$package/docs/images"
+Copy-Item docs/images/rust-workspace.png "$package/docs/images"
 $native=Join-Path (Get-Location) 'build/pdfium-rust'
 if(-not(Test-Path "$native/bin/pdfium.dll")){
  New-Item -ItemType Directory -Force $native | Out-Null
@@ -52,6 +58,12 @@ $records=foreach($p in $metadata.packages){
  "$($p.name) $($p.version) | $($p.license) | $($p.repository)"
 }
 $records | Set-Content "$package/licenses/RUST-DEPENDENCIES.txt" -Encoding utf8
+$commit=$env:GITHUB_SHA
+if(-not $commit){$commit=(& git rev-parse HEAD).Trim();if($LASTEXITCODE -ne 0){throw 'Cannot determine source commit for build provenance'}}
+& "$sourceRoot/scripts/Build-Provenance.ps1" -SourceCommit $commit -BinaryDirectory $package -OutputDirectory "$package/provenance"
+if($LASTEXITCODE -ne 0){throw 'Build provenance generation failed'}
+if(-not(Test-Path target/release/reproducible-build.json)){throw 'Release build recipe record is missing; use Build-Reproducible.ps1'}
+Copy-Item target/release/reproducible-build.json "$package/provenance/reproducible-build.json"
 Push-Location $package
 try{
  & ./notegen-cli.exe self-test -o ./package-test.docx
@@ -75,6 +87,7 @@ try{
 }finally{Pop-Location}
 $zip=Join-Path (Get-Location) 'dist/NoteGen-Rust-Windows-x64.zip'
 Compress-Archive -Path $package -DestinationPath $zip -Force
-(Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() | Set-Content "$zip.sha256"
+$zipHash=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+"$zipHash  NoteGen-Rust-Windows-x64.zip" | Set-Content "$zip.sha256" -Encoding utf8NoBOM
 Write-Host "Ready: $zip"
 

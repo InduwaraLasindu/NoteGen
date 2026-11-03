@@ -1,130 +1,49 @@
-<!-- Latest release features -->
+<p align="center"><img src="docs/images/notegen-banner.svg" alt="NoteGen — scanned pages, editable documents" width="100%"></p>
 
-**0.4.1:** Correct live source previews during context re-reads, protection against stale draft updates, and hardware-preview cleanup. Includes the 0.4 AI installer, updates, hardware tuning and settings improvements. [Patch details](docs/RELEASE_0.4.1.md).
+<p align="center">
+  <a href="https://github.com/InduwaraLasindu/NoteGen/releases/latest">Download for Windows</a> ·
+  <a href="docs/INSTALLER.md">Setup</a> ·
+  <a href="docs/WORKBENCH.md">Workbench</a> ·
+  <a href="docs/TESTING.md">Testing</a>
+</p>
 
-# NoteGen
+NoteGen turns scanned pages into editable documents using a native Rust desktop and local OCR/AI. Review uncertain text beside its source, repair tables, and keep diagrams with their evidence.
 
-**Scanned PDF → editable Word. Rust desktop. Local AI. Adaptive NVIDIA acceleration.**
+![NoteGen desktop](docs/images/rust-workspace.png)
 
-NoteGen transcribes print and handwriting with local readers, rebuilds editable Word
-tables, and preserves diagrams with observations and contextual interpretations.
-The desktop and pipeline are Rust. PDFium, Tesseract and llama.cpp are native engines.
-Python is not needed to run the current app.
+## Get started
 
-![Native Rust desktop](docs/images/rust-workspace.png)
+1. Download and run the [Windows installer](https://github.com/InduwaraLasindu/NoteGen/releases/latest).
+2. Import a PDF, PNG, JPEG, multipage TIFF or a folder of scans.
+3. Convert, review flagged regions, and export a new document.
 
-[Windows installer](https://github.com/InduwaraLasindu/NoteGen/releases/latest)
-· [Portable builds](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
-· [Studio guide](docs/STUDIO.md) · [Setup](docs/WINDOWS.md) · [Verification](docs/TESTING.md) · [Iteration plan](docs/RUST_PLAN.md)
+Printed English OCR works immediately. Select **Install local AI** for handwriting and additional readers. AI downloads may require several GB; the app selects compatible models and verifies their checksums. No Python or Rust installation is needed to use the installer.
 
-Download the installer from [GitHub Releases](https://github.com/InduwaraLasindu/NoteGen/releases/latest),
-run it, and follow the wizard. It installs for your Windows account, adds Start menu
-shortcuts and an optional desktop shortcut, and includes an uninstaller.
+## What it does
 
-English printed OCR, PDF rendering, English language data and native dependencies work immediately. Leave **Install local AI and all required models for this PC** selected in the installer to finish AI setup inside the wizard, with progress and cancellation. Uncheck it for an offline installation.
+| Convert | Review | Organize and export |
+|---|---|---|
+| Printed and handwritten scans | Source regions and reader alternatives | Named projects, tags and local search |
+| Editable tables and preserved figures | Named revisions, undo/redo and restore | Templates, references and recovery reports |
+| CPU, CUDA or Vulkan readers | Numeric/table checks and disagreement overlays | Word, Markdown, HTML, LaTeX and Excel |
+| Verified AI setup and offline bundles | Writer examples, quarantine and font proofs | Source links and uncertainty annotations |
 
-The same complete setup is available under **Settings > Updates & installation**, on the main screen, and in Studio. It selects the fitting reader families needed for Maximum Accuracy, verifies publisher-pinned files, reuses healthy installed versions and activates a compatible CUDA, Vulkan or CPU runtime. Model downloads can require several GB; source scans stay local.
+Open **Projects & tools** or use the command palette (default **Ctrl+K**). Guides cover the [workbench](docs/WORKBENCH.md), [source review](docs/SOURCE_REVIEW.md), [page organization](docs/PROJECT_OPERATIONS.md), and [confirmed references](docs/CONFIRMED_REFERENCES.md). The [0.5.0 ledger](docs/FEATURES_0.5.0.md) records all 100 proposals and remaining work.
 
-Settings also offers verified model/runtime updates, app updates for bundled dependencies, a measured synthetic hardware test with apply/undo, and a searchable description of every configuration option. The live AI panel shows the current source/crop and generated draft recognition. Advanced retains the power-user controls and validated JSON configuration.
+## Local by default
 
-The **Overall progress** bar covers the whole queue, weighted by selected page counts.
-Its ETA learns rendering, model startup, reading, crop retry and export costs separately.
-Initial estimates are labelled, pauses and clarification waiting time are excluded, and
-extra crop retries can increase the ETA. Failed/cancelled work never appears complete.
+Recognition uses local files and loopback HTTP. Source scans are not uploaded. Update/model downloads use publisher services; optional public-topic lookup sends the query you type when enabled. Imported background references remain separate from transcription evidence.
 
-[Installer guide](docs/INSTALLER.md) · [Verification evidence](docs/TESTING.md).
-Releases contain SHA256 and provenance files. The installer is unsigned.
-
-Portable ZIPs remain available under the latest successful **Rust verification** workflow's
-**NoteGen-Rust-Windows-x64** artifact. Extract both ZIP layers and keep the folder together.
-
-Setup selects models for actual free memory, downloads pinned revisions, verifies SHA256
-and registers them. Models are separate, potentially large downloads. Once installed,
-conversion uses only local files and loopback HTTP. Optional public-topic lookup sends only
-the query you type, after explicit opt-in. There is no cloud conversion fallback or document upload.
-
-## Features
-
-| Capability | Behavior |
-|---|---|
-| Adaptive hardware | CPU/SIMD, RAM and CUDA/Vulkan discovery; strongest fitting installed readers; memory re-admission before model load |
-| Four presets | Fast printed OCR without loading/checksumming AI assets; Balanced with selective vision; Accuracy on every page; Maximum Accuracy with independent families and difficult-region crop retries |
-| Print and handwriting | Tesseract baseline, LightOnOCR-3 / GLM-OCR specialists and Qwen vision; original source and all alternative readings retained |
-| Ensemble decisions | Weighted medoid selects an observed transcript; duplicate models/crops do not count as independent agreement; numeric conflicts require review |
-| Tables | Native ruled-grid recovery and HTML/Markdown/JSON tables; real Word cells, merges and repeated headers |
-| Diagrams | Source crop, visible evidence and qualified contextual interpretation kept separately; interpretations require review |
-| Scan preparation | Orientation detection, small-angle deskew, contrast normalization, blur warnings and image memory limits |
-| Live activity | Page-weighted master queue bar, stage-based adaptive ETA, current document progress, byte download progress, active elapsed time, filterable JSONL/runtime logs and NG error remedies |
-| One-click AI setup | In-app compatible runtime + model installation, pinned SHA256, resumable downloads, automatic registration, GPU probes and verified model reuse |
-| Updates | Daily optional publisher checks, explicit verified model/runtime installation, runtime/model rollback and app-installer dependency updates |
-| Hardware test | Bounded CPU and AI probes on synthetic data; exact-number checks, real offload evidence, proposed workers and apply/undo |
-| Live AI view | Current source/crop, active reader and streamed draft answer; provisional output, optional display and clear control |
-| Understandable settings | Everyday controls with explanations, searchable reference, and Advanced controls/JSON for power users |
-| Durable jobs | Queue, page ranges, pause, active-request cancellation, input/model/settings-bound checkpoints, restart recovery and protected output names |
-| Review | Side-by-side source boxes, editable text/cells/diagram explanations, reader evidence, validated page JSON and persistent human corrections |
-| Minimal native UI | Scanning-page motion graphic, orbiting accents, eased hover/preset transitions, progress sheen, completion check and animated drawers/windows; configurable in Advanced |
-| Appearance controls | Light/dark, accent/background, scale, corners, speed, transition timing, orbit density, active/idle FPS, glow and reduced motion; live appearance preview while converting |
-| Clarification | Source crops, exact word/number/cell corrections, contextual questions, skip/defer, and a protected local re-reading pass |
-| Writer profiles | Named people, confirmed glyph/word memory, visual reference sheets, revision-aware caches, forget/delete, and profile ZIP import/export |
-| Personal fonts | Real installable TTF, SVG glyphs, averaged confirmed letter samples, coverage report and preview; missing letters are reported |
-| Third-party readers | Custom GGUF/projector pairs or loopback OpenAI-compatible vision services; explicit publisher update checks, SHA256-pinned activation and rollback |
-| Optional public context | User-typed Wikipedia lookup, source-linked excerpts and explicit attachment; no scan/OCR/profile uploads |
-| Offline CLI | Diagnostics, plans, model registration/updates, profiles/fonts, clarification, conversion, inspection and native export |
-
-Windows UI rendering uses wgpu/Direct3D or Vulkan; AI uses CUDA/Vulkan through llama.cpp.
-Actual offloaded layers are recorded in the native startup log. PDF rendering, Tesseract,
-export and some preprocessing remain CPU operations. Not every operation can occupy
-100% of the GPU. The UI and AI select graphics devices independently.
-
-[Actual native motion preview](docs/images/notegen-motion.mp4). Open **Advanced → Appearance**
-to customize it. Reduced motion freezes decorative graphics and transitions. Ambient
-animation sleeps when unfocused; a running job still updates its status. The live log
-drawer animates and virtualizes rows so long jobs do not build thousands of labels.
-
-## Hardware and models
-
-| VRAM | Illustrative automatic choice, when installed and enough memory is free |
-|---|---|
-| 4 GB | LightOnOCR-3 1B Q8 + Qwen3.5 2B Q4 |
-| 8 GB | Small OCR specialist + Qwen3.5 4B Q5 |
-| 16 GB | LightOnOCR-3 4B Q8 + Qwen3.5 9B Q5 |
-| 32 GB | LightOnOCR-3 4B Q8 + Qwen3.8 27B Q4 |
-
-Maximum adds a different OCR family such as GLM-OCR when it fits. One model is resident
-at a time. Pages are processed per model before switching, avoiding repeated weight
-loads for every page. Windows/UI memory headroom is reserved. Threads, resolution,
-image tokens, context, batch and micro-batch adapt; Advanced supports manual model
-selection and validated overrides. Estimates are planning inputs, not measured peaks.
-
-Catalog checked **30 October 2026**: LightOnOCR-3, GLM-OCR, Qwen3.5 and Qwen3.8.
-[Primary sources](docs/SOURCES.md) distinguish vendor models from community GGUF
-conversions. Setup pins runtime b11998 and immutable model revisions/checksums.
-
-## Quality and verification
-
-Real PDFium/Tesseract conversion and actual GLM-OCR/LightOnOCR-3/Qwen3.5 2B CPU inference have
-been exercised on a raster-only printed scan and accounting table. Tests cover model
-protocols, faults/cancellation, memory profiles, consensus, persistence, Word structure
-and native desktop rendering. The current source passes 65 ordinary Rust tests,
-format and clippy locally. Windows/Linux CI compiles the executables and smoke-tests
-the portable package. See [exact evidence and limits](docs/TESTING.md).
-
-Terrible handwriting and severe blur can destroy information. Agreement is not a
-calibrated accuracy score; AI may misread text or a diagram. Flagged content and diagram
-interpretations need source review. Broad handwriting accuracy and actual peak RAM/VRAM,
-speed and offload on 4/8/16/32 GB RTX PCs still require target-hardware/corpus measurement.
-Word export prioritizes editable structure and reading order over a pixel-identical copy.
+Human review remains necessary for difficult handwriting, numbers and diagram interpretations. Reader agreement is not measured accuracy. Hardware budgets are estimates; broad handwriting accuracy and device performance require representative measurements. Windows installers are unsigned; releases include checksums and [build evidence](docs/BUILD_PROVENANCE.md).
 
 ## Build
 
-~~~shell
+```shell
 rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
 cargo build --locked --release --features desktop --bins
-cargo run --locked --bin notegen-cli -- doctor
-cargo run --locked --features desktop --bin NoteGen
-~~~
+cargo test --locked --all-features --all-targets -j 2
+```
 
-Tests require Tesseract and PDFium; set NOTEGEN_PDFIUM to the native library.
-[Development](CONTRIBUTING.md). The [Python predecessor](legacy/python) is archived and
-is not part of the Rust release. NoteGen is MIT-licensed; dependency/model terms apply.
+Tests require Tesseract and PDFium. See [development](CONTRIBUTING.md), [native setup](docs/WINDOWS.md), and [validation evidence](docs/TESTING.md). The archived [Python predecessor](legacy/python) is separate from current builds.
 
+MIT licensed. Native dependency and model terms apply; see [third-party notices](THIRD_PARTY_NOTICES.md).

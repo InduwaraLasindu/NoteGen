@@ -105,6 +105,70 @@ fn everyday_update_hardware_and_reference_screens_render() {
     }
 }
 
+#[test]
+fn workbench_controls_render_with_project_across_locales_and_large_layouts() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = Project::open(
+        dir.path().into(),
+        Manifest {
+            schema: 2,
+            input_sha256: "ui-fixture".into(),
+            fingerprint: "ui-fixture".into(),
+            pages: vec![1],
+            models: vec![],
+            settings: Settings::default(),
+        },
+    )
+    .unwrap();
+    image::RgbImage::from_pixel(300, 400, image::Rgb([250, 250, 250]))
+        .save(project.image(1))
+        .unwrap();
+    project
+        .save(&Page {
+            page: 1,
+            image: "page-00001.png".into(),
+            content: PageContent {
+                blocks: vec![Block {
+                    bbox: Some(BoxRect::full()),
+                    ..Block::text("Review total 1250")
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    for locale in notegen::localization::locales() {
+        for scale in [1., 1.4] {
+            let mut state = Workspace::default();
+            state.settings.ui.locale = locale;
+            state.settings.ui.scale = scale;
+            state.settings.ui.reduced_motion = true;
+            state.settings.experience.check_updates = false;
+            let mut app = Desktop::new(state);
+            let ctx = egui::Context::default();
+            assert!(app.open_review(project.root.clone(), &ctx));
+            for tab in 0..4 {
+                app.tools_open(tab);
+                for frame in 0..2 {
+                    let mut out = ctx.run_ui(
+                        egui::RawInput {
+                            time: Some((tab * 2 + frame) as f64),
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1140., 900.),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    assert!(!out.shapes.is_empty());
+                    out.textures_delta.clear();
+                }
+            }
+        }
+    }
+}
+
 fn render_snapshot(app: &mut Desktop, ctx: &egui::Context, time: f64) -> String {
     let mut out = ctx.run_ui(
         egui::RawInput {

@@ -1,6 +1,6 @@
 [package]
 name = "notegen"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -32,23 +32,30 @@ path = "rust/tests/engine.rs"
 
 [dev-dependencies]
 imageproc = { version = "0.25", default-features = false }
-ttf-parser = "0.25"
+harfrust = "=0.12.0"
 
 [dependencies]
+age = { version = "=0.12.1", default-features = false }
+ttf-parser = "0.25"
 ab_glyph = "0.2"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "=1.0.28"
 sha2 = "0.10"
 hex = "0.4"
+getrandom = "=0.4.3"
+zeroize = "=1.9.1"
 sysinfo = "0.37"
 csv = "1"
 strsim = "0.11"
 unicode-normalization = "0.1"
+unicode-segmentation = "=1.13.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tiff = "0.11.3"
 rayon = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
@@ -57,10 +64,13 @@ regex = "1"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 roxmltree = "0.21"
 scraper = "0.24"
-pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "image_025", "thread_safe"] }
+pdfium-render = { version = "=0.9.5", default-features = false, features = ["pdfium_latest", "image_025", "thread_safe"] }
 clap = { version = "4", features = ["derive"] }
-eframe = { version = "0.37", optional = true, default-features = false, features = ["default_fonts", "glow", "wgpu", "x11", "wayland", "persistence", "system_fonts", "links", "clipboard"] }
+eframe = { version = "0.37", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu", "x11", "wayland", "persistence", "system_fonts", "links", "clipboard"] }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 
 # Keep CI and local development within modest disk budgets. Assertions and
 # overflow checks remain enabled; production optimization is unchanged.
@@ -101,4 +111,169 @@ path = "rust/tests/studio.rs"
 [[test]]
 name = "experience"
 path = "rust/tests/experience.rs"
+
+[[test]]
+name = "evaluation"
+path = "rust/tests/evaluation.rs"
+
+[[test]]
+name = "exports"
+path = "rust/tests/exports.rs"
+
+[[test]]
+name = "review"
+path = "rust/tests/review.rs"
+
+[[test]]
+name = "inputs"
+path = "rust/tests/inputs.rs"
+
+[[test]]
+name = "projects"
+path = "rust/tests/projects.rs"
+
+[[test]]
+name = "profile_tools"
+path = "rust/tests/profile_tools.rs"
+
+[[test]]
+name = "bundles"
+path = "rust/tests/bundles.rs"
+
+[[test]]
+name = "resources"
+path = "rust/tests/resources.rs"
+
+[[test]]
+name = "layers"
+path = "rust/tests/layers.rs"
+
+[[test]]
+name = "sessions"
+path = "rust/tests/sessions.rs"
+
+[[test]]
+name = "roundtrip"
+path = "rust/tests/roundtrip.rs"
+
+[[test]]
+name = "scan_tools"
+path = "rust/tests/scan_tools.rs"
+
+[[test]]
+name = "context_history"
+path = "rust/tests/context_history.rs"
+
+[[test]]
+name = "diagnostics"
+path = "rust/tests/diagnostics.rs"
+
+[[test]]
+name = "document_tools"
+path = "rust/tests/document_tools.rs"
+
+[[test]]
+name = "searchable_pdf"
+path = "rust/tests/searchable_pdf.rs"
+
+[[test]]
+name = "watch"
+path = "rust/tests/watch.rs"
+
+[[test]]
+name = "cleanup"
+path = "rust/tests/cleanup.rs"
+
+[[test]]
+name = "languages"
+path = "rust/tests/languages.rs"
+
+[[test]]
+name = "localization"
+path = "rust/tests/localization.rs"
+
+[[test]]
+name = "equations"
+path = "rust/tests/equations.rs"
+
+[[test]]
+name = "profile_suggestions"
+path = "rust/tests/profile_suggestions.rs"
+
+[[test]]
+name = "credentials"
+path = "rust/tests/credentials.rs"
+
+[[test]]
+name = "hardware_trials"
+path = "rust/tests/hardware_trials.rs"
+
+[[test]]
+name = "warm_reader"
+path = "rust/tests/warm_reader.rs"
+
+[[test]]
+name = "redactions"
+path = "rust/tests/redactions.rs"
+
+[[test]]
+name = "downloads"
+path = "rust/tests/downloads.rs"
+
+[[test]]
+name = "vault"
+path = "rust/tests/vault.rs"
+
+[[test]]
+name = "writer_history"
+path = "rust/tests/writer_history.rs"
+
+[[test]]
+name = "geometry_language"
+path = "rust/tests/geometry_language.rs"
+
+[[test]]
+name = "migrations"
+path = "rust/tests/migrations.rs"
+
+[[test]]
+name = "project_layout"
+path = "rust/tests/project_layout.rs"
+
+[[test]]
+name = "project_reuse"
+path = "rust/tests/project_reuse.rs"
+
+[[test]]
+name = "model_store"
+path = "rust/tests/model_store.rs"
+
+[[test]]
+name = "canary"
+path = "rust/tests/canary.rs"
+
+[[test]]
+name = "project_lock"
+path = "rust/tests/project_lock.rs"
+
+[[test]]
+name = "code_transcription"
+path = "rust/tests/code_transcription.rs"
+
+[[test]]
+name = "urgent_yield"
+path = "rust/tests/urgent_yield.rs"
+
+[[test]]
+name = "references"
+path = "rust/tests/references.rs"
+
+[[test]]
+name = "activation"
+path = "rust/tests/activation.rs"
+
+[[test]]
+name = "failure_injection"
+path = "rust/tests/failure_injection.rs"
+harness = false
 

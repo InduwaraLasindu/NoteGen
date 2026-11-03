@@ -55,7 +55,14 @@ impl Fault {
             "NG650" => {
                 "Check model metadata, available disk space and the publisher revision. The active version is preserved."
             }
+            "NG661" => {
+                "Preserve pending AI candidates and the activation journal. Retry setup with the same settings to recover; inspect conflicting registry/settings edits before changing them."
+            }
+            "NG680" => {
+                "Inspect the marked session and keep its artifacts. Export completed output or a recovery ZIP before selecting any cleanup; recover an interrupted cleanup first."
+            }
             "NG900" => "Completed work is saved. Resume the same input and settings.",
+            "NG901" => "Saved stages will resume automatically after urgent queue work finishes.",
             _ => "Open the local activity log for the stage and error code.",
         }
     }
@@ -121,9 +128,12 @@ pub struct Settings {
     pub allow_cpu_offload: bool,
     pub require_acceleration: bool,
     pub tesseract: PathBuf,
+    pub tessdata_dir: PathBuf,
     pub pdfium: PathBuf,
     pub server: PathBuf,
     pub models_dir: PathBuf,
+    pub shared_model_store: PathBuf,
+    pub project_lock: Option<PathBuf>,
     pub endpoint: String,
     pub external_server: bool,
     pub subject: String,
@@ -186,10 +196,13 @@ impl Default for Settings {
                 "tesseract".into()
             },
             pdfium: "runtime".into(),
+            tessdata_dir: PathBuf::new(),
             server: crate::setup::saved_runtime(std::path::Path::new("runtime"))
                 .map(|r| r.server)
                 .unwrap_or_else(|| "runtime/llama-server.exe".into()),
             models_dir: "models".into(),
+            shared_model_store: crate::model_store::default_root().unwrap_or_default(),
+            project_lock: None,
             endpoint: "http://127.0.0.1:18745".into(),
             external_server: false,
             subject: String::new(),
@@ -212,18 +225,52 @@ impl Default for Settings {
 pub struct ExperienceOptions {
     pub live_preview: bool,
     pub check_updates: bool,
+    pub update_channel: UpdateChannel,
+    pub defer_updates_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub warm_reader: bool,
+    pub warm_reader_ttl_secs: u64,
 }
 impl Default for ExperienceOptions {
     fn default() -> Self {
         Self {
             live_preview: true,
             check_updates: true,
+            update_channel: UpdateChannel::Stable,
+            defer_updates_until: None,
+            warm_reader: false,
+            warm_reader_ttl_secs: 30,
+        }
+    }
+}
+impl ExperienceOptions {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (1..=60).contains(&self.warm_reader_ttl_secs),
+            Fault::new("NG102", "Warm reader expiry must be 1–60 seconds")
+        );
+        Ok(())
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Preview,
+}
+impl UpdateChannel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "Stable",
+            Self::Preview => "Preview (opt in)",
         }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Appearance {
+    pub shortcuts: crate::shortcuts::Bindings,
+    pub locale: crate::localization::Locale,
     pub dark: bool,
     pub accent: [u8; 3],
     pub scale: f32,
@@ -246,6 +293,8 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
+            shortcuts: Default::default(),
+            locale: crate::localization::Locale::En,
             dark: true,
             accent: [100, 226, 204],
             scale: 1.0,
@@ -269,6 +318,7 @@ impl Default for Appearance {
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        self.ui.shortcuts.validate()?;
         let bad = |message| Err(Fault::new("NG102", message).into());
         if self.handwriting && self.preset == Preset::Fast {
             return bad(
@@ -356,6 +406,22 @@ impl Settings {
             return bad("Invalid model allowlist");
         }
         self.assistance.validate()?;
+        if self.shared_model_store.as_os_str().is_empty()
+            || self.shared_model_store.to_string_lossy().len() > 4096
+            || self
+                .shared_model_store
+                .to_string_lossy()
+                .chars()
+                .any(char::is_control)
+            || self.project_lock.as_ref().is_some_and(|path| {
+                path.as_os_str().is_empty()
+                    || path.to_string_lossy().len() > 4096
+                    || path.to_string_lossy().chars().any(char::is_control)
+            })
+        {
+            return bad("Choose a bounded shared model store and optional project lock path");
+        }
+        self.experience.validate()?;
         anyhow::ensure!(
             self.writer
                 .id
@@ -448,6 +514,9 @@ pub struct Block {
     pub interpretation: String,
     pub uncertain: bool,
     pub alternatives: Vec<String>,
+    /// Actual supplied source precision; absent geometry is never reconstructed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<crate::geometry::BlockGeometry>,
 }
 impl Block {
     pub fn text(text: impl Into<String>) -> Self {
@@ -470,8 +539,18 @@ impl Block {
     }
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
-            ["text", "heading", "list", "table", "figure", "equation"]
-                .contains(&self.kind.as_str()),
+            [
+                "text",
+                "heading",
+                "list",
+                "table",
+                "figure",
+                "equation",
+                "code",
+                "caption",
+                "reference"
+            ]
+            .contains(&self.kind.as_str()),
             Fault::new("NG201", "Unknown block kind")
         );
         anyhow::ensure!(
@@ -528,6 +607,7 @@ impl Block {
                 }
             }
         }
+        crate::geometry::validate(self)?;
         Ok(())
     }
 }
@@ -586,20 +666,93 @@ pub struct Page {
     pub agreement: f64,
     pub reviewed: bool,
     pub seconds: f64,
+    /// Human-confirmed annotation metadata, separate from model-generated blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_layers: Vec<crate::layers::Assignment>,
+    /// Confirmed source covers, bound to exact source pixels and kept separate from reader output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_redactions: Vec<crate::redactions::ConfirmedMask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_detection: Option<crate::language_routing::BoundScriptObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub region_languages: Vec<crate::language_routing::RegionLanguage>,
+    /// Only explicit source-bound review confirmation creates semantic references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_references: Vec<crate::references::ConfirmedLink>,
 }
 impl Page {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (1..=3000).contains(&self.page) && self.image == format!("page-{:05}.png", self.page),
+            Fault::new("NG500", "Checkpoint source identity is invalid")
+        );
+        anyhow::ensure!(
+            self.agreement.is_finite()
+                && (0.0..=1.0).contains(&self.agreement)
+                && self.seconds.is_finite()
+                && self.seconds >= 0.0
+                && self.candidates.len() <= 1024
+                && self.source_warnings.len() <= 1000
+                && self.source_warnings.iter().all(|v| v.len() <= 8000),
+            Fault::new(
+                "NG500",
+                "Checkpoint evidence or timing exceeds supported bounds"
+            )
+        );
+        self.content.validate()?;
+        crate::geometry::validate_page(self)?;
+        crate::language_routing::validate_page(self)?;
+        crate::references::validate_metadata(&self.confirmed_references)?;
+        anyhow::ensure!(
+            self.confirmed_references
+                .iter()
+                .all(|link| link.anchor.page == self.page),
+            Fault::new("NG500", "Reference anchor belongs to another source page")
+        );
+        crate::layers::validate_metadata(&self.manual_layers)?;
+        crate::redactions::validate_metadata(&self.confirmed_redactions)?;
+        anyhow::ensure!(
+            self.confirmed_redactions
+                .iter()
+                .all(|mask| mask.source.page == self.page),
+            Fault::new(
+                "NG500",
+                "Redaction source page does not match its checkpoint"
+            )
+        );
+        let mut blocks = 0usize;
+        for candidate in &self.candidates {
+            blocks += candidate.content.blocks.len();
+            anyhow::ensure!(
+                blocks <= 20000
+                    && candidate.model_id.len() <= 1000
+                    && candidate.family.len() <= 1000
+                    && candidate.view.len() <= 1000
+                    && candidate.reliability.is_finite()
+                    && (0.0..=4.0).contains(&candidate.reliability)
+                    && candidate.region.as_ref().is_none_or(BoxRect::valid),
+                Fault::new(
+                    "NG500",
+                    "Checkpoint reader evidence is invalid or excessive"
+                )
+            );
+            candidate.content.validate()?;
+        }
+        Ok(())
+    }
     pub fn needs_review(&self, threshold: f32) -> bool {
-        !self.reviewed
-            && (self.agreement < 0.92
-                || !self.content.warnings.is_empty()
-                || !self.source_warnings.is_empty()
-                || self.content.blocks.is_empty()
-                || self.content.blocks.iter().any(|b| {
-                    b.uncertain
-                        || b.kind == "figure"
-                        || b.confidence.is_none_or(|v| v < threshold)
-                        || b.plain().to_lowercase().contains("[illegible]")
-                }))
+        crate::layers::needs_review(self)
+            || !self.reviewed
+                && (self.agreement < 0.92
+                    || !self.content.warnings.is_empty()
+                    || !self.source_warnings.is_empty()
+                    || self.content.blocks.is_empty()
+                    || self.content.blocks.iter().any(|b| {
+                        b.uncertain
+                            || b.kind == "figure"
+                            || b.confidence.is_none_or(|v| v < threshold)
+                            || b.plain().to_lowercase().contains("[illegible]")
+                    }))
     }
 }
 pub fn pages_range(spec: &str, total: usize) -> Result<Vec<usize>> {

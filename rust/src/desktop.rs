@@ -13,7 +13,7 @@ use crate::{
 use eframe::egui::{self, Color32, RichText, Vec2};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering, mpsc},
@@ -35,6 +35,15 @@ pub struct Job {
     pub output: Option<PathBuf>,
     pub project: Option<PathBuf>,
     pub detail: String,
+    #[serde(default)]
+    pub priority: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeJob>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResumeJob {
+    pub output: PathBuf,
+    pub settings: Box<Settings>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -46,6 +55,13 @@ pub struct Workspace {
     pub installation_stamp: String,
 }
 impl Workspace {
+    pub fn for_data_dir(root: &Path) -> Self {
+        let mut state = Self::default();
+        state.settings.models_dir = root.join("models");
+        state.settings.shared_model_store = root.join("model-store");
+        state.settings.writer.root = root.join("writers");
+        state
+    }
     pub fn recover(&mut self) {
         for j in &mut self.queue {
             if j.status == JobStatus::Running {
@@ -55,9 +71,7 @@ impl Workspace {
         }
     }
     pub fn enqueue(&mut self, path: PathBuf) -> bool {
-        if !path
-            .extension()
-            .is_some_and(|p| p.eq_ignore_ascii_case("pdf"))
+        if !(crate::inputs::supported(&path) || path.is_dir())
             || self.queue.iter().any(|j| {
                 j.input == path && matches!(j.status, JobStatus::Pending | JobStatus::Running)
             })
@@ -70,13 +84,26 @@ impl Workspace {
             output: None,
             project: None,
             detail: String::new(),
+            priority: 0,
+            resume: None,
         });
         true
     }
     pub fn next(&self) -> Option<usize> {
         self.queue
             .iter()
-            .position(|j| j.status == JobStatus::Pending)
+            .enumerate()
+            .filter(|(_, j)| j.status == JobStatus::Pending)
+            .max_by_key(|(i, j)| (j.priority.min(2), std::cmp::Reverse(*i)))
+            .map(|(i, _)| i)
+    }
+    pub fn urgent_waiting(&self, active: usize) -> bool {
+        self.queue
+            .get(active)
+            .is_some_and(|job| job.status == JobStatus::Running && job.priority.min(2) < 2)
+            && self.queue.iter().enumerate().any(|(i, job)| {
+                i != active && job.status == JobStatus::Pending && job.priority.min(2) == 2
+            })
     }
     pub fn apply(&mut self, raw: &str) -> Result<()> {
         let next: Settings = serde_json::from_str(raw)?;
@@ -99,7 +126,22 @@ pub fn save_review(project: &Project, page: &mut Page, approved: bool) -> Result
     page.content.validate()?;
     page.edited = true;
     page.reviewed = approved;
-    project.save(page)
+    if project.page_path(page.page).exists() {
+        let expected = project.load(page.page)?;
+        crate::review::commit(
+            project,
+            &expected,
+            page,
+            if approved {
+                "Approve page"
+            } else {
+                "Save draft"
+            },
+        )?;
+        Ok(())
+    } else {
+        project.save(page)
+    }
 }
 fn evidence_label(page: &Page) -> String {
     let families = page
@@ -118,10 +160,21 @@ fn evidence_label(page: &Page) -> String {
         ),
     }
 }
+#[cfg(test)]
+#[path = "accessibility_audit.rs"]
+mod accessibility_audit;
+#[path = "download_ui.rs"]
+mod download_ui;
 #[path = "experience.rs"]
 mod experience;
+#[path = "project_workbench.rs"]
+mod project_workbench;
 #[path = "studio.rs"]
 mod studio;
+#[path = "vault_ui.rs"]
+mod vault_ui;
+#[path = "workbench.rs"]
+mod workbench;
 
 enum Message {
     Maintenance(Box<std::result::Result<crate::maintenance::Report, String>>),
@@ -135,13 +188,27 @@ enum Message {
     Failed(String, String),
     Hardware(Hardware, Vec<planning::Model>, Option<String>),
     QueueWeights(Vec<(usize, usize)>),
-    Notice(String),
     Exported(PathBuf),
 }
 struct Review {
+    context: egui::Context,
+    baseline_id: String,
+    fine_heatmap: Option<crate::geometry::HeatmapReport>,
     project: Project,
     index: usize,
     page: Page,
+    baseline: Page,
+    zoom: f32,
+    heatmap: bool,
+    issues: Vec<crate::review::Issue>,
+    issue_page: usize,
+    issue_notice: String,
+    layer_cache: Vec<crate::layers::ResolvedLayer>,
+    layer_notice: String,
+    deferred_issues: BTreeSet<String>,
+    active_issue: Option<String>,
+    auto_advance: bool,
+    revision_name: String,
     texture: Option<egui::TextureHandle>,
     selected: usize,
     dirty: bool,
@@ -150,6 +217,89 @@ struct Review {
     crop_mode: bool,
     crop_start: Option<egui::Pos2>,
     crop: Option<BoxRect>,
+    last_source_crop: Option<BoxRect>,
+    magnifier: Option<SourceMagnifier>,
+}
+fn review_source(project: &Project, page: &Page) -> Result<image::DynamicImage> {
+    if page.confirmed_redactions.is_empty() {
+        crate::writers::open_image(&project.image(page.page), 40_000_000)
+    } else {
+        // Source identity is rechecked; a stale mask never falls back to the
+        // unmasked original. Keep the exact checkpoint as the edit baseline.
+        Ok(crate::redactions::effective_page(project, page, &Control::default())?.1)
+    }
+}
+struct SourceMagnifier {
+    source: image::DynamicImage,
+    region: [u32; 4],
+    tile: [u32; 4],
+    texture: egui::TextureHandle,
+    zoom: f32,
+}
+impl SourceMagnifier {
+    fn new(source: image::DynamicImage, region: &BoxRect, ctx: &egui::Context) -> Result<Self> {
+        anyhow::ensure!(
+            region.valid(),
+            Fault::new("NG500", "Select valid source bounds to magnify")
+        );
+        let (width, height) = (source.width(), source.height());
+        anyhow::ensure!(
+            width > 0 && height > 0 && u64::from(width) * u64::from(height) <= 40_000_000,
+            Fault::new("NG500", "Source exceeds the magnifier image budget")
+        );
+        let left = ((region.left * width as f32).floor() as u32).min(width - 1);
+        let top = ((region.top * height as f32).floor() as u32).min(height - 1);
+        let right = ((region.right * width as f32).ceil() as u32).clamp(left + 1, width);
+        let bottom = ((region.bottom * height as f32).ceil() as u32).clamp(top + 1, height);
+        let edge = ctx.input(|input| input.max_texture_side).clamp(1, 4096) as u32;
+        let tile_width = (right - left).min(edge);
+        let tile_height = (bottom - top)
+            .min(edge)
+            .min((4_194_304 / tile_width).max(1));
+        let x = left + (right - left - tile_width) / 2;
+        let y = top + (bottom - top - tile_height) / 2;
+        let rgba = source.crop_imm(x, y, tile_width, tile_height).to_rgba8();
+        let texture = ctx.load_texture(
+            "review-original-pixels",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [tile_width as usize, tile_height as usize],
+                rgba.as_raw(),
+            ),
+            egui::TextureOptions::NEAREST,
+        );
+        Ok(Self {
+            source,
+            region: [left, top, right, bottom],
+            tile: [x, y, tile_width, tile_height],
+            texture,
+            zoom: 1.,
+        })
+    }
+    fn pan(&mut self, dx: i64, dy: i64) {
+        let x = (i64::from(self.tile[0]) + dx).clamp(
+            i64::from(self.region[0]),
+            i64::from(self.region[2] - self.tile[2]),
+        ) as u32;
+        let y = (i64::from(self.tile[1]) + dy).clamp(
+            i64::from(self.region[1]),
+            i64::from(self.region[3] - self.tile[3]),
+        ) as u32;
+        if (x, y) != (self.tile[0], self.tile[1]) {
+            self.tile[0] = x;
+            self.tile[1] = y;
+            let rgba = self
+                .source
+                .crop_imm(x, y, self.tile[2], self.tile[3])
+                .to_rgba8();
+            self.texture.set(
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [self.tile[2] as usize, self.tile[3] as usize],
+                    rgba.as_raw(),
+                ),
+                egui::TextureOptions::NEAREST,
+            );
+        }
+    }
 }
 impl Review {
     fn load(project: Project, index: usize, ctx: &egui::Context) -> Result<Self> {
@@ -158,28 +308,88 @@ impl Review {
             .pages
             .get(index)
             .ok_or_else(|| Fault::new("NG500", "Page does not exist"))?;
-        let page = project.load(n)?;
-        let texture = crate::writers::open_image(&project.image(n), 40_000_000)
-            .ok()
-            .map(|im| {
-                let limit = ctx.input(|i| i.max_texture_side).min(2048) as u32;
-                let rgba = im
-                    .thumbnail(im.width().min(limit), im.height().min(limit))
-                    .to_rgba8();
-                ctx.load_texture(
-                    format!("{}:{n}", project.root.display()),
-                    egui::ColorImage::from_rgba_unmultiplied(
-                        [rgba.width() as usize, rgba.height() as usize],
-                        rgba.as_raw(),
-                    ),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
+        let mut page = project.load(n)?;
+        crate::geometry::verify_metadata_source(&project, &page, &Control::default())?;
+        let mut normalized = false;
+        let mut masked_source = None;
+        if !page.confirmed_redactions.is_empty() {
+            let (mut effective, image, _) =
+                crate::redactions::effective_page(&project, &page, &Control::default())?;
+            masked_source = Some(image);
+            if fingerprint(&effective)? != fingerprint(&page)? {
+                effective.edited = true;
+                effective.reviewed = false;
+                crate::review::commit(
+                    &project,
+                    &page,
+                    &effective,
+                    "Apply confirmed mask visibility",
+                )?;
+                page = project.load(n)?;
+                normalized = true;
+            }
+        }
+        let source = if page.confirmed_redactions.is_empty() {
+            review_source(&project, &page).ok()
+        } else {
+            masked_source
+        };
+        let texture = source.map(|im| {
+            let limit = ctx.input(|i| i.max_texture_side).clamp(1, 2048) as u32;
+            let rgba = im
+                .thumbnail(im.width().min(limit), im.height().min(limit))
+                .to_rgba8();
+            ctx.load_texture(
+                format!("{}:{n}", project.root.display()),
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [rgba.width() as usize, rgba.height() as usize],
+                    rgba.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
         let raw = serde_json::to_string_pretty(&page.content)?;
+        let (issues, mut issue_notice) = match crate::review::issues(&project) {
+            Ok(issues) => (issues, String::new()),
+            Err(e) => (
+                vec![],
+                format!(
+                    "Review queue could not be refreshed: {e}. Open Recovery to inspect other checkpoints."
+                ),
+            ),
+        };
+        if normalized {
+            issue_notice = format!(
+                "Confirmed mask visibility was applied as a recoverable review revision. Covered text is retained only in private history. {issue_notice}"
+            );
+        }
+        let layer_cache = crate::layers::report(&page)?;
+        let baseline_id = fingerprint(&page)?;
+        let fine_heatmap = Some(crate::geometry::heatmap(
+            &project,
+            &page,
+            project.manifest.settings.review_threshold,
+            &Control::default(),
+        )?);
         Ok(Self {
+            context: ctx.clone(),
+            baseline_id,
+            fine_heatmap,
             project,
             index,
+            baseline: page.clone(),
             page,
+            zoom: 1.,
+            heatmap: true,
+            issues,
+            issue_page: 0,
+            issue_notice,
+            layer_cache,
+            layer_notice: String::new(),
+            deferred_issues: BTreeSet::new(),
+            active_issue: None,
+            auto_advance: false,
+            revision_name: String::new(),
             texture,
             selected: 0,
             dirty: false,
@@ -188,10 +398,24 @@ impl Review {
             crop_mode: false,
             crop_start: None,
             crop: None,
+            last_source_crop: None,
+            magnifier: None,
         })
     }
 }
+#[derive(Clone, Copy)]
+enum ReviewAction {
+    Save,
+    Approve,
+    NextIssue,
+    Defer,
+    Undo,
+    Redo,
+}
 pub struct Desktop {
+    downloads: download_ui::Downloads,
+    vault: vault_ui::VaultUi,
+    workbench: workbench::Workbench,
     studio: studio::Studio,
     experience: experience::Experience,
     pub state: Workspace,
@@ -232,14 +456,40 @@ pub struct Desktop {
     review_error: String,
     opened_at: Option<f64>,
     completed_at: Option<Instant>,
+    warm_pool: Option<Arc<crate::warm_runtime::WarmPool>>,
+    warm_preference: (bool, u64),
+    settings_output: PathBuf,
 }
 impl Desktop {
+    pub fn prepare_data_directory(path: &Path) -> Result<PathBuf> {
+        crate::watch::no_links(path)?;
+        fs::create_dir_all(path)?;
+        crate::watch::no_links(path)?;
+        Ok(path.canonicalize()?)
+    }
+    fn settings_path(data_dir: Option<&Path>) -> PathBuf {
+        data_dir.map_or_else(
+            || PathBuf::from("ai-settings.json"),
+            |root| root.join("ai-settings.json"),
+        )
+    }
+    fn tr<'a>(&self, key: &'a str) -> &'a str {
+        crate::localization::text(self.state.settings.ui.locale, key)
+    }
     pub fn new(state: Workspace) -> Self {
         let (tx, rx) = mpsc::channel();
         let draft = state.settings.clone();
         let raw = serde_json::to_string_pretty(&draft).unwrap_or_default();
         let studio = studio::Studio::new(&state.settings);
+        let warm_preference = (
+            state.settings.experience.warm_reader,
+            state.settings.experience.warm_reader_ttl_secs,
+        );
         Self {
+            settings_output: Self::settings_path(None),
+            downloads: download_ui::Downloads::default(),
+            vault: vault_ui::VaultUi::default(),
+            workbench: workbench::Workbench::default(),
             studio,
             experience: experience::Experience::default(),
             state,
@@ -280,19 +530,96 @@ impl Desktop {
             review_error: String::new(),
             opened_at: None,
             completed_at: None,
+            warm_pool: None,
+            warm_preference,
+        }
+    }
+    /// Call before confidential sessions, hardware trials, or other cold-only work.
+    /// An active pool job is cancelled; an idle owned reader is stopped and waited for.
+    pub fn release_warm_reader(&self) {
+        if let Some(pool) = &self.warm_pool {
+            pool.release();
+        }
+    }
+    fn sync_warm_reader_preferences(&mut self) -> Result<()> {
+        self.state.settings.experience.validate()?;
+        let preference = (
+            self.state.settings.experience.warm_reader,
+            self.state.settings.experience.warm_reader_ttl_secs,
+        );
+        if preference != self.warm_preference {
+            if let Some(pool) = self.warm_pool.take() {
+                pool.shutdown();
+            }
+            self.warm_preference = preference;
+        }
+        if preference.0 && self.warm_pool.is_none() {
+            self.warm_pool = Some(Arc::new(crate::warm_runtime::WarmPool::new(
+                std::time::Duration::from_secs(preference.1),
+            )?));
+        }
+        Ok(())
+    }
+    pub(super) fn warm_reader_status_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(pool) = self.warm_pool.clone() else {
+            return;
+        };
+        let status = pool.status();
+        let busy = status.busy || self.active.is_some();
+        ui.horizontal_wrapped(|ui| {
+            let text = if busy {
+                "Warm reader is in use".into()
+            } else if status.cached_pid.is_some() {
+                format!(
+                    "Reader ready for compatible scans · {} s remaining",
+                    status.remaining_seconds
+                )
+            } else {
+                "Warm reader released".into()
+            };
+            ui.small(text).on_hover_text(&status.note);
+            if ui
+                .add_enabled(
+                    busy || status.cached_pid.is_some(),
+                    egui::Button::new(if busy {
+                        "Stop task and release reader"
+                    } else {
+                        "Release reader now"
+                    }),
+                )
+                .clicked()
+            {
+                self.running_queue = false;
+                if self.active.is_some() {
+                    self.control.cancelled.store(true, Ordering::Release);
+                }
+                pool.release();
+                self.notice = "Owned reader released. A later conversion starts fresh.".into();
+            }
+        });
+        if status.cached_pid.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
     pub fn from_context(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::from_context_with_data_dir(cc, None)
+    }
+    pub fn from_context_with_data_dir(
+        cc: &eframe::CreationContext<'_>,
+        data_dir: Option<&Path>,
+    ) -> Self {
         let mut state = cc
             .storage
             .and_then(|s| s.get_string("workspace"))
             .and_then(|s| serde_json::from_str::<Workspace>(&s).ok())
             .filter(|s| s.settings.validate().is_ok())
-            .unwrap_or_default();
+            .unwrap_or_else(|| data_dir.map_or_else(Workspace::default, Workspace::for_data_dir));
         state.recover();
         // Installer settings are imported once per setup change, preserving user
         // appearance, queue and document settings during upgrades.
-        if let Ok(profile) = read_json::<Settings>(Path::new("ai-settings.json"), 1_000_000)
+        let settings_output = Self::settings_path(data_dir);
+        if let Ok(profile) = read_json::<Settings>(&settings_output, 1_000_000)
             && profile.validate().is_ok()
             && let Ok(stamp) = fingerprint(&(&profile.server, profile.backend, &profile.models_dir))
             && state.installation_stamp != stamp
@@ -303,6 +630,7 @@ impl Desktop {
             state.installation_stamp = stamp;
         }
         let mut app = Self::new(state);
+        app.settings_output = settings_output;
         app.refresh(&cc.egui_ctx);
         app
     }
@@ -328,6 +656,15 @@ impl Desktop {
         });
     }
     fn poll(&mut self, ctx: &egui::Context) {
+        let urgent = self.running_queue
+            && !self.paused()
+            && self.studio.pending.is_none()
+            && self
+                .active
+                .is_some_and(|active| self.state.urgent_waiting(active));
+        self.control
+            .yield_requested
+            .store(urgent, Ordering::Release);
         let now = self.clock.elapsed().as_secs_f64();
         if self.running_queue
             && let Some(batch) = &mut self.batch
@@ -434,8 +771,11 @@ impl Desktop {
                     self.state.recent.insert(0, r.project.root.clone());
                     self.state.recent.truncate(12);
                     if self.flush_review().is_ok()
-                        && let Ok(v) = Review::load(r.project, 0, ctx)
+                        && let Ok(mut v) = Review::load(r.project, 0, ctx)
                     {
+                        if let Some(previous) = &mut self.review {
+                            v.inherit_session(previous);
+                        }
                         self.review = Some(v);
                     }
                     self.finished();
@@ -448,8 +788,11 @@ impl Desktop {
                     self.busy_setup = false;
                     self.studio.pending = None;
                     let cancelled = code == "NG900";
+                    let yielded = code == "NG901";
                     if let Some(i) = self.active.take() {
-                        self.state.queue[i].status = if cancelled {
+                        self.state.queue[i].status = if yielded {
+                            JobStatus::Pending
+                        } else if cancelled {
                             JobStatus::Cancelled
                         } else {
                             JobStatus::Failed
@@ -458,20 +801,18 @@ impl Desktop {
                     }
                     self.notice = detail;
                     self.error_code = code;
-                    self.stage = if cancelled {
+                    self.stage = if yielded {
+                        "Saved stage · urgent input starts next"
+                    } else if cancelled {
                         "Cancelled · checkpoints preserved"
                     } else {
                         "Needs attention"
                     }
                     .into();
-                    self.running_queue = false;
+                    if !yielded {
+                        self.running_queue = false;
+                    }
                     self.finished();
-                }
-                Message::Notice(s) => {
-                    self.notice = s;
-                    self.busy_setup = false;
-                    self.finished();
-                    self.refresh(ctx);
                 }
                 Message::Exported(p) => {
                     self.notice = format!("Corrected Word document saved: {}", p.display());
@@ -506,7 +847,12 @@ impl Desktop {
             self.running_queue = false;
             return;
         };
-        if let Err(e) = self.state.settings.validate() {
+        if let Err(e) = self.state.queue[i]
+            .resume
+            .as_ref()
+            .map_or(&self.state.settings, |resume| resume.settings.as_ref())
+            .validate()
+        {
             self.notice = e.to_string();
             self.running_queue = false;
             return;
@@ -531,7 +877,13 @@ impl Desktop {
             .map(|(i, j)| (i, j.input.clone()))
             .collect::<Vec<_>>();
         let input = self.state.queue[i].input.clone();
-        let folder = if self.state.output_dir.trim().is_empty() {
+        let folder = if let Some(folder) = self.state.queue[i]
+            .resume
+            .as_ref()
+            .and_then(|resume| resume.output.parent())
+        {
+            folder.to_path_buf()
+        } else if self.state.output_dir.trim().is_empty() {
             input.parent().unwrap_or(Path::new(".")).to_path_buf()
         } else {
             PathBuf::from(&self.state.output_dir)
@@ -545,9 +897,28 @@ impl Desktop {
             self.running_queue = false;
             return;
         }
-        let output = output_name(&input, &folder);
-        let s = self.state.settings.clone();
-        self.control = Control::default();
+        let resume = self.state.queue[i]
+            .resume
+            .clone()
+            .unwrap_or_else(|| ResumeJob {
+                output: output_name(&input, &folder),
+                settings: Box::new(self.state.settings.clone()),
+            });
+        let output = resume.output.clone();
+        let s = *resume.settings.clone();
+        self.state.queue[i].resume = Some(resume);
+        if let Err(error) = self.sync_warm_reader_preferences() {
+            self.notice = error.to_string();
+            self.running_queue = false;
+            return;
+        }
+        let warm_pool = if s.preset == Preset::Fast {
+            self.release_warm_reader();
+            None
+        } else {
+            self.warm_pool.clone()
+        };
+        self.control = self.fresh_operation_control();
         let cancelled = self.control.cancelled.clone();
         let questions = self.tx.clone();
         let question_ctx = ctx.clone();
@@ -598,13 +969,25 @@ impl Desktop {
                         c.check()?;
                         weights.push((
                             i,
-                            crate::scan::selected_page_count(&path, &s.pdfium, &s.page_range)
+                            crate::inputs::selected_page_count(&path, &s.pdfium, &s.page_range)
                                 .unwrap_or(1),
                         ));
                     }
                     let _ = tx.send(Message::QueueWeights(weights));
                 }
-                pipeline::convert(&input, &output, &s, &c, &log)
+                if let Some(pool) = &warm_pool {
+                    pipeline::convert_with_runtime(
+                        &input,
+                        &output,
+                        &s,
+                        &c,
+                        &log,
+                        pipeline::PreparationMode::Sequential,
+                        pool,
+                    )
+                } else {
+                    pipeline::convert(&input, &output, &s, &c, &log)
+                }
             }));
             let msg=match result {
                 Ok(Ok(r))=>Message::Complete(Box::new(r)),Ok(Err(e))=>failure(e),Err(_)=>Message::Failed("NG500".into(),"Worker stopped unexpectedly. Saved checkpoints remain available; inspect the activity log.".into())}
@@ -617,22 +1000,53 @@ impl Desktop {
         if let Some(r) = &mut self.review
             && r.dirty
         {
-            save_review(&r.project, &mut r.page, false)?;
+            r.save(false)?;
             r.dirty = false;
         }
         Ok(())
     }
-    pub fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) {
+    pub fn open_review(&mut self, path: PathBuf, ctx: &egui::Context) -> bool {
+        let resolved = match path.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                self.notice = error.to_string();
+                return false;
+            }
+        };
+        if resolved
+            .ancestors()
+            .any(|parent| parent.join("notegen-vault-work.json").exists())
+        {
+            self.notice="Open this managed plaintext copy through Encrypted project workspace so its workers and cleanup stay guarded.".into();
+            self.vault.open();
+            return false;
+        }
+        if self.review.as_ref().is_some_and(|r| r.raw_open) {
+            self.notice =
+                "Apply or discard page JSON and close its editor before opening another project."
+                    .into();
+            return false;
+        }
         if let Err(e) = self.flush_review() {
             self.notice = e.to_string();
-            return;
+            return false;
         }
         match Project::read(path).and_then(|p| Review::load(p, 0, ctx)) {
-            Ok(r) => {
+            Ok(mut r) => {
+                if let Some(previous) = &mut self.review {
+                    r.inherit_session(previous);
+                }
+                self.state.recent.retain(|p| p != &r.project.root);
+                self.state.recent.insert(0, r.project.root.clone());
+                self.state.recent.truncate(100);
                 self.review = Some(r);
                 self.review_open = true;
+                true
             }
-            Err(e) => self.notice = e.to_string(),
+            Err(e) => {
+                self.notice = e.to_string();
+                false
+            }
         }
     }
     pub fn advanced_open(&mut self) {
@@ -646,13 +1060,16 @@ impl Desktop {
         let now = ctx.input(|i| i.time);
         self.opened_at.get_or_insert(now);
         self.poll(&ctx);
+        if let Err(error) = self.sync_warm_reader_preferences() {
+            self.experience.error = error.to_string();
+        }
         self.check_updates_when_idle(&ctx);
         self.theme(&ctx);
         let files = ctx.input(|i| i.raw.dropped_files.clone());
         for f in files {
             self.state.enqueue(f.path().to_path_buf());
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+        if self.global_shortcut(&ctx, crate::shortcuts::Action::Import) {
             self.pick_files();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -668,6 +1085,10 @@ impl Desktop {
             self.notice = format!("Could not save review draft: {e}");
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        if ctx.input(|i| i.viewport().close_requested()) && self.vault.blocks_close() {
+            self.vault.request_close();
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.background()).inner_margin(if self.state.settings.ui.compact {
             18}
         else{
@@ -680,8 +1101,10 @@ impl Desktop {
                 ui.label(RichText::new("NoteGen").size(23.).strong());
                 ui.label(RichText::new("LOCAL STUDIO").size(10.).color(self.muted()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                    if ui.button("Settings").clicked() { self.experience.open = true; }
-                    if ui.button("Advanced").clicked(){
+                    if ui.button(self.tr("projects_tools")).clicked(){self.tools_open(0);}
+                    if ui.button(self.tr("settings")).clicked() { self.experience.open = true; }
+                    if ui.button("Downloads").clicked() { self.downloads_open(); }
+                    if ui.button(self.tr("advanced")).clicked(){
                         self.advanced_open();
                     }
                     if self.installed.is_empty() && ui.add_enabled(self.worker.is_none() && self.hardware.is_some(),egui::Button::new(RichText::new("Install AI").color(self.accent_text())).fill(self.accent())).on_hover_text("Download and verify the recommended local runtime and AI models. Model names and sizes are shown below.").clicked() {
@@ -721,14 +1144,14 @@ impl Desktop {
                     }
                     ui.add_space(12.);
                     ui.label("Pages");
-                    ui.add_enabled(self.worker.is_none(),egui::TextEdit::singleline(&mut self.state.settings.page_range).hint_text("All · e.g. 1-4, 8").desired_width(145.));
+                    ui.add_enabled(self.worker.is_none(),egui::TextEdit::singleline(&mut self.state.settings.page_range).hint_text("All · e.g. 1-4, 8").desired_width(145.)).accessible_name("Pages to convert; leave empty for all pages");
                 }
                 );
                 self.context_bar(ui);
                 ui.add_space(20.);
                 ui.horizontal(|ui|{
                     let ready=self.state.next().is_some() && self.worker.is_none();
-                    let convert=ui.add_enabled(ready,egui::Button::new(RichText::new("Convert to Word   →").strong().color(self.accent_text())).fill(self.accent()).min_size(Vec2::new(220.,48.)));
+                    let convert=ui.add_enabled(ready,egui::Button::new(RichText::new(self.tr("start_conversion")).strong().color(self.accent_text())).fill(self.accent()).min_size(Vec2::new(220.,48.)));
                     self.hover_ring(ui,&convert,"convert-hover");
                     if convert.clicked(){
                         self.batch=None;
@@ -736,16 +1159,17 @@ impl Desktop {
                         self.running_queue=true;
                         self.start_next(&ctx);
                     }
+                    if ui.add_enabled(ready,egui::Button::new(self.tr("one_page_trial"))).on_hover_text("Convert the first selected page of the next pending input. Inspect its quality, time and review result before running the queue.").clicked(){self.one_page_trial(&ctx);}
                     if self.active.is_some(){
                         let paused=self.paused();
                         if ui.button(if paused{
-                            "Resume"}
+                            self.tr("resume")}
                         else{
-                            "Pause"}
+                            self.tr("pause")}
                         ).clicked(){
                             self.control.paused.store(!paused,Ordering::Relaxed);
                         }
-                        if ui.button("Cancel").clicked(){
+                        if ui.button(self.tr("cancel")).clicked(){
                             self.running_queue=false;
                             self.control.cancelled.store(true,Ordering::Relaxed);
                         }
@@ -761,15 +1185,24 @@ impl Desktop {
                 ui.add_space(17.);
                 self.progress_ui(ui);
                 self.live_preview_ui(ui);
+                self.warm_reader_status_ui(ui);
                 if !self.notice.is_empty(){
                     egui::Frame::new().fill(if self.error_code.is_empty(){
                         self.surface()}
                     else{
                         Color32::from_rgb(65,35,31)}
                     ).inner_margin(12).corner_radius(10).show(ui,|ui|{
-                        ui.label(&self.notice);
-                        if !self.error_code.is_empty(){
-                            ui.small(Fault::new(code_static(&self.error_code),"").remedy());
+                        if self.error_code.is_empty(){
+                            Self::accessible_status(ui,"workspace-operation-result",&self.notice,false);
+                        }else{
+                            let locale=self.state.settings.ui.locale;
+                            let guidance=crate::localization::remedy(locale,&self.error_code);
+                            let summary=if locale==crate::localization::Locale::En {self.notice.clone()}else{format!("{} · {}",self.error_code,guidance.title)};
+                            Self::accessible_status(ui,"workspace-operation-result",&summary,true);
+                            for message in guidance.checks.iter().chain(&guidance.actions){ui.small(message);}
+                            if locale!=crate::localization::Locale::En {
+                                egui::CollapsingHeader::new(crate::localization::text(locale,"error_details")).id_salt("workspace-error-details").show(ui,|ui|{ui.label(&self.notice);});
+                            }
                         }
                     }
                     );
@@ -800,6 +1233,9 @@ impl Desktop {
         self.settings_ui(&ctx);
         self.review_ui(&ctx);
         self.studio_ui(&ctx);
+        self.downloads_ui(&ctx);
+        self.vault.ui(&ctx, &self.state.settings);
+        self.workbench_ui(&ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if let Some(delay) = motion::repaint_delay(
             &self.state.settings.ui,
@@ -812,7 +1248,7 @@ impl Desktop {
     }
     fn pick_files(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
-            .add_filter("Scanned PDF", &["pdf"])
+            .add_filter("Scans", &["pdf", "png", "jpg", "jpeg", "tif", "tiff"])
             .pick_files()
         {
             for p in paths {
@@ -837,7 +1273,11 @@ impl Desktop {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Drop scanned PDFs here").size(19.).strong());
+                        ui.label(
+                            RichText::new("Drop PDFs or scanned images here")
+                                .size(19.)
+                                .strong(),
+                        );
                         ui.add_space(6.);
                         ui.label(
                             RichText::new(
@@ -848,10 +1288,20 @@ impl Desktop {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add_sized([125., 40.], egui::Button::new("Choose PDFs"))
+                            .add_sized([125., 40.], egui::Button::new(self.tr("import_scans")))
                             .clicked()
                         {
                             self.pick_files();
+                        }
+                        if ui
+                            .add_sized([125., 40.], egui::Button::new("Import folder"))
+                            .on_hover_text(
+                                "Combine supported scans in filename order into one project.",
+                            )
+                            .clicked()
+                            && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                        {
+                            self.state.enqueue(folder);
                         }
                     });
                 });
@@ -862,8 +1312,12 @@ impl Desktop {
                         egui::TextEdit::singleline(&mut self.state.output_dir)
                             .hint_text("Same folder as each PDF")
                             .desired_width((ui.available_width() - 85.).max(100.)),
-                    );
-                    if ui.button("Browse").clicked()
+                    )
+                    .accessible_name("Output folder; leave empty to use each input's folder");
+                    if ui
+                        .button("Browse")
+                        .accessible_name("Browse output folder")
+                        .clicked()
                         && let Some(p) = rfd::FileDialog::new().pick_folder()
                     {
                         self.state.output_dir = p.display().to_string();
@@ -913,6 +1367,10 @@ impl Desktop {
                         " · initial estimate"
                     }
                 ));
+                if let Some(estimate)=&self.estimate && let Some(window)=estimate.window(now)
+                    && let Some(window)=window.scaled(seconds/current.remaining.unwrap_or(seconds).max(0.000_001)) {
+                    ui.small(format!("Planning window {}–{}",progress::duration(window.earliest_seconds),progress::duration(window.latest_seconds))).on_hover_text(format!("{}\nThis is an estimated planning range, not a calibrated confidence interval. Additional retries can extend it.",window.reasons.join("\n")));
+                }
             } else if self.worker.is_some() {
                 ui.small("Estimating…");
             }
@@ -1049,14 +1507,25 @@ impl Desktop {
         });
     }
     fn begin_ai_setup(&mut self, ctx: &egui::Context) {
+        if let Err(error) = self.prepare_download_control() {
+            self.notice = error.to_string();
+            return;
+        }
         let mut settings = self.state.settings.clone();
         let preset = settings.preset;
         settings.preset = Preset::Maximum;
+        let output = self.settings_output.clone();
         self.studio_task(ctx, move |c, log| {
-            let mut next =
-                crate::setup::install(&settings, &crate::setup::Options::default(), &c, &log)?;
-            next.preset = preset;
-            atomic_json(Path::new("ai-settings.json"), &next)?;
+            let next = crate::setup::install_to(
+                &settings,
+                &crate::setup::Options {
+                    output_preset: Some(preset),
+                    ..Default::default()
+                },
+                &output,
+                &c,
+                &log,
+            )?;
             Ok(studio::StudioMessage::Setup(Box::new(next)))
         });
     }
@@ -1074,6 +1543,9 @@ impl Desktop {
         });
         let mut review = None;
         let mut remove = None;
+        let mut move_job = None;
+        ui.small("Urgent inputs start after the active page stage is saved. The interrupted input then resumes with its original settings and output folder. An active OCR or AI request finishes before yielding.");
+        let queue_len = self.state.queue.len();
         for (i, j) in self.state.queue.iter_mut().enumerate() {
             ui.push_id(i, |ui| {
                 ui.horizontal(|ui| {
@@ -1084,7 +1556,37 @@ impl Desktop {
                         JobStatus::Failed => "!",
                         JobStatus::Cancelled => "−",
                     };
-                    ui.label(icon);
+                    ui.label(icon)
+                        .accessible_name(format!("Input status: {:?}", j.status));
+                    if j.status == JobStatus::Pending {
+                        egui::ComboBox::from_id_salt(("priority", i))
+                            .selected_text(["Normal", "High", "Urgent"][j.priority.min(2) as usize])
+                            .show_ui(ui, |ui| {
+                                for (p, title) in ["Normal", "High", "Urgent"].iter().enumerate() {
+                                    ui.selectable_value(&mut j.priority, p as u8, *title);
+                                }
+                            });
+                        if self.worker.is_none()
+                            && i > 0
+                            && ui
+                                .small_button("↑")
+                                .accessible_name("Move input earlier in the queue")
+                                .on_hover_text("Move earlier in the queue")
+                                .clicked()
+                        {
+                            move_job = Some((i, i - 1));
+                        }
+                        if self.worker.is_none()
+                            && i + 1 < queue_len
+                            && ui
+                                .small_button("↓")
+                                .accessible_name("Move input later in the queue")
+                                .on_hover_text("Move later in the queue")
+                                .clicked()
+                        {
+                            move_job = Some((i, i + 1));
+                        }
+                    }
                     ui.label(j.input.file_name().unwrap_or_default().to_string_lossy())
                         .on_hover_text(j.input.display().to_string());
                     if !j.detail.is_empty() {
@@ -1105,7 +1607,12 @@ impl Desktop {
                     {
                         j.status = JobStatus::Pending;
                     }
-                    if self.active.is_none() && ui.small_button("×").clicked() {
+                    if self.active.is_none()
+                        && ui
+                            .small_button("×")
+                            .accessible_name("Remove this input from the queue")
+                            .clicked()
+                    {
                         remove = Some(i);
                     }
                 });
@@ -1113,6 +1620,10 @@ impl Desktop {
         }
         if let Some(i) = remove {
             self.state.queue.remove(i);
+            self.batch = None;
+        } else if let Some((a, b)) = move_job {
+            self.state.queue.swap(a, b);
+            self.batch = None;
         }
         if let Some(p) = review {
             self.open_review(p, ui.ctx());
@@ -1131,7 +1642,8 @@ impl Desktop {
                     egui::TextEdit::singleline(&mut self.log_filter)
                         .hint_text("Filter stage, code, message")
                         .desired_width(180.),
-                );
+                )
+                .accessible_name("Filter activity by stage, code or message");
                 if ui.small_button("Save log").clicked()
                     && let Some(p) = rfd::FileDialog::new()
                         .set_file_name("notegen-activity.jsonl")
@@ -1240,7 +1752,7 @@ impl Desktop {
                 match self.tab{
                     0=>self.compute_controls(ui),1=>self.recognition_controls(ui),2=>self.model_controls(ui,ctx),3=>self.appearance_controls(ui),_=>{
                         ui.label("Every parameter is available here. Values are validated before applying; unknown fields are rejected.");
-                        ui.add(egui::TextEdit::multiline(&mut self.raw).code_editor().desired_width(f32::INFINITY).desired_rows(25));
+                        ui.add(egui::TextEdit::multiline(&mut self.raw).code_editor().desired_width(f32::INFINITY).desired_rows(25)).accessible_name("Advanced settings JSON; apply validated changes to save");
                     }
                 }
             }
@@ -1262,6 +1774,7 @@ impl Desktop {
                     ){
                         Ok(s)=>{
                             self.state.settings=s.clone();
+                            if let Err(error) = self.sync_warm_reader_preferences() { self.settings_error = error.to_string(); }
                             self.draft=s;
                             self.settings_error.clear();
                             self.notice="Settings applied. Adaptive values use 0; current running jobs keep their original settings.".into();
@@ -1392,23 +1905,26 @@ impl Desktop {
         ui.add(egui::Slider::new(&mut s.temperature, 0.0..=1.5).text("Temperature"));
         ui.add(egui::Slider::new(&mut s.top_p, 0.0..=1.0).text("Top p"));
         ui.horizontal(|ui| {
-            ui.label("OCR languages");
-            ui.text_edit_singleline(&mut s.languages);
+            let label = ui.label("OCR languages");
+            ui.text_edit_singleline(&mut s.languages)
+                .labelled_by(label.id);
         });
         ui.label("Document context (helps diagram interpretation; keep factual)");
         ui.add(
             egui::TextEdit::multiline(&mut s.subject)
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
-        );
+        )
+        .accessible_name("Document context for diagram interpretation");
         ui.checkbox(&mut s.deskew, "Deskew tilted scans");
         ui.checkbox(&mut s.auto_rotate, "Detect page orientation");
         ui.checkbox(&mut s.preserve_figures, "Embed source figures in Word");
         ui.checkbox(&mut s.keep_page_breaks, "Keep source page breaks");
         ui.horizontal(|ui| {
-            ui.label("Word font");
-            ui.text_edit_singleline(&mut s.font);
-            ui.add(egui::DragValue::new(&mut s.font_size).range(6.0..=32.0));
+            let label = ui.label("Word font");
+            ui.text_edit_singleline(&mut s.font).labelled_by(label.id);
+            ui.add(egui::DragValue::new(&mut s.font_size).range(6.0..=32.0))
+                .accessible_name("Word font size in points");
         });
     }
     fn model_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1422,7 +1938,8 @@ impl Desktop {
             "Use existing local server (advanced; model identity must match)",
         );
         if self.draft.external_server {
-            ui.text_edit_singleline(&mut self.draft.endpoint);
+            ui.text_edit_singleline(&mut self.draft.endpoint)
+                .accessible_name("Existing local reader HTTP endpoint");
             ui.small(
                 "Only literal loopback HTTP is allowed. External mode cannot verify GPU offload.",
             );
@@ -1476,26 +1993,19 @@ impl Desktop {
             )
             .clicked()
         {
-            let (dir, id, w, p) = (
-                self.draft.models_dir.clone(),
+            let (settings, id, w, p) = (
+                self.draft.clone(),
                 self.model_id.clone(),
                 PathBuf::from(&self.weights),
                 PathBuf::from(&self.projector),
             );
-            let tx = self.tx.clone();
-            let ctx = ctx.clone();
-            self.busy_setup = true;
-            self.worker = Some(thread::spawn(move || {
-                let msg = match runtime::register(&dir, &id, &w, &p) {
-                    Ok(m) => Message::Notice(format!(
-                        "Registered {}. Apply settings to use this registry.",
-                        m.name
-                    )),
-                    Err(e) => failure(e),
-                };
-                let _ = tx.send(msg);
-                ctx.request_repaint();
-            }));
+            self.studio_task(ctx, move |c, log| {
+                let m = crate::models::register_validated(&settings, &id, &w, &p, &c, &log)?;
+                Ok(studio::StudioMessage::Done(format!(
+                    "Registered {}. Apply settings to use this registry.",
+                    m.name
+                )))
+            });
         }
         if self.busy_setup {
             ui.horizontal(|ui| {
@@ -1588,14 +2098,18 @@ impl Desktop {
         let mut open = self.review_open;
         let mut next = None;
         let mut export = false;
-        egui::Window::new("Review & correct").fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).resizable(true).show(ctx,|ui|{
+        let mut reorder = None;
+        let mut action = None;
+        let review_bounds = ctx.content_rect().shrink(8.);
+        egui::Window::new("Review & correct").id(egui::Id::unique("notegen-review-window")).fade_in(motion::enabled(&self.state.settings.ui)).fade_out(motion::enabled(&self.state.settings.ui)).open(&mut open).default_size([1100.,740.]).max_height(review_bounds.height()).constrain_to(review_bounds).vscroll(true).resizable(true).show(ctx,|ui|{
             if self.worker.is_some(){ui.disable();}
-            ui.horizontal(|ui|{
+            let content_top = ui.cursor().top();
+            ui.horizontal_wrapped(|ui|{
                 ui.strong(format!("Page {} / {}",r.page.page,r.project.manifest.pages.len()));
-                if ui.add_enabled(r.index>0 && !r.dirty,egui::Button::new("← Previous")).clicked(){
+                if ui.add_enabled(r.index>0 && !r.dirty && !r.raw_open,egui::Button::new("← Previous")).clicked(){
                     next=Some(r.index-1);
                 }
-                if ui.add_enabled(r.index+1<r.project.manifest.pages.len() && !r.dirty,egui::Button::new("Next →")).clicked(){
+                if ui.add_enabled(r.index+1<r.project.manifest.pages.len() && !r.dirty && !r.raw_open,egui::Button::new("Next →")).clicked(){
                     next=Some(r.index+1);
                 }
                 ui.small(evidence_label(&r.page)).on_hover_text("Reader agreement is not measured accuracy. Crops from one model family do not provide independent agreement; compare uncertain content with the source.");
@@ -1605,6 +2119,9 @@ impl Desktop {
             }
             );
             ui.separator();
+            self.history_controls(&mut r,ui);
+            self.issue_controls(&mut r,ui);
+            self.layer_controls(&mut r,ui);
             ui.horizontal_wrapped(|ui|{
                 ui.toggle_value(&mut r.crop_mode,"Label handwriting / context");
                 if r.crop_mode{ui.small("Drag a tight box around a letter, word or picture.");}
@@ -1615,14 +2132,29 @@ impl Desktop {
                     }
                 }
                 if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Re-read with context")).clicked(){self.reconsider_review(&r.project,ctx);}
+                if ui.button("Magnify selected block").on_hover_text("Load a bounded crop from original source pixels; use Tab and Enter to open, then the magnifier's pan buttons.").clicked(){
+                    let region=r.page.content.blocks.get(r.selected).and_then(|block|block.bbox.clone()).unwrap_or_else(BoxRect::full);
+                    match review_source(&r.project,&r.page).and_then(|image|SourceMagnifier::new(image,&region,ctx)){Ok(view)=>r.magnifier=Some(view),Err(error)=>self.review_error=error.to_string()}
+                }
+                if ui.add_enabled(r.last_source_crop.is_some(),egui::Button::new("Magnify last source crop")).clicked() && let Some(region)=&r.last_source_crop {
+                    match review_source(&r.project,&r.page).and_then(|image|SourceMagnifier::new(image,region,ctx)){Ok(view)=>r.magnifier=Some(view),Err(error)=>self.review_error=error.to_string()}
+                }
             });
+            // The window scroll area has an unbounded content height. Use its
+            // finite clip height and reserve wrapped action/help rows instead.
+            // Subtracting content-relative header height keeps this stable as
+            // the outer window scrolls; expanded headers remain reachable.
+            let action_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button) + ui.spacing().button_padding.y * 2.);
+            let footer_height = action_height * 4. + ui.spacing().item_spacing.y * 6. + ui.text_style_height(&egui::TextStyle::Small) * 4.;
+            let pane_height = (ui.clip_rect().height() - (ui.cursor().top() - content_top) - footer_height).clamp(96.,530.);
             ui.columns(2,|cols|{
-                egui::ScrollArea::both().id_salt("source").max_height(530.).show(&mut cols[0],|ui|{
+                egui::ScrollArea::both().id_salt("source").max_height(pane_height).show(&mut cols[0],|ui|{
                     if let Some(texture)=&r.texture {
                         let size=texture.size_vec2();
-                        let width=ui.available_width().max(200.);
-                        let response=ui.add(egui::Image::new((texture.id(),size)).fit_to_exact_size(Vec2::new(width,width*size.y/size.x)).sense(if r.crop_mode{egui::Sense::drag()}else{egui::Sense::hover()}));
+                        let width=ui.available_width().max(200.)*r.zoom;
+                        let response=ui.add(egui::Image::new((texture.id(),size)).alt_text(format!("Original source scan, page {}. Use the text editor to inspect recognized blocks.",r.page.page)).fit_to_exact_size(Vec2::new(width,width*size.y/size.x)).sense(if r.crop_mode{egui::Sense::drag()}else{egui::Sense::hover()}));
                         let rect=response.rect;
+                        self.paint_source_geometry(&r,ui,rect);
                         if r.crop_mode{
                             if response.drag_started(){r.crop_start=response.interact_pointer_pos();}
                             if (response.dragged() || response.drag_stopped()) && let (Some(start),Some(end))=(r.crop_start,response.interact_pointer_pos()){
@@ -1631,9 +2163,14 @@ impl Desktop {
                                     if box_rect.valid(){r.crop=Some(box_rect);}
                             }
                             if let Some(b)=&r.crop{let selected=egui::Rect::from_min_max(rect.min+Vec2::new(b.left*rect.width(),b.top*rect.height()),rect.min+Vec2::new(b.right*rect.width(),b.bottom*rect.height()));ui.painter().rect_filled(selected,2,self.accent().gamma_multiply(0.12));ui.painter().rect_stroke(selected,2,egui::Stroke::new(2.,self.accent()),egui::StrokeKind::Inside);}
-                            if response.drag_stopped() && let Some(region)=r.crop.take(){self.prepare_teach(&r,region,ctx);r.crop_start=None;r.crop_mode=false;}
+                            if response.drag_stopped() && let Some(region)=r.crop.take(){r.last_source_crop=Some(region.clone());self.prepare_teach(&r,region,ctx);r.crop_start=None;r.crop_mode=false;}
                         }
                         for(i,b)in r.page.content.blocks.iter().enumerate(){
+                            if r.heatmap && r.issues.iter().any(|issue| issue.page==r.page.page && issue.block==i)
+                                && let Some(b)=&b.bbox {
+                                    let area=egui::Rect::from_min_max(rect.min+Vec2::new(b.left*rect.width(),b.top*rect.height()),rect.min+Vec2::new(b.right*rect.width(),b.bottom*rect.height()));
+                                    ui.painter().rect_filled(area,2,Color32::from_rgba_unmultiplied(255,150,70,45));
+                            }
                             if let Some(b)=&b.bbox{
                                 let region=egui::Rect::from_min_max(egui::pos2(rect.left()+b.left*rect.width(),rect.top()+b.top*rect.height()),egui::pos2(rect.left()+b.right*rect.width(),rect.top()+b.bottom*rect.height()));
                                 ui.painter().rect_stroke(region,2,egui::Stroke::new(if i==r.selected{
@@ -1656,7 +2193,7 @@ impl Desktop {
                     }
                 }
                 );
-                egui::ScrollArea::vertical().id_salt("editor").max_height(530.).show(&mut cols[1],|ui|{
+                egui::ScrollArea::vertical().id_salt("editor").max_height(pane_height).show(&mut cols[1],|ui|{
                     for w in &r.page.content.warnings {
                         ui.colored_label(Color32::from_rgb(241,187,111),w);
                     }
@@ -1668,6 +2205,9 @@ impl Desktop {
                     }
                     );
                     let mut changed=false;
+                    let mask_placeholder = !r.page.confirmed_redactions.is_empty() && r.page.content.blocks.get(r.selected).is_some_and(|block| block.text == "[redacted]" && block.bbox.as_ref().is_some_and(|bounds| r.page.confirmed_redactions.iter().any(|mask| &mask.region == bounds)));
+                    if mask_placeholder { ui.label("Confirmed source redaction. Remove the mask explicitly in Privacy tools to change it."); }
+                    ui.add_enabled_ui(!mask_placeholder, |ui| {
                     if let Some(b)=r.page.content.blocks.get_mut(r.selected){
                         ui.separator();
                         ui.horizontal(|ui|{
@@ -1676,33 +2216,47 @@ impl Desktop {
                                 ui.small(format!("Reader confidence {:.0}%",c*100.));
                             }
                             changed|=ui.checkbox(&mut b.uncertain,"Uncertain").changed();
+                            if r.selected>0 && ui.small_button("Move earlier").clicked(){reorder=Some((r.selected,r.selected-1));}
+                            if ui.small_button("Move later").clicked(){reorder=Some((r.selected,r.selected+1));}
                         }
                         );
+                        egui::CollapsingHeader::new("Source bounds and block type").show(ui,|ui|{
+                            egui::ComboBox::from_id_salt("block-kind").selected_text(&b.kind).show_ui(ui,|ui|{for kind in ["text","heading","list","code","caption","reference","equation","table","figure"]{changed|=ui.selectable_value(&mut b.kind,kind.into(),kind).changed();}});
+                            if b.bbox.is_none() && ui.button("Assign source bounds").clicked(){b.bbox=Some(BoxRect::full());changed=true;}
+                            if let Some(bounds)=&mut b.bbox {ui.small("Normalized coordinates. Save validates that left < right and top < bottom.");changed|=ui.add(egui::Slider::new(&mut bounds.left,0.0..=1.0).text("Left")).changed();changed|=ui.add(egui::Slider::new(&mut bounds.top,0.0..=1.0).text("Top")).changed();changed|=ui.add(egui::Slider::new(&mut bounds.right,0.0..=1.0).text("Right")).changed();changed|=ui.add(egui::Slider::new(&mut bounds.bottom,0.0..=1.0).text("Bottom")).changed();}
+                        });
                         if b.kind=="table"{
                             ui.small("Cells are editable. Use Page JSON for merged cells, headers and structural changes.");
                             egui::Grid::new("cells").striped(true).show(ui,|ui|{
-                                for row in &mut b.rows{
-                                    for cell in row{
-                                        changed|=ui.add(egui::TextEdit::singleline(cell).desired_width(110.)).changed();
+                                for (row_index,row) in b.rows.iter_mut().enumerate(){
+                                    for (col_index,cell) in row.iter_mut().enumerate(){
+                                        changed|=ui.add(egui::TextEdit::singleline(cell).desired_width(110.)).accessible_name(format!("Page {}, block {}, table row {}, column {}",r.page.page,r.selected+1,row_index+1,col_index+1)).changed();
                                     }
                                     ui.end_row();
                                 }
                             }
                             );
+                            ui.horizontal_wrapped(|ui|{
+                                if b.rows.len()<100 && ui.button("Add row").clicked(){let cols=b.rows.first().map_or(1,Vec::len);b.rows.push(vec![String::new();cols]);changed=true;}
+                                if b.rows.first().is_none_or(|r|r.len()<40) && ui.button("Add column").clicked(){if b.rows.is_empty(){b.rows.push(vec![String::new()]);}else{for row in &mut b.rows{row.push(String::new());}}changed=true;}
+                                if !b.merges.is_empty() && ui.button("Split merged cells").clicked(){b.merges.clear();changed=true;}
+                                changed|=ui.add(egui::DragValue::new(&mut b.header_rows).range(0..=b.rows.len()).prefix("Header rows ")).changed();
+                            });
                         }
                         else if b.kind=="figure"{
                             ui.label("Visible evidence");
-                            changed|=ui.add(egui::TextEdit::multiline(&mut b.description).desired_rows(4).desired_width(f32::INFINITY)).changed();
+                            changed|=ui.add(egui::TextEdit::multiline(&mut b.description).desired_rows(4).desired_width(f32::INFINITY)).accessible_name(format!("Page {}, block {}, visible figure evidence",r.page.page,r.selected+1)).changed();
                             ui.label("Contextual interpretation");
-                            changed|=ui.add(egui::TextEdit::multiline(&mut b.interpretation).desired_rows(4).desired_width(f32::INFINITY)).changed();
+                            changed|=ui.add(egui::TextEdit::multiline(&mut b.interpretation).desired_rows(4).desired_width(f32::INFINITY)).accessible_name(format!("Page {}, block {}, contextual figure interpretation",r.page.page,r.selected+1)).changed();
                         }
                         else{
-                            changed|=ui.add(egui::TextEdit::multiline(&mut b.text).desired_rows(10).desired_width(f32::INFINITY)).changed();
+                            changed|=ui.add(egui::TextEdit::multiline(&mut b.text).desired_rows(10).desired_width(f32::INFINITY)).accessible_name(format!("Page {}, block {}, recognized text",r.page.page,r.selected+1)).changed();
                         }
                         for alt in &b.alternatives {
                             ui.small(format!("Alternative: {alt}"));
                         }
                     }
+                    });
                     if changed{
                         r.dirty=true;
                         r.page.reviewed=false;
@@ -1723,12 +2277,12 @@ impl Desktop {
                         }
                     }
                     );
-                    if ui.button("Edit page JSON").clicked(){
+                    if ui.add_enabled(r.page.confirmed_redactions.is_empty(), egui::Button::new("Edit page JSON")).clicked(){
                         r.raw=serde_json::to_string_pretty(&r.page.content).unwrap_or_default();
                         r.raw_open = !r.raw_open;
                     }
                     if r.raw_open{
-                        ui.add(egui::TextEdit::multiline(&mut r.raw).code_editor().desired_rows(15).desired_width(f32::INFINITY));
+                        ui.add(egui::TextEdit::multiline(&mut r.raw).code_editor().desired_rows(15).desired_width(f32::INFINITY)).accessible_name("Page content JSON. Validate and replace content before saving.");
                         if ui.button("Validate and replace page content").clicked(){
                             match serde_json::from_str::<PageContent>(&r.raw).map_err(anyhow::Error::from).and_then(|p|{
                                 p.validate()?;
@@ -1748,23 +2302,11 @@ impl Desktop {
             }
             );
             ui.separator();
-            ui.horizontal(|ui|{
-                if ui.button("Save draft").clicked(){
-                    match save_review(&r.project,&mut r.page,false){
-                        Ok(_)=>{
-                            r.dirty=false;
-                            self.review_error.clear();
-                        }
-                        ,Err(e)=>self.review_error=e.to_string()}
-                }
-                if ui.button("Save & mark reviewed").clicked(){
-                    match save_review(&r.project,&mut r.page,true){
-                        Ok(_)=>{
-                            r.dirty=false;
-                            self.review_error.clear();
-                        }
-                        ,Err(e)=>self.review_error=e.to_string()}
-                }
+            action=self.review_shortcut_controls(&r,ui);
+            ui.horizontal_wrapped(|ui|{
+                if ui.add_enabled(!r.raw_open,egui::Button::new(self.review_action_label(ctx,ReviewAction::Save))).clicked() && !Self::repeated_review_activation(ctx){action=Some(ReviewAction::Save);}
+                if ui.add_enabled(!r.raw_open,egui::Button::new(self.review_action_label(ctx,ReviewAction::Approve))).clicked() && !Self::repeated_review_activation(ctx){action=Some(ReviewAction::Approve);}
+                ui.checkbox(&mut r.auto_advance,"After approval, open the next page").on_hover_text("Applies only to this open project session. Approval must save successfully before navigation; held keys cannot approve successive pages.");
                 if ui.add_enabled(!r.dirty && self.worker.is_none(),egui::Button::new("Export corrected Word")).clicked(){
                     export=true;
                 }
@@ -1773,17 +2315,32 @@ impl Desktop {
                 }
             }
             );
+            if r.raw_open{ui.small("Apply page JSON and close its editor before saving or navigating. Review shortcuts are paused while JSON is open.");}
             if !self.review_error.is_empty(){
-                ui.colored_label(Color32::from_rgb(244,161,140),&self.review_error);
+                Self::accessible_status(ui,"review-action-result",&self.review_error,true);
             }
             ui.small("Drafts preserve your edits across resume. Mark reviewed only after comparing with the source. Exports use a new filename.");
         }
         );
-        if let Some(i) = next {
-            match Review::load(r.project.clone(), i, ctx) {
-                Ok(v) => r = v,
+        Self::magnifier_ui(&mut r, ctx);
+        if let Some((a, b)) = reorder
+            && b < r.page.content.blocks.len()
+        {
+            r.page.content.blocks.swap(a, b);
+            r.selected = b;
+            r.dirty = true;
+            r.page.reviewed = false;
+        }
+        if let Some(action) = action {
+            match self.review_action(&mut r, action, ctx) {
+                Ok(()) => self.review_error.clear(),
                 Err(e) => self.review_error = e.to_string(),
             }
+        } else if let Some(i) = next
+            && self.worker.is_none()
+            && let Err(e) = r.navigate(i, 0, ctx)
+        {
+            self.review_error = e.to_string();
         }
         if export
             && let Some(p) = rfd::FileDialog::new()
@@ -1806,7 +2363,7 @@ impl Desktop {
             }));
         }
         if !open && r.dirty {
-            match save_review(&r.project, &mut r.page, false) {
+            match r.save(false) {
                 Ok(()) => {
                     r.dirty = false;
                     self.notice = "Review draft saved".into();
@@ -1819,6 +2376,39 @@ impl Desktop {
         }
         self.review = Some(r);
         self.review_open = open;
+    }
+    fn magnifier_ui(review: &mut Review, ctx: &egui::Context) {
+        let Some(view) = &mut review.magnifier else {
+            return;
+        };
+        let mut open = true;
+        let mut close = false;
+        let bounds = ctx.content_rect().shrink(8.);
+        egui::Window::new("Source magnifier · original pixels")
+            .id(egui::Id::unique("notegen-source-magnifier")).open(&mut open)
+            .default_size([690., 540.]).max_height(bounds.height()).constrain_to(bounds).vscroll(true)
+            .show(ctx, |ui| {
+                ui.label(format!("Page {} · source crop {} × {} px · texture keeps every original pixel", review.page.page, view.tile[2], view.tile[3]));
+                ui.small("Large regions use a movable tile, never a downscaled image. At most 4 Mi pixels are uploaded; the source cache is limited to 40 million pixels. Closing this window releases the crop and source cache.");
+                ui.horizontal_wrapped(|ui| {
+                    let step_x = i64::from((view.tile[2] / 2).max(1));
+                    let step_y = i64::from((view.tile[3] / 2).max(1));
+                    if ui.add_enabled(view.tile[0] > view.region[0], egui::Button::new("Pan left")).clicked() { view.pan(-step_x,0); }
+                    if ui.add_enabled(view.tile[0] + view.tile[2] < view.region[2], egui::Button::new("Pan right")).clicked() { view.pan(step_x,0); }
+                    if ui.add_enabled(view.tile[1] > view.region[1], egui::Button::new("Pan up")).clicked() { view.pan(0,-step_y); }
+                    if ui.add_enabled(view.tile[1] + view.tile[3] < view.region[3], egui::Button::new("Pan down")).clicked() { view.pan(0,step_y); }
+                    ui.add(egui::Slider::new(&mut view.zoom,1.0..=4.0).text("Magnifier zoom"));
+                });
+                egui::ScrollArea::both().id_salt("original-pixel-crop").max_height((bounds.height() - 185.).max(96.)).show(ui, |ui| {
+                    ui.add(egui::Image::new(&view.texture).alt_text(format!("Original-resolution source crop for page {}. Confirmed redactions remain opaque.", review.page.page))
+                        .fit_to_exact_size(view.texture.size_vec2() * view.zoom));
+                });
+                ui.small(format!("Source coordinates: x{}–{}, y{}–{}", view.tile[0], view.tile[0]+view.tile[2], view.tile[1], view.tile[1]+view.tile[3]));
+                if ui.button("Close source magnifier").clicked() { close = true; }
+            });
+        if !open || close {
+            review.magnifier = None;
+        }
     }
     fn accent(&self) -> Color32 {
         let a = self.state.settings.ui.accent;
@@ -1854,6 +2444,7 @@ impl Desktop {
         }
     }
     fn theme(&self, ctx: &egui::Context) {
+        crate::localization::set_context_locale(ctx, self.state.settings.ui.locale);
         ctx.set_theme(if self.state.settings.ui.dark {
             egui::Theme::Dark
         } else {
@@ -2077,6 +2668,17 @@ impl Desktop {
         }
     }
 }
+impl Drop for Desktop {
+    fn drop(&mut self) {
+        self.control.cancelled.store(true, Ordering::Release);
+        if let Some(pool) = &self.warm_pool {
+            pool.shutdown();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 impl eframe::App for Desktop {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         self.render(ui);
@@ -2095,6 +2697,9 @@ impl eframe::App for Desktop {
         let _ = self.flush_review();
         self.control.cancelled.store(true, Ordering::Relaxed);
         self.running_queue = false;
+        if let Some(pool) = &self.warm_pool {
+            pool.shutdown();
+        }
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
@@ -2113,49 +2718,33 @@ fn failure(e: anyhow::Error) -> Message {
         ),
     )
 }
-fn code_static(s: &str) -> &'static str {
-    match s {
-        "NG100" => "NG100",
-        "NG102" => "NG102",
-        "NG110" => "NG110",
-        "NG200" => "NG200",
-        "NG201" => "NG201",
-        "NG202" => "NG202",
-        "NG203" => "NG203",
-        "NG300" => "NG300",
-        "NG400" => "NG400",
-        "NG401" => "NG401",
-        "NG500" => "NG500",
-        "NG610" => "NG610",
-        "NG620" => "NG620",
-        "NG630" => "NG630",
-        "NG640" => "NG640",
-        "NG650" => "NG650",
-        "NG900" => "NG900",
-        _ => "NG500",
-    }
-}
 fn numeric<T: egui::emath::Numeric>(
     ui: &mut egui::Ui,
     label: &str,
     v: &mut T,
     range: std::ops::RangeInclusive<T>,
 ) {
-    ui.label(label);
-    ui.add(egui::DragValue::new(v).range(range));
+    let name = ui.label(label);
+    ui.add(egui::DragValue::new(v).range(range))
+        .labelled_by(name.id);
     ui.end_row();
 }
 fn path_control(ui: &mut egui::Ui, label: &str, value: &mut PathBuf, folder: bool) {
     ui.horizontal(|ui| {
-        ui.label(label);
+        let name = ui.label(label);
         let mut text = value.display().to_string();
         if ui
             .add(egui::TextEdit::singleline(&mut text).desired_width(330.))
+            .labelled_by(name.id)
             .changed()
         {
             *value = text.into();
         }
-        if ui.small_button("Browse").clicked() {
+        if ui
+            .small_button("Browse")
+            .accessible_name(format!("Browse {label}"))
+            .clicked()
+        {
             let dialog = rfd::FileDialog::new();
             if let Some(p) = if folder {
                 dialog.pick_folder()
@@ -2169,9 +2758,13 @@ fn path_control(ui: &mut egui::Ui, label: &str, value: &mut PathBuf, folder: boo
 }
 fn file_string(ui: &mut egui::Ui, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::TextEdit::singleline(value).desired_width(330.));
-        if ui.small_button("Browse").clicked()
+        let name = ui.label(label);
+        ui.add(egui::TextEdit::singleline(value).desired_width(330.))
+            .labelled_by(name.id);
+        if ui
+            .small_button("Browse")
+            .accessible_name(format!("Browse {label}"))
+            .clicked()
             && let Some(p) = rfd::FileDialog::new()
                 .add_filter("GGUF", &["gguf"])
                 .pick_file()
@@ -2191,6 +2784,39 @@ fn open_path(path: &Path) {
 mod acceptance {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn urgent_jobs_preempt_lower_priorities_only_and_resume_identity_survives_restart() {
+        let mut workspace = Workspace::default();
+        assert!(workspace.enqueue(PathBuf::from("first.png")));
+        assert!(workspace.enqueue(PathBuf::from("urgent.png")));
+        workspace.queue[0].status = JobStatus::Running;
+        workspace.queue[1].priority = 1;
+        assert!(!workspace.urgent_waiting(0));
+        workspace.queue[1].priority = 2;
+        assert!(workspace.urgent_waiting(0));
+        let settings = Settings {
+            subject: "Original private job context".into(),
+            ..Default::default()
+        };
+        workspace.queue[0].resume = Some(ResumeJob {
+            output: PathBuf::from("original output/first.docx"),
+            settings: Box::new(settings),
+        });
+        workspace.settings.subject = "New context for the urgent job".into();
+        let mut restored: Workspace =
+            serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
+        restored.recover();
+        assert_eq!(restored.next(), Some(1));
+        let resume = restored.queue[0].resume.as_ref().unwrap();
+        assert_eq!(resume.settings.subject, "Original private job context");
+        assert_eq!(resume.output, PathBuf::from("original output/first.docx"));
+        restored.queue[1].status = JobStatus::Complete;
+        assert_eq!(restored.next(), Some(0));
+        restored.queue[0].status = JobStatus::Running;
+        restored.queue[0].priority = 2;
+        restored.queue[1].status = JobStatus::Pending;
+        assert!(!restored.urgent_waiting(0));
+    }
     fn draw(app: &mut Desktop, ctx: &egui::Context) {
         let mut result = ctx.run_ui(
             egui::RawInput {
@@ -2418,6 +3044,683 @@ mod acceptance {
         assert_eq!(
             app.review.as_ref().unwrap().page.content.plain(),
             "Human correction"
+        );
+        app.review.as_mut().unwrap().raw_open = true;
+        assert!(!app.open_review(p.root.clone(), &ctx));
+        assert!(app.review.as_ref().unwrap().raw_open);
+    }
+
+    #[test]
+    fn draft_save_succeeds_when_another_checkpoint_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(
+            dir.path().into(),
+            Manifest {
+                schema: 2,
+                input_sha256: "a".into(),
+                fingerprint: "b".into(),
+                pages: vec![1, 2],
+                models: vec![],
+                settings: Settings::default(),
+            },
+        )
+        .unwrap();
+        project
+            .save(&Page {
+                page: 1,
+                image: "page-00001.png".into(),
+                content: PageContent {
+                    blocks: vec![Block::text("Original")],
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut review = Review::load(project.clone(), 0, &ctx).unwrap();
+        assert!(!review.issue_notice.is_empty());
+        review.page.content.blocks[0].text = "Confirmed correction".into();
+        review.dirty = true;
+        review.save(false).unwrap();
+        assert!(!review.dirty);
+        assert!(!review.issue_notice.is_empty());
+        assert_eq!(
+            project.load(1).unwrap().content.plain(),
+            "Confirmed correction"
+        );
+        assert_eq!(
+            crate::review::timeline(&project).unwrap().revisions.len(),
+            1
+        );
+    }
+
+    fn two_page_review() -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(
+            dir.path().into(),
+            Manifest {
+                schema: 2,
+                input_sha256: "a".into(),
+                fingerprint: "b".into(),
+                pages: vec![1, 2],
+                models: vec![],
+                settings: Settings::default(),
+            },
+        )
+        .unwrap();
+        for page in [1, 2] {
+            project
+                .save(&Page {
+                    page,
+                    image: format!("page-{page:05}.png"),
+                    content: PageContent {
+                        blocks: vec![Block::text(format!("Uncertain page {page}"))],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        (dir, project)
+    }
+
+    fn uploaded_crop(ctx: &egui::Context, id: egui::TextureId) -> std::sync::Arc<egui::ColorImage> {
+        let mut delta = ctx.tex_manager().write().take_delta();
+        let image = delta
+            .set
+            .get(&id)
+            .and_then(|updates| updates.last())
+            .expect("crop upload")
+            .image
+            .clone();
+        delta.clear();
+        let egui::ImageData::Color(image) = image;
+        image
+    }
+
+    #[test]
+    fn magnifier_keeps_original_pixels_and_pans_within_the_selected_region() {
+        let ctx = egui::Context::default();
+        let mut image = image::RgbaImage::from_pixel(3000, 2000, image::Rgba([30, 40, 50, 255]));
+        image.put_pixel(1500, 1000, image::Rgba([7, 99, 201, 255]));
+        let mut view = SourceMagnifier::new(
+            image::DynamicImage::ImageRgba8(image),
+            &BoxRect::full(),
+            &ctx,
+        )
+        .unwrap();
+        assert!(u64::from(view.tile[2]) * u64::from(view.tile[3]) <= 4_194_304);
+        assert!(view.tile[2] <= ctx.input(|input| input.max_texture_side) as u32);
+        let pixels = uploaded_crop(&ctx, view.texture.id());
+        assert_eq!(pixels.size, [view.tile[2] as usize, view.tile[3] as usize]);
+        let x = 1500 - view.tile[0];
+        let y = 1000 - view.tile[1];
+        assert_eq!(
+            pixels[(x as usize, y as usize)],
+            Color32::from_rgb(7, 99, 201)
+        );
+        view.pan(-100_000, -100_000);
+        assert_eq!(&view.tile[..2], &[0, 0]);
+        view.pan(100_000, 100_000);
+        assert_eq!(view.tile[0] + view.tile[2], 3000);
+        assert_eq!(view.tile[1] + view.tile[3], 2000);
+    }
+
+    #[test]
+    fn review_and_magnifier_use_opaque_confirmed_masks_and_stale_sources_fail_closed() {
+        let (_temp, project) = two_page_review();
+        image::RgbImage::from_pixel(40, 40, image::Rgb([210, 30, 60]))
+            .save(project.image(1))
+            .unwrap();
+        let original = fs::read(project.image(1)).unwrap();
+        let mut page = project.load(1).unwrap();
+        page.content.blocks[0].text = "PRIVATE COMPARISON SECRET".into();
+        project.save(&page).unwrap();
+        let mask = crate::redactions::MaskSpec {
+            region: BoxRect {
+                left: 0.25,
+                top: 0.25,
+                right: 0.75,
+                bottom: 0.75,
+            },
+            reason: crate::redactions::Reason::PersonalInformation,
+        };
+        let preview =
+            crate::redactions::preview_confirmation(&project, &page, &[mask], &Control::default())
+                .unwrap();
+        page.confirmed_redactions = crate::redactions::confirm(
+            &project,
+            &page,
+            &preview,
+            &preview.token,
+            &[0],
+            &Control::default(),
+        )
+        .unwrap();
+        project.save(&page).unwrap();
+        let checkpoint = project.load(1).unwrap();
+        let checkpoint_bytes = fs::read(project.page_path(1)).unwrap();
+        let ctx = egui::Context::default();
+        let review = Review::load(project.clone(), 0, &ctx).unwrap();
+        let visible = project.load(1).unwrap();
+        assert_eq!(
+            fingerprint(&review.baseline).unwrap(),
+            fingerprint(&visible).unwrap()
+        );
+        assert_eq!(
+            fingerprint(&review.page).unwrap(),
+            fingerprint(&visible).unwrap()
+        );
+        assert_ne!(
+            fingerprint(&visible).unwrap(),
+            fingerprint(&checkpoint).unwrap()
+        );
+        assert_eq!(visible.content.plain(), "[redacted]");
+        assert!(visible.candidates.is_empty());
+        assert_eq!(
+            visible.confirmed_redactions,
+            checkpoint.confirmed_redactions
+        );
+        assert!(review.issue_notice.contains("recoverable review revision"));
+        let history = crate::review::timeline(&project).unwrap();
+        assert_eq!(history.revisions.len(), 1);
+        assert_eq!(
+            history.revisions[0].label,
+            "Apply confirmed mask visibility"
+        );
+        let pixels = uploaded_crop(&ctx, review.texture.as_ref().unwrap().id());
+        assert!(
+            !review
+                .visible_revision_comparison(history.revisions[0].id)
+                .unwrap()
+                .contains("PRIVATE COMPARISON SECRET")
+        );
+        assert_eq!(pixels[(20, 20)], Color32::BLACK);
+        assert_eq!(pixels[(0, 0)], Color32::from_rgb(210, 30, 60));
+        let magnifier = SourceMagnifier::new(
+            review_source(&project, &review.page).unwrap(),
+            &BoxRect::full(),
+            &ctx,
+        )
+        .unwrap();
+        let magnified = uploaded_crop(&ctx, magnifier.texture.id());
+        assert_eq!(magnified[(20, 20)], Color32::BLACK);
+        assert_eq!(fs::read(project.image(1)).unwrap(), original);
+        assert_eq!(
+            fingerprint(&project.load(1).unwrap()).unwrap(),
+            fingerprint(&visible).unwrap()
+        );
+        assert_eq!(fs::read(project.page_path(1)).unwrap(), checkpoint_bytes);
+        crate::review::undo(&project).unwrap();
+        assert_eq!(
+            fingerprint(&project.load(1).unwrap()).unwrap(),
+            fingerprint(&checkpoint).unwrap()
+        );
+        crate::review::redo(&project).unwrap();
+        assert_eq!(
+            fingerprint(&project.load(1).unwrap()).unwrap(),
+            fingerprint(&visible).unwrap()
+        );
+        image::RgbImage::from_pixel(40, 40, image::Rgb([0, 255, 0]))
+            .save(project.image(1))
+            .unwrap();
+        assert!(Review::load(project.clone(), 0, &ctx).is_err());
+        assert!(review_source(&project, &review.page).is_err());
+    }
+
+    fn review_access_tree(
+        app: &mut Desktop,
+        ctx: &egui::Context,
+        viewport: Vec2,
+        events: Vec<egui::Event>,
+    ) -> egui::accesskit::TreeUpdate {
+        app.theme(ctx);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport)),
+                events,
+                ..Default::default()
+            },
+            |ui| app.review_ui(ui.ctx()),
+        );
+        output.textures_delta.clear();
+        output.platform_output.accesskit_update.take().unwrap()
+    }
+    fn review_button<'a>(
+        tree: &'a egui::accesskit::TreeUpdate,
+        prefix: &str,
+    ) -> (egui::accesskit::NodeId, &'a egui::accesskit::Node) {
+        tree.nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node.label().is_some_and(|label| label.starts_with(prefix))
+            })
+            .map(|(id, node)| (*id, node))
+            .unwrap_or_else(|| panic!("Missing review button: {prefix}"))
+    }
+    fn visible_review_button(
+        tree: &egui::accesskit::TreeUpdate,
+        prefix: &str,
+        viewport: Vec2,
+        window: egui::Rect,
+    ) -> egui::Rect {
+        let (_, node) = review_button(tree, prefix);
+        assert!(
+            !node.is_hidden() && !node.is_disabled(),
+            "{prefix} is unavailable"
+        );
+        let bounds = node.bounds().unwrap();
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+        );
+        assert!(
+            rect.is_finite() && rect.width() > 40. && rect.height() > 24.,
+            "{prefix} has invalid or clipped bounds: {rect:?}"
+        );
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, viewport).contains_rect(rect),
+            "{prefix} is outside viewport: {rect:?}, viewport={viewport:?}"
+        );
+        assert!(
+            window.shrink(2.).contains_rect(rect),
+            "{prefix} is outside review window: {rect:?}, window={window:?}"
+        );
+        rect
+    }
+
+    #[test]
+    fn review_footer_actions_fit_normal_viewport_and_large_text_and_save_by_pointer() {
+        for scale in [1., 1.4] {
+            let (_dir, project) = two_page_review();
+            image::RgbImage::from_pixel(900, 1200, image::Rgb([255, 255, 255]))
+                .save(project.image(1))
+                .unwrap();
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut app = Desktop::new(Workspace::default());
+            app.state.settings.ui.scale = scale;
+            app.state.settings.ui.reduced_motion = true;
+            app.open_review(project.root.clone(), &ctx);
+            let review = app.review.as_mut().unwrap();
+            assert!(review.texture.is_some());
+            review.page.content.blocks[0].text = "Correction saved from visible footer".into();
+            review.dirty = true;
+            let viewport = egui::vec2(1140., 890.) / scale;
+            for _ in 0..3 {
+                review_access_tree(&mut app, &ctx, viewport, vec![]);
+            }
+            let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+            let window = ctx
+                .memory(|memory| memory.area_rect(egui::Id::unique("notegen-review-window")))
+                .unwrap();
+            let save = visible_review_button(&tree, "Save draft", viewport, window);
+            visible_review_button(&tree, "Save & mark reviewed", viewport, window);
+            visible_review_button(&tree, "Keyboard review", viewport, window);
+            // Bounds alone do not prove hit testing. Activate Save with real
+            // pointer events at the visible button, without scrolling first.
+            for pressed in [true, false] {
+                review_access_tree(
+                    &mut app,
+                    &ctx,
+                    viewport,
+                    vec![
+                        egui::Event::PointerMoved(save.center()),
+                        egui::Event::PointerButton {
+                            pos: save.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                );
+            }
+            assert!(
+                !app.review.as_ref().unwrap().dirty,
+                "Visible Save was not clickable at scale {scale}: {}",
+                app.review_error
+            );
+            assert_eq!(
+                project.load(1).unwrap().content.plain(),
+                "Correction saved from visible footer"
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_review_queue_can_scroll_footer_actions_into_a_small_viewport() {
+        use egui::accesskit::{Action, ActionRequest, TreeId};
+        let (_dir, project) = two_page_review();
+        image::RgbImage::from_pixel(900, 1200, image::Rgb([255, 255, 255]))
+            .save(project.image(1))
+            .unwrap();
+        let mut page = project.load(1).unwrap();
+        page.content.blocks = (0..30)
+            .map(|i| Block::text(format!("Uncertain source {i}")))
+            .collect();
+        project.save(&page).unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = Desktop::new(Workspace::default());
+        app.state.settings.ui.reduced_motion = true;
+        app.open_review(project.root.clone(), &ctx);
+        let viewport = egui::vec2(780., 560.);
+        for _ in 0..3 {
+            review_access_tree(&mut app, &ctx, viewport, vec![]);
+        }
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        let queue = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::DisclosureTriangle
+                    && node
+                        .label()
+                        .is_some_and(|label| label.starts_with("Review queue"))
+            })
+            .unwrap()
+            .0;
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Click,
+                target_tree: TreeId::ROOT,
+                target_node: queue,
+                data: None,
+            })],
+        );
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        review_button(&tree, "Defer selected issue");
+        let (save, node) = review_button(&tree, "Save draft");
+        assert!(
+            node.bounds().unwrap().y0 > viewport.y as f64,
+            "Expanded queue did not exercise outer-window scrolling"
+        );
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::ScrollIntoView,
+                target_tree: TreeId::ROOT,
+                target_node: save,
+                data: None,
+            })],
+        );
+        for _ in 0..3 {
+            review_access_tree(&mut app, &ctx, viewport, vec![]);
+        }
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        let window = ctx
+            .memory(|memory| memory.area_rect(egui::Id::unique("notegen-review-window")))
+            .unwrap();
+        visible_review_button(&tree, "Save draft", viewport, window);
+        visible_review_button(&tree, "Save & mark reviewed", viewport, window);
+        visible_review_button(&tree, "Keyboard review", viewport, window);
+    }
+
+    #[test]
+    fn approving_saves_before_advancing_and_keeps_project_review_preferences() {
+        let (_dir, project) = two_page_review();
+        let ctx = egui::Context::default();
+        let mut app = Desktop::new(Workspace::default());
+        let mut review = Review::load(project.clone(), 0, &ctx).unwrap();
+        review.auto_advance = true;
+        review.zoom = 2.;
+        review.deferred_issues.insert("p2-b0-uncertain".into());
+        review.page.content.blocks[0].text = "Checked against source".into();
+        review.dirty = true;
+        app.review_action(&mut review, ReviewAction::Approve, &ctx)
+            .unwrap();
+        assert_eq!(review.page.page, 2);
+        assert!(review.auto_advance);
+        assert_eq!(review.zoom, 2.);
+        assert!(review.deferred_issues.contains("p2-b0-uncertain"));
+        let saved = project.load(1).unwrap();
+        assert!(saved.reviewed);
+        assert_eq!(saved.content.plain(), "Checked against source");
+        review.navigate(0, 0, &ctx).unwrap();
+        assert!(review.auto_advance);
+        assert_eq!(
+            crate::review::timeline(&project).unwrap().revisions.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn configured_review_shortcut_saves_only_with_the_review_scope_focused() {
+        use egui::accesskit::{Action, ActionRequest, TreeId};
+        let (_dir, project) = two_page_review();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut state = Workspace::default();
+        state.settings.ui.shortcuts.save = "Ctrl+Shift+S".into();
+        state.settings.ui.shortcuts.validate().unwrap();
+        let mut app = Desktop::new(state);
+        assert!(app.open_review(project.root.clone(), &ctx));
+        let viewport = Vec2::new(1400., 1100.);
+        for _ in 0..3 {
+            review_access_tree(&mut app, &ctx, viewport, vec![]);
+        }
+        let tree = review_access_tree(&mut app, &ctx, viewport, vec![]);
+        let (focus, _) = review_button(&tree, "Keyboard review");
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Focus,
+                target_tree: TreeId::ROOT,
+                target_node: focus,
+                data: None,
+            })],
+        );
+        let baseline = fingerprint(&project.load(1).unwrap()).unwrap();
+        let review = app.review.as_mut().unwrap();
+        review.page.content.blocks[0].text = "Saved with the selected binding".into();
+        review.dirty = true;
+        let key = |shift| {
+            let modifiers = egui::Modifiers {
+                ctrl: true,
+                command: true,
+                shift,
+                ..Default::default()
+            };
+            vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key: egui::Key::S,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                },
+            ]
+        };
+        review_access_tree(&mut app, &ctx, viewport, key(false));
+        assert_eq!(fingerprint(&project.load(1).unwrap()).unwrap(), baseline);
+        review_access_tree(
+            &mut app,
+            &ctx,
+            viewport,
+            vec![egui::Event::Key {
+                key: egui::Key::S,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..Default::default()
+                },
+            }],
+        );
+        review_access_tree(&mut app, &ctx, viewport, key(true));
+        assert_eq!(
+            project.load(1).unwrap().content.plain(),
+            "Saved with the selected binding"
+        );
+        assert!(!app.review.as_ref().unwrap().dirty);
+        assert_eq!(
+            crate::review::timeline(&project).unwrap().revisions.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn isolated_data_defaults_keep_private_assets_under_the_selected_root() {
+        let root = Path::new("isolated state folder");
+        let state = Workspace::for_data_dir(root);
+        assert_eq!(state.settings.models_dir, root.join("models"));
+        assert_eq!(state.settings.writer.root, root.join("writers"));
+        assert_eq!(state.settings.shared_model_store, root.join("model-store"));
+        assert_eq!(
+            Desktop::settings_path(Some(root)),
+            root.join("ai-settings.json")
+        );
+        assert_eq!(
+            Desktop::settings_path(None),
+            PathBuf::from("ai-settings.json")
+        );
+        assert!(state.queue.is_empty() && state.recent.is_empty());
+        state.settings.validate().unwrap();
+    }
+
+    #[test]
+    fn stale_approval_preserves_unsaved_draft_and_does_not_advance() {
+        let (_dir, project) = two_page_review();
+        let ctx = egui::Context::default();
+        let mut app = Desktop::new(Workspace::default());
+        let mut review = Review::load(project.clone(), 0, &ctx).unwrap();
+        review.auto_advance = true;
+        review.page.content.blocks[0].text = "Unsaved local correction".into();
+        review.dirty = true;
+        let before = project.load(1).unwrap();
+        let mut concurrent = before.clone();
+        concurrent.content.blocks[0].text = "Newer saved correction".into();
+        crate::review::commit(&project, &before, &concurrent, "Other review").unwrap();
+        assert!(
+            app.review_action(&mut review, ReviewAction::Approve, &ctx)
+                .is_err()
+        );
+        assert_eq!(review.index, 0);
+        assert!(review.dirty);
+        assert_eq!(review.page.content.plain(), "Unsaved local correction");
+        assert_eq!(
+            project.load(1).unwrap().content.plain(),
+            "Newer saved correction"
+        );
+        assert!(!project.load(2).unwrap().reviewed);
+    }
+
+    #[test]
+    fn deferring_skips_without_changing_checkpoints_or_hiding_queue_entries() {
+        let (_dir, project) = two_page_review();
+        let ctx = egui::Context::default();
+        let mut app = Desktop::new(Workspace::default());
+        let mut review = Review::load(project.clone(), 0, &ctx).unwrap();
+        let original = fs::read(project.page_path(1)).unwrap();
+        let count = review.issues.len();
+        app.review_action(&mut review, ReviewAction::Defer, &ctx)
+            .unwrap();
+        assert_eq!(review.page.page, 2);
+        assert!(review.deferred_issues.contains("p1-b0-uncertain"));
+        assert_eq!(review.issues.len(), count);
+        assert!(review.issues.iter().any(|i| i.id == "p1-b0-uncertain"));
+        app.review_action(&mut review, ReviewAction::NextIssue, &ctx)
+            .unwrap();
+        assert_eq!(review.page.page, 2);
+        review.deferred_issues.clear();
+        app.review_action(&mut review, ReviewAction::NextIssue, &ctx)
+            .unwrap();
+        assert_eq!(review.page.page, 1);
+        assert_eq!(fs::read(project.page_path(1)).unwrap(), original);
+        assert!(
+            crate::review::timeline(&project)
+                .unwrap()
+                .revisions
+                .is_empty()
+        );
+        review.dirty = true;
+        assert!(
+            app.review_action(&mut review, ReviewAction::NextIssue, &ctx)
+                .is_err()
+        );
+        assert_eq!(review.page.page, 1);
+    }
+
+    #[test]
+    fn raw_json_and_active_worker_block_review_actions() {
+        let (_dir, project) = two_page_review();
+        let ctx = egui::Context::default();
+        let mut app = Desktop::new(Workspace::default());
+        let mut review = Review::load(project.clone(), 0, &ctx).unwrap();
+        review.raw_open = true;
+        assert!(
+            app.review_action(&mut review, ReviewAction::Approve, &ctx)
+                .is_err()
+        );
+        assert!(!project.load(1).unwrap().reviewed);
+        review.raw_open = false;
+        app.worker = Some(thread::spawn(|| {}));
+        assert!(
+            app.review_action(&mut review, ReviewAction::Approve, &ctx)
+                .is_err()
+        );
+        app.worker.take().unwrap().join().unwrap();
+        assert!(!project.load(1).unwrap().reviewed);
+        assert!(
+            crate::review::timeline(&project)
+                .unwrap()
+                .revisions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn approval_shortcut_without_review_keyboard_focus_does_not_save() {
+        let (_dir, project) = two_page_review();
+        let ctx = egui::Context::default();
+        let mut app = Desktop::new(Workspace::default());
+        app.open_review(project.root.clone(), &ctx);
+        app.review.as_mut().unwrap().auto_advance = true;
+        let modifiers = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200., 900.),
+                )),
+                events: vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.review_ui(ui.ctx()),
+        );
+        assert!(!output.shapes.is_empty());
+        output.textures_delta.clear();
+        assert_eq!(app.review.as_ref().unwrap().page.page, 1);
+        assert!(!project.load(1).unwrap().reviewed);
+        assert!(
+            crate::review::timeline(&project)
+                .unwrap()
+                .revisions
+                .is_empty()
         );
     }
 

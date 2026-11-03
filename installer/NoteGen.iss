@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.4.1"
+  #define AppVersion "0.5.0"
 #endif
 #ifndef PayloadDir
   #error PayloadDir is required
@@ -50,6 +50,7 @@ Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadDir}\provenance\*"; DestDir: "{app}\provenance"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\runtime\pdfium.dll"; DestDir: "{app}\runtime"; Flags: ignoreversion
 Source: "{#PayloadDir}\runtime\tesseract\*"; DestDir: "{app}\runtime\tesseract"; Flags: ignoreversion recursesubdirs createallsubdirs

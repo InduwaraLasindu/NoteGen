@@ -4,7 +4,28 @@ Implemented behavior, mocked/protocol tests and physical quality evidence are se
 Use [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 for exact Windows/Linux results, native visual evidence and the executable download.
 
-## Verified build — 31 October 2026
+## 0.5.0 release gates
+
+Publishing 0.5.0 requires successful Windows and Linux verification. CI runs
+all-target strict Clippy and the complete ordinary suite twice, with the
+second pass using serial test execution. Native OCR, font installation, credential
+storage, desktop captures, packaged conversion and real CPU model checks follow.
+The installer has separate clean-install, 0.4.1 upgrade and retention checks,
+including verification of the installed dependency inventory and application
+provenance. Its published `installer-manifest.json` identifies the exact source
+commit, source run, asset hashes and successful installer checks. Use that run
+for the test count and native-model results of the downloaded version.
+
+Local formatting, locked metadata and all-feature/all-target type checks passed.
+A local GNU test executable compiled but exited with an access violation before
+the test harness; no tests passed in that attempt. Native execution evidence comes
+from Linux/MSVC CI and the verified MSVC portable's local CLI, Word and two printed
+OCR checks. Native accessibility-tree tests are included; the
+[Narrator audit](ACCESSIBILITY.md) remains pending. Real handwriting
+quality, additional hardware and native-language acceptance require their own
+measurements. The historical results below apply to their named source snapshots.
+
+## Historical verified build — 31 October 2026
 
 [Windows/Linux run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41168595803) at source commit
 [`1dd2606`](https://github.com/InduwaraLasindu/NoteGen/commit/1dd2606040305fc12c06b8396004c81485c0917b)
@@ -30,7 +51,7 @@ This digest identifies the outer Actions artifact, not the inner portable ZIP.
 | 5 | 61 ordinary tests + format/clippy locally: motion/reduced-motion render comparisons, animation timing and frame budgets, backward-compatible appearance settings, invalid AI grounding recovery and raw response evidence |
 | 6 | 65 ordinary tests + format/clippy locally: Fast conversion with damaged/invalid unused AI registrations, selected-reader checksum rejection, handwriting/preset validation, CLI settings preservation and honest single-family agreement labels |
 
-The current source passes all 65 ordinary tests with all features/targets on Linux,
+The 31 October source passed all 65 ordinary tests with all features/targets on Linux,
 plus strict format and clippy checks. The native desktop was started under an authenticated
 virtual X display; workspace, Advanced and review were captured, and the actual scanning
 graphic was recorded for four seconds. The screenshot harness decodes its output before

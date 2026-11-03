@@ -1,0 +1,267 @@
+{
+  "schema": 1,
+  "verified_on": "2026-11-03",
+  "models": [
+    {
+      "id": "lighton3-1b",
+      "publisher_account": "lightonai",
+      "upstream_repository": "lightonai/LightOnOCR-3-1B",
+      "documentation_revision": "23d544085c886bbdace647bcfab91203299417e2",
+      "upstream_license": "apache-2.0",
+      "publisher_license_file_available": false,
+      "conversion_repository": "richardyoung/LightOnOCR-3-1B-GGUF",
+      "conversion_revision": "85b208e3ad87ac8d022067e2a491dbd0f9beb79f",
+      "conversion_license": "apache-2.0",
+      "publisher_claims": [
+        "Publisher describes grounded OCR with labelled source boxes, short image descriptions, chart data extraction, tables, handwriting and mathematics."
+      ],
+      "declared_languages": [],
+      "language_note": "The captured model card does not enumerate supported OCR languages. No Sinhala/Tamil quality or handwriting guarantee is established.",
+      "sources": [
+        {
+          "kind": "publisher_model_card",
+          "url": "https://huggingface.co/lightonai/LightOnOCR-3-1B/raw/23d544085c886bbdace647bcfab91203299417e2/README.md",
+          "revision": "23d544085c886bbdace647bcfab91203299417e2",
+          "bytes": 9433,
+          "sha256": "739f34999e8fd672b56ed73d966d6afeee77ff8a0cea641501b6d3133e02e834"
+        },
+        {
+          "kind": "conversion_model_card",
+          "url": "https://huggingface.co/richardyoung/LightOnOCR-3-1B-GGUF/raw/85b208e3ad87ac8d022067e2a491dbd0f9beb79f/README.md",
+          "revision": "85b208e3ad87ac8d022067e2a491dbd0f9beb79f",
+          "bytes": 5114,
+          "sha256": "ac578afed6b7dac89b29666b9389a11f86bf9e5af9fc93667a3b11f2a67d99c5"
+        }
+      ]
+    },
+    {
+      "id": "lighton3-4b",
+      "publisher_account": "lightonai",
+      "upstream_repository": "lightonai/LightOnOCR-3-4B",
+      "documentation_revision": "b71010f095dc3735de7ee6b9969bff8f8f50b39a",
+      "upstream_license": "apache-2.0",
+      "publisher_license_file_available": false,
+      "conversion_repository": "richardyoung/LightOnOCR-3-4B-GGUF",
+      "conversion_revision": "8406c78c9f35b0a4d6c9cc5f69dff0e14e93ce01",
+      "conversion_license": "apache-2.0",
+      "publisher_claims": [
+        "Publisher describes grounded OCR with labelled source boxes, short image descriptions, chart data extraction, tables and mathematics."
+      ],
+      "declared_languages": [],
+      "language_note": "The captured model card does not enumerate supported OCR languages. Handwriting coverage is not explicitly listed in this 4B card.",
+      "sources": [
+        {
+          "kind": "publisher_model_card",
+          "url": "https://huggingface.co/lightonai/LightOnOCR-3-4B/raw/b71010f095dc3735de7ee6b9969bff8f8f50b39a/README.md",
+          "revision": "b71010f095dc3735de7ee6b9969bff8f8f50b39a",
+          "bytes": 9321,
+          "sha256": "4c56af1be12a620d0cadbb09976c0cd02fac5557f0f780be747d35bd6689fc54"
+        },
+        {
+          "kind": "conversion_model_card",
+          "url": "https://huggingface.co/richardyoung/LightOnOCR-3-4B-GGUF/raw/8406c78c9f35b0a4d6c9cc5f69dff0e14e93ce01/README.md",
+          "revision": "8406c78c9f35b0a4d6c9cc5f69dff0e14e93ce01",
+          "bytes": 6438,
+          "sha256": "e36445d7b467aff1f366b94459c2988e8733c5960c6fd268992258d094bbfbb3"
+        }
+      ]
+    },
+    {
+      "id": "glm-ocr",
+      "publisher_account": "zai-org",
+      "upstream_repository": "zai-org/GLM-OCR",
+      "documentation_revision": "2e85a62840ccac27daa451df36c736c4636b8628",
+      "upstream_license": "mit",
+      "publisher_license_file_available": false,
+      "conversion_repository": "ggml-org/GLM-OCR-GGUF",
+      "conversion_revision": "65a42de1148dbed2297e922b5dbc7d9b70c36578",
+      "conversion_license": null,
+      "publisher_claims": [
+        "Publisher describes text, formula and table recognition plus schema-constrained information extraction. Its complete SDK pipeline also uses a separate layout detector."
+      ],
+      "declared_languages": [
+        "zh",
+        "en",
+        "fr",
+        "es",
+        "ru",
+        "de",
+        "ja",
+        "ko"
+      ],
+      "language_note": "Language tags are publisher declarations. NoteGen has not packaged a versioned per-language quality evaluation for this quantized reader.",
+      "sources": [
+        {
+          "kind": "publisher_model_card",
+          "url": "https://huggingface.co/zai-org/GLM-OCR/raw/2e85a62840ccac27daa451df36c736c4636b8628/README.md",
+          "revision": "2e85a62840ccac27daa451df36c736c4636b8628",
+          "bytes": 6795,
+          "sha256": "172334449c3df98650bc9a42781c254c64c9d466b440e2ca8ce31f99829212b2"
+        },
+        {
+          "kind": "conversion_model_card",
+          "url": "https://huggingface.co/ggml-org/GLM-OCR-GGUF/raw/65a42de1148dbed2297e922b5dbc7d9b70c36578/README.md",
+          "revision": "65a42de1148dbed2297e922b5dbc7d9b70c36578",
+          "bytes": 239,
+          "sha256": "1cc36c11b1123837af16a1ba3a45d1fee170f581859df125eec7390a90475fac"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-2b",
+      "publisher_account": "Qwen",
+      "upstream_repository": "Qwen/Qwen3.5-2B",
+      "documentation_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+      "upstream_license": "apache-2.0",
+      "publisher_license_file_available": true,
+      "conversion_repository": "unsloth/Qwen3.5-2B-GGUF",
+      "conversion_revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "conversion_license": "apache-2.0",
+      "publisher_claims": [
+        "Publisher describes a vision-language model for visual understanding, reasoning and coding, and claims broad coverage of 201 languages and dialects."
+      ],
+      "declared_languages": [],
+      "language_note": "The 201-language statement is a publisher-wide capability claim, not an enumerated OCR support list or a NoteGen test result.",
+      "sources": [
+        {
+          "kind": "publisher_model_card",
+          "url": "https://huggingface.co/Qwen/Qwen3.5-2B/raw/15852e8c16360a2fea060d615a32b45270f8a8fc/README.md",
+          "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+          "bytes": 62814,
+          "sha256": "c0e83a849c776e6fa843d011f023132d942a0f0140d903205bf1c363adad2275"
+        },
+        {
+          "kind": "conversion_model_card",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/raw/f6d5376be1edb4d416d56da11e5397a961aca8ae/README.md",
+          "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+          "bytes": 64059,
+          "sha256": "d6507c9243588d5526ceb08840ebd759b0d05aeb96c8aeb42e59f4727df0143a"
+        },
+        {
+          "kind": "publisher_license_file",
+          "url": "https://huggingface.co/Qwen/Qwen3.5-2B/raw/15852e8c16360a2fea060d615a32b45270f8a8fc/LICENSE",
+          "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+          "bytes": 11544,
+          "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-4b",
+      "publisher_account": "Qwen",
+      "upstream_repository": "Qwen/Qwen3.5-4B",
+      "documentation_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "upstream_license": "apache-2.0",
+      "publisher_license_file_available": true,
+      "conversion_repository": "unsloth/Qwen3.5-4B-GGUF",
+      "conversion_revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+      "conversion_license": "apache-2.0",
+      "publisher_claims": [
+        "Publisher describes a vision-language model for visual understanding, reasoning and coding, and claims broad coverage of 201 languages and dialects."
+      ],
+      "declared_languages": [],
+      "language_note": "The 201-language statement is a publisher-wide capability claim, not an enumerated OCR support list or a NoteGen test result.",
+      "sources": [
+        {
+          "kind": "publisher_model_card",
+          "url": "https://huggingface.co/Qwen/Qwen3.5-4B/raw/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/README.md",
+          "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+          "bytes": 77661,
+          "sha256": "1406be1b6b8fd8a6545870da516912804756593628a1d0fb0a7965211e82a7bb"
+        },
+        {
+          "kind": "conversion_model_card",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/raw/e87f176479d0855a907a41277aca2f8ee7a09523/README.md",
+          "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+          "bytes": 78906,
+          "sha256": "28546f5fc4f22ee1b3f17b908957f17fcfa66174032136265bdb27f404bc1e6c"
+        },
+        {
+          "kind": "publisher_license_file",
+          "url": "https://huggingface.co/Qwen/Qwen3.5-4B/raw/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/LICENSE",
+          "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+          "bytes": 11544,
+          "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+        }
+      ]
+    },
+    {
+      "id": "qwen35-9b",
+      "publisher_account": "Qwen",
+      "upstream_repository": "Qwen/Qwen3.5-9B",
+      "documentation_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+      "upstream_license": "apache-2.0",
+      "publisher_license_file_available": true,
+      "conversion_repository": "unsloth/Qwen3.5-9B-GGUF",
+      "conversion_revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+      "conversion_license": "apache-2.0",
+      "publisher_claims": [
+        "Publisher describes a vision-language model for visual understanding, reasoning and coding, and claims broad coverage of 201 languages and dialects."
+      ],
+      "declared_languages": [],
+      "language_note": "The 201-language statement is a publisher-wide capability claim, not an enumerated OCR support list or a NoteGen test result.",
+      "sources": [
+        {
+          "kind": "publisher_model_card",
+          "url": "https://huggingface.co/Qwen/Qwen3.5-9B/raw/c202236235762e1c871ad0ccb60c8ee5ba337b9a/README.md",
+          "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+          "bytes": 77643,
+          "sha256": "c5f5a8c2dddab69cfbf05279235aa5fddb137939a06539c4c7637aa900fef6d0"
+        },
+        {
+          "kind": "conversion_model_card",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/raw/3885219b6810b007914f3a7950a8d1b469d598a5/README.md",
+          "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+          "bytes": 78888,
+          "sha256": "e50f8066e39c38cbc2da5dd94b9a9a2712b64c4921f107a5adb4b3ca5b6bbac0"
+        },
+        {
+          "kind": "publisher_license_file",
+          "url": "https://huggingface.co/Qwen/Qwen3.5-9B/raw/c202236235762e1c871ad0ccb60c8ee5ba337b9a/LICENSE",
+          "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+          "bytes": 11544,
+          "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+        }
+      ]
+    },
+    {
+      "id": "qwen38-27b",
+      "publisher_account": "Qwen",
+      "upstream_repository": "Qwen/Qwen3.8-27B",
+      "documentation_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "upstream_license": "apache-2.0",
+      "publisher_license_file_available": true,
+      "conversion_repository": "ggml-org/Qwen3.8-27B-GGUF",
+      "conversion_revision": "a316ea527fde32c12487be7574e2db5ac2ad2a7e",
+      "conversion_license": "apache-2.0",
+      "publisher_claims": [
+        "Publisher describes native image/video understanding, including documents and diagrams, alongside coding and multistep reasoning capabilities."
+      ],
+      "declared_languages": [],
+      "language_note": "The captured card does not enumerate an OCR language support list. Do not inherit another Qwen model language or quality claim as a local test result.",
+      "sources": [
+        {
+          "kind": "publisher_model_card",
+          "url": "https://huggingface.co/Qwen/Qwen3.8-27B/raw/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/README.md",
+          "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+          "bytes": 65012,
+          "sha256": "57e4bdb258ee1a7d2635c5174ebd4e56abe392505cdb5f8bbb356b0dc4293641"
+        },
+        {
+          "kind": "conversion_model_card",
+          "url": "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/raw/a316ea527fde32c12487be7574e2db5ac2ad2a7e/README.md",
+          "revision": "a316ea527fde32c12487be7574e2db5ac2ad2a7e",
+          "bytes": 488,
+          "sha256": "7ea038c050ddf1d40bbff2b74de4e58cd480616ec9c6db1e3a0e07a0feb631d5"
+        },
+        {
+          "kind": "publisher_license_file",
+          "url": "https://huggingface.co/Qwen/Qwen3.8-27B/raw/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/LICENSE",
+          "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+          "bytes": 11544,
+          "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+        }
+      ]
+    }
+  ]
+}

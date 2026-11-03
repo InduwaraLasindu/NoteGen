@@ -1,4 +1,25 @@
 use notegen::{consensus::*, hardware::*, planning, planning::*, types::*};
+
+#[test]
+fn scan_enhancement_preserves_flat_and_nearly_white_pages_without_overflow() {
+    for value in [0, 1, 245, 250, 255] {
+        let image = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            32,
+            32,
+            image::Luma([value]),
+        ));
+        let enhanced = notegen::scan::enhance(&image);
+        assert!(enhanced.pixels().all(|pixel| pixel[0] == value));
+    }
+    let mut image = image::GrayImage::from_pixel(32, 32, image::Luma([250]));
+    for y in 0..16 {
+        for x in 0..32 {
+            image.put_pixel(x, y, image::Luma([255]));
+        }
+    }
+    let enhanced = notegen::scan::enhance(&image::DynamicImage::ImageLuma8(image.clone()));
+    assert_eq!(enhanced, image);
+}
 fn hw(vram: u64) -> Hardware {
     Hardware {
         cpu: "Test CPU".into(),
@@ -195,6 +216,38 @@ fn candidate(model: &str, family: &str, text: &str) -> Candidate {
         },
         reliability: 0.8,
     }
+}
+
+#[test]
+fn checkpoint_validation_bounds_all_reader_evidence_before_review() {
+    let mut page = Page {
+        page: 1,
+        image: "page-00001.png".into(),
+        candidates: vec![candidate("a", "one", "visible")],
+        ..Default::default()
+    };
+    page.validate().unwrap();
+    page.candidates[0].region = Some(BoxRect {
+        left: 0.8,
+        top: 0.,
+        right: 0.2,
+        bottom: 1.,
+    });
+    assert!(page.validate().is_err());
+    page.candidates[0].region = None;
+    page.candidates[0].reliability = f64::INFINITY;
+    assert!(page.validate().is_err());
+    page.candidates[0].reliability = 0.8;
+    page.candidates[0].content.blocks[0].kind = "unknown".into();
+    assert!(page.validate().is_err());
+    page.candidates[0].content.blocks[0].kind = "text".into();
+    page.candidates = vec![page.candidates[0].clone(); 1025];
+    assert!(page.validate().is_err());
+    page.candidates.clear();
+    page.seconds = -1.;
+    assert!(page.validate().is_err());
+    page.seconds = 0.;
+    page.validate().unwrap();
 }
 #[test]
 fn consensus_selects_real_reading() {

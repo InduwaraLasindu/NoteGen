@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use notegen::{hardware, pipeline, planning, runtime, storage::*, types::*, word};
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
+#[path = "../commands.rs"]
+mod commands;
 #[derive(Parser)]
 #[command(
     name = "notegen-cli",
@@ -15,11 +17,20 @@ struct Args {
     installer_progress: bool,
     #[arg(long, global = true)]
     cancel_file: Option<PathBuf>,
+    /// Persisted download queue/policy directory (default: models_dir/.downloads).
+    /// Only asset download/management actions open this store.
+    #[arg(long, global = true)]
+    downloads_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Action,
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Review, project, evaluation, privacy and export tools.
+    Tools {
+        #[command(subcommand)]
+        command: commands::Action,
+    },
     Doctor,
     /// Check official model, AI runtime and app dependency updates.
     CheckUpdates {
@@ -120,6 +131,9 @@ enum Action {
         handwriting: bool,
         #[arg(long)]
         pages: Option<String>,
+        /// Opt in to bounded rendering/OCR overlap when CPU and free RAM permit.
+        #[arg(long)]
+        overlap_preparation: bool,
     },
     Export {
         project: PathBuf,
@@ -139,7 +153,7 @@ enum Action {
     },
 }
 fn main() {
-    if let Err(e) = run() {
+    if let Err(e) = run_on_worker() {
         eprintln!("{e:#}");
         if let Some(f) = e.downcast_ref::<Fault>() {
             eprintln!("Fix: {}", f.remedy());
@@ -147,17 +161,52 @@ fn main() {
         std::process::exit(1);
     }
 }
+fn run_on_worker() -> Result<()> {
+    // The finite clap command tree has substantial derived-parser temporaries in
+    // debug builds. Windows' 1 MiB executable stack is smaller than Linux's usual
+    // 8 MiB; use one explicitly bounded stack for parsing and every CLI action.
+    // Keep this entry point small, including failures to create the worker.
+    let worker = std::thread::Builder::new()
+        .name("notegen-cli".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run)
+        .map_err(|e| Fault::new("NG500", format!("Cannot start the CLI worker: {e}")))?;
+    worker.join().unwrap_or_else(|_| {
+        Err(Fault::new(
+            "NG500",
+            "The CLI worker stopped unexpectedly; completed checkpoints are preserved",
+        )
+        .into())
+    })
+}
+fn needs_download_control(action: &Action) -> bool {
+    match action {
+        Action::Setup { .. } | Action::ApplyUpdates { .. } | Action::UpdateModel { .. } => true,
+        Action::Tools { command } => commands::needs_download_control(command),
+        _ => false,
+    }
+}
 fn run() -> Result<()> {
     let args = Args::parse();
     let mut s = if let Some(p) = args.settings {
-        serde_json::from_reader(fs::File::open(p)?)?
+        read_json(&p, 1_000_000)?
     } else {
         Settings::default()
     };
     s.validate()?;
-    let c = Control::default();
+    let mut c = Control::default();
+    let needs_downloads = needs_download_control(&args.command);
+    if needs_downloads && c.downloads.is_none() {
+        let directory = args
+            .downloads_dir
+            .unwrap_or_else(|| s.models_dir.join(".downloads"));
+        c.downloads = Some(notegen::downloads::Manager::open(&directory)?);
+    }
     if let Some(path) = args.cancel_file {
         let cancel = c.cancelled.clone();
+        // An installer may supply an already-created cancellation marker. Honor
+        // it before dispatch rather than racing the watcher's first poll.
+        cancel.store(path.exists(), std::sync::atomic::Ordering::Relaxed);
         std::thread::spawn(move || {
             loop {
                 if path.exists() {
@@ -203,6 +252,7 @@ fn run() -> Result<()> {
         })),
     };
     match args.command {
+        Action::Tools { command } => commands::run(command, &s, &c)?,
         Action::CheckUpdates { output } => {
             let report = notegen::maintenance::check(&s, &c, &log)?;
             if let Some(path) = output {
@@ -212,8 +262,7 @@ fn run() -> Result<()> {
         }
         Action::ApplyUpdates { report, output } => {
             let report = read_json(&report, 4_000_000)?;
-            let next = notegen::maintenance::apply(&s, &report, &c, &log)?;
-            atomic_json(&output, &next)?;
+            notegen::maintenance::apply_to(&s, &report, &output, &c, &log)?;
         }
         Action::Optimize { output } => {
             atomic_json(&output, &notegen::tuning::run(&s, &c, &log)?)?;
@@ -233,26 +282,43 @@ fn run() -> Result<()> {
                 s.backend = serde_json::from_value(serde_json::Value::String(backend))?;
             }
             s.validate()?;
-            let next = notegen::setup::install(
+            let next = notegen::setup::install_to(
                 &s,
                 &notegen::setup::Options {
                     models_only,
                     runtime_only,
                     model_ids,
+                    output_preset: None,
                 },
+                &output,
                 &c,
                 &log,
             )?;
-            atomic_json(&output, &next)?;
-            println!("AI setup complete. Settings saved to {}", output.display());
+            let pending = notegen::setup::pending_runtime(&next, &c)?.is_some();
+            if pending {
+                println!(
+                    "Runtime staged. Complete model setup to run recognition canaries before activation. Candidate settings saved to {}",
+                    output.display()
+                );
+            } else {
+                println!("AI setup complete. Settings saved to {}", output.display());
+            }
             if installer {
-                println!("NGPROGRESS|1000|AI runtime and all selected models verified and ready");
+                if pending {
+                    println!(
+                        "NGPROGRESS|1000|Runtime staged; complete model setup before recognition is ready"
+                    );
+                } else {
+                    println!(
+                        "NGPROGRESS|1000|AI runtime and all selected models verified and ready"
+                    );
+                }
             }
         }
 
         Action::RegisterReader { spec } => {
             let model = read_json(&spec, 100_000)?;
-            let m = notegen::models::save_custom(&s.models_dir, model, &c)?;
+            let m = notegen::models::save_custom_validated(&s, model, &c, &log)?;
             println!("Registered {}", m.id);
         }
         Action::CheckUpdate { id } => {
@@ -271,7 +337,7 @@ fn run() -> Result<()> {
                 .find(|m| m.id == id)
                 .ok_or_else(|| Fault::new("NG650", "Reader is not registered"))?;
             let update = notegen::models::check(&model, &c)?;
-            let installed = notegen::models::install(&s.models_dir, &model, &update, &c, &log)?;
+            let installed = notegen::models::install_validated(&s, &model, &update, &c, &log)?;
             println!("Activated {} at {}", installed.id, installed.revision);
         }
         Action::Writers => println!(
@@ -377,7 +443,7 @@ fn run() -> Result<()> {
             weights,
             projector,
         } => {
-            let m = runtime::register(&s.models_dir, &id, &weights, &projector)?;
+            let m = notegen::models::register_validated(&s, &id, &weights, &projector, &c, &log)?;
             println!(
                 "Registered {} with verified local GGUFs and checksum {}",
                 m.name, m.sha256
@@ -389,6 +455,7 @@ fn run() -> Result<()> {
             preset,
             handwriting,
             pages,
+            overlap_preparation,
         } => {
             if let Some(p) = preset {
                 s.preset = match p.as_str() {
@@ -409,7 +476,12 @@ fn run() -> Result<()> {
             if let Some(p) = pages {
                 s.page_range = p;
             }
-            let r = pipeline::convert(&pdf, &output, &s, &c, &log)?;
+            let mode = if overlap_preparation {
+                pipeline::PreparationMode::BoundedOverlap
+            } else {
+                pipeline::PreparationMode::Sequential
+            };
+            let r = pipeline::convert_with_preparation(&pdf, &output, &s, &c, &log, mode)?;
             println!(
                 "Saved: {}\nProject: {}\nPages: {}\nReview: {}\nSeconds: {:.2}",
                 r.output.display(),
@@ -481,4 +553,66 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn download_directory_is_global_and_store_is_only_required_for_asset_actions() {
+        // Match the bounded stack used by the production clap worker on Windows.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                for (arguments, needs_store) in [
+                    (
+                        vec![
+                            "notegen-cli",
+                            "doctor",
+                            "--downloads-dir",
+                            "a selected store",
+                        ],
+                        false,
+                    ),
+                    (
+                        vec![
+                            "notegen-cli",
+                            "--downloads-dir",
+                            "a selected store",
+                            "setup",
+                            "--runtime-only",
+                        ],
+                        true,
+                    ),
+                    (
+                        vec![
+                            "notegen-cli",
+                            "tools",
+                            "downloads",
+                            "status",
+                            "--downloads-dir",
+                            "a selected store",
+                        ],
+                        true,
+                    ),
+                    (
+                        vec![
+                            "notegen-cli",
+                            "tools",
+                            "language-packs",
+                            "--downloads-dir",
+                            "a selected store",
+                        ],
+                        false,
+                    ),
+                ] {
+                    let args = Args::try_parse_from(arguments).unwrap();
+                    assert_eq!(args.downloads_dir, Some(PathBuf::from("a selected store")));
+                    assert_eq!(needs_download_control(&args.command), needs_store);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

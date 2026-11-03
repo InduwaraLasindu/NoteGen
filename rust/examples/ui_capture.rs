@@ -85,6 +85,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut state = Workspace::default();
             state.settings.preset = Preset::Fast;
+            state.settings.experience.check_updates = false;
             state.settings.ui.reduced_motion = mode != "motion";
             if mode == "writers" {
                 state.settings.writer.root = "build/ui-demo-writers".into();
@@ -146,10 +147,32 @@ fn main() -> eframe::Result {
                 app.advanced_open();
             }
             if mode == "review" {
-                app.open_review(
-                    project.expect("review requires PROJECT directory"),
-                    &cc.egui_ctx,
+                let project = project.clone().expect("review requires PROJECT directory");
+                assert!(
+                    app.open_review(project.clone(), &cc.egui_ctx),
+                    "Review capture could not open {}: {}",
+                    project.display(),
+                    app.notice
                 );
+            }
+            if let Some(tab) = [
+                "workbench-projects",
+                "workbench-export",
+                "workbench-recovery",
+                "workbench-privacy",
+            ]
+            .iter()
+            .position(|m| *m == mode)
+            {
+                if let Some(project) = project.as_ref() {
+                    assert!(
+                        app.open_review(project.clone(), &cc.egui_ctx),
+                        "Workbench capture could not open {}: {}",
+                        project.display(),
+                        app.notice
+                    );
+                }
+                app.tools_open(tab);
             }
             Ok(Box::new(Capture {
                 app,

@@ -1,6 +1,50 @@
 //! Searchable setting descriptions shared by the desktop and configuration guide.
 pub const GUIDE: &[(&str, &str)] = &[
     (
+        "ui.shortcuts",
+        "Configurable keyboard actions. Duplicate combinations, text-editing/window controls and Ctrl+Alt international input combinations are rejected. Review actions run only with the keyboard-review button focused; editors keep their normal shortcuts.",
+    ),
+    (
+        "ui.shortcuts.import",
+        "Import scans shortcut; default Ctrl+O. Ignored while a text editor has focus.",
+    ),
+    (
+        "ui.shortcuts.palette",
+        "Open the command palette; default Ctrl+K. Ignored while a text editor has focus.",
+    ),
+    (
+        "ui.shortcuts.save",
+        "Save the current review draft; default Ctrl+S. Requires the review shortcut focus scope.",
+    ),
+    (
+        "ui.shortcuts.approve",
+        "Save and approve the current page; default Ctrl+Enter. Held keys do not approve successive pages.",
+    ),
+    (
+        "ui.shortcuts.next_issue",
+        "Move to the next undeferred review issue; default Ctrl+J.",
+    ),
+    (
+        "ui.shortcuts.defer",
+        "Defer the selected issue for this open review session; default Ctrl+D.",
+    ),
+    (
+        "ui.shortcuts.undo",
+        "Undo a review revision; default Ctrl+Z. Text editors keep their own text undo.",
+    ),
+    (
+        "ui.shortcuts.redo",
+        "Redo a review revision; default Ctrl+Y. Text editors keep their own text redo.",
+    ),
+    (
+        "tessdata_dir",
+        "Verified optional printed-OCR resource folder. Empty uses bundled/system Tesseract data. Interface language is independent.",
+    ),
+    (
+        "ui.locale",
+        "Interface labels, settings help and error remedies: en (English), si (Sinhala), ta (Tamil). OCR language and model support are configured separately.",
+    ),
+    (
         "preset",
         "Fast: printed OCR. Balanced: AI as needed. Accuracy: independent OCR and vision. Maximum: a third reader family and more checks.",
     ),
@@ -162,6 +206,14 @@ pub const GUIDE: &[(&str, &str)] = &[
         "Folder holding local reader registrations and versioned weights. Requires sufficient disk space.",
     ),
     (
+        "shared_model_store",
+        "Immutable verified assets shared by compatible projects, indexed by SHA256 and byte length. Registrations remain local; this store does not automatically delete assets.",
+    ),
+    (
+        "project_lock",
+        "Optional exact project environment lock file. When set, validate its pinned readers, runtime, OCR resources and preparation settings before recognition; mismatches stop instead of silently upgrading.",
+    ),
+    (
         "endpoint",
         "Literal localhost endpoint for an external inference server. Remote conversion endpoints are blocked.",
     ),
@@ -286,8 +338,24 @@ pub const GUIDE: &[(&str, &str)] = &[
         "Show the source region and generated draft answer. Drafts may change; private reasoning channels are never shown.",
     ),
     (
+        "experience.warm_reader",
+        "Opt in to retaining at most one owned compatible local reader process between successful jobs. Off by default. Each reuse requires a verified reset and fresh memory admission. Retention sessions and hardware trials stay cold; release immediately from the workspace. Native image buffers may remain in RAM until the process exits; this is logical isolation, not forensic erasure.",
+    ),
+    (
+        "experience.warm_reader_ttl_secs",
+        "Idle expiry for the optional retained reader, from 1 to 60 seconds (default 30). Expiry, changed preferences, cancellation, errors or app exit release the owned process; external servers are never cached.",
+    ),
+    (
         "experience.check_updates",
         "Check official publishers at most daily when idle. Downloads need your click; no document content is sent.",
+    ),
+    (
+        "experience.update_channel",
+        "App update channel: stable excludes preview releases; preview explicitly opts in to newer prereleases. Runtime and reader publisher channels are unchanged. Switching channels never installs or downgrades the app.",
+    ),
+    (
+        "experience.defer_updates_until",
+        "Optional UTC time until which automatic publisher checks are deferred. Check all updates now bypasses this deferral. It does not schedule downloads or change recognition checkpoints.",
     ),
 ];
 pub fn description(key: &str) -> &'static str {
@@ -295,4 +363,16 @@ pub fn description(key: &str) -> &'static str {
         .iter()
         .find(|(k, _)| *k == key)
         .map_or("", |(_, v)| *v)
+}
+pub fn description_localized(locale: crate::localization::Locale, key: &str) -> String {
+    let original = description(key);
+    if original.is_empty() {
+        return String::new();
+    }
+    let message = format!("help.{key}");
+    if crate::localization::has_key(&message) {
+        crate::localization::text(locale, &message).to_owned()
+    } else {
+        original.to_owned()
+    }
 }

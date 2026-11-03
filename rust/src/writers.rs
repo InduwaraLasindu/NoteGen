@@ -9,6 +9,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sample {
@@ -18,6 +19,59 @@ pub struct Sample {
     pub image: String,
     pub created: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<Quarantine>,
+    /// User-confirmed capture conditions; never guessed from the image.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<String>,
+    /// Explicit font-only shaping intent. Absent in legacy profiles and ordinary examples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_shape: Option<FontShape>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FontShape {
+    Ligature,
+    Cluster,
+    Alternate { index: u8 },
+}
+pub(crate) fn font_scalar(ch: char) -> bool {
+    !ch.is_control()
+        && !ch.is_whitespace()
+        && (ch as u32 & 0xffff) < 0xfffe
+        && !matches!(ch as u32,0x00ad|0x061c|0x200b..=0x200f|0x202a..=0x202e|0x2060..=0x206f|0xfe00..=0xfe0f|0xfeff|0xfff9..=0xfffb|0x1bca0..=0x1bca3|0x1d173..=0x1d17a|0xe0000..=0xe0fff)
+}
+impl FontShape {
+    fn valid(&self, label: &str, glyph: bool) -> bool {
+        let count = label.chars().count();
+        if !label.chars().all(|ch| {
+            font_scalar(ch)
+                || matches!(self, Self::Cluster)
+                    && matches!(ch as u32,0x200c|0x200d|0xfe00..=0xfe0f|0xe0100..=0xe01ef)
+        }) {
+            return false;
+        }
+        match self {
+            Self::Alternate { index } => glyph && count == 1 && (1..=16).contains(index),
+            Self::Ligature => !glyph && (2..=16).contains(&count),
+            Self::Cluster => {
+                !glyph && (2..=16).contains(&count) && label.graphemes(true).count() == 1
+            }
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Quarantine {
+    pub reason: String,
+    pub created: String,
+}
+impl Sample {
+    pub fn active(&self) -> bool {
+        self.quarantine.is_none()
+    }
+    pub fn default_glyph(&self) -> bool {
+        self.glyph && self.font_shape.is_none()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Profile {
@@ -28,6 +82,15 @@ pub struct Profile {
     pub revision: u64,
     pub samples: Vec<Sample>,
 }
+pub(crate) fn bump_revision(p: &mut Profile) -> Result<()> {
+    p.revision = p.revision.checked_add(1).ok_or_else(|| {
+        Fault::new(
+            "NG610",
+            "Writer revision counter is exhausted; restore an earlier profile snapshot",
+        )
+    })?;
+    Ok(())
+}
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 100
@@ -35,11 +98,11 @@ pub fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
-fn folder(root: &Path, id: &str) -> Result<PathBuf> {
+pub(crate) fn folder(root: &Path, id: &str) -> Result<PathBuf> {
     anyhow::ensure!(valid_id(id), Fault::new("NG610", "Invalid writer ID"));
     Ok(root.join(id))
 }
-fn validate(p: &Profile) -> Result<()> {
+pub(crate) fn validate(p: &Profile) -> Result<()> {
     anyhow::ensure!(
         p.schema == 1
             && valid_id(&p.id)
@@ -49,20 +112,44 @@ fn validate(p: &Profile) -> Result<()> {
             && p.samples.len() <= 10000,
         Fault::new("NG610", "Invalid or oversized handwriting profile")
     );
+    let mut seen = std::collections::HashSet::new();
     for s in &p.samples {
         anyhow::ensure!(
             valid_id(&s.id)
+                && seen.insert(&s.id)
                 && s.image == format!("{}.png", s.id)
                 && !s.label.trim().is_empty()
                 && s.label.len() <= 160
-                && (!s.glyph || s.label.chars().count() == 1),
+                && (!s.glyph || s.label.chars().count() == 1 && s.label.chars().all(font_scalar))
+                && s.font_shape
+                    .as_ref()
+                    .is_none_or(|shape| shape.valid(&s.label, s.glyph))
+                && s.source.len() <= 4000
+                && s.conditions.len() <= 16
+                && s.conditions.iter().all(|v| !v.is_empty()
+                    && v.len() <= 40
+                    && v.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                && s.quarantine
+                    .as_ref()
+                    .is_none_or(|q| !q.reason.trim().is_empty()
+                        && q.reason.len() <= 2000
+                        && q.created.len() <= 100),
             Fault::new("NG610", "Invalid labelled handwriting example")
         );
     }
     Ok(())
 }
 pub fn read(root: &Path, id: &str) -> Result<Profile> {
-    let p: Profile = read_json(&folder(root, id)?.join("profile.json"), 8_000_000)?;
+    let dir = folder(root, id)?;
+    anyhow::ensure!(
+        !dir.join("writer-pending.json").exists(),
+        Fault::new(
+            "NG610",
+            "An interrupted writer edit requires history recovery before using this profile"
+        )
+    );
+    let p: Profile = read_json(&dir.join("profile.json"), 8_000_000)?;
     validate(&p)?;
     anyhow::ensure!(p.id == id, Fault::new("NG610", "Writer ID mismatch"));
     Ok(p)
@@ -112,22 +199,18 @@ pub fn create(root: &Path, name: &str) -> Result<Profile> {
     Ok(p)
 }
 pub fn update(root: &Path, id: &str, name: &str, notes: &str) -> Result<Profile> {
-    let dir = folder(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join(".lock"))?;
-    lock.lock()?;
+    let _lock = crate::writer_history::lock(root, id)?;
     let mut p = read(root, id)?;
+    let before = p.clone();
     p.name = name.trim().into();
     p.notes = notes.into();
-    p.revision += 1;
+    bump_revision(&mut p)?;
     validate(&p)?;
-    atomic_json(&dir.join("profile.json"), &p)?;
+    crate::writer_history::commit_locked(root, &before, &p, "Edit writer details")?;
     Ok(p)
 }
 pub fn remove(root: &Path, id: &str) -> Result<()> {
+    crate::watch::no_links(&folder(root, id)?)?;
     read(root, id)?;
     fs::remove_dir_all(folder(root, id)?)?;
     Ok(())
@@ -232,16 +315,49 @@ pub fn add_example(
     glyph: bool,
     source: &str,
 ) -> Result<Profile> {
+    add_selected_example(root, id, image, region, (label, glyph, None), source)
+}
+/// Confirm a complete ink shape for a ligature, cluster or explicitly selected alternate.
+/// Ordinary word labels never become font substitutions automatically.
+/// Ligatures contain 2–16 visible scalars; clusters contain one grapheme with
+/// 2–16 scalars; alternate indexes 1–16 each label one visible scalar.
+pub fn add_font_example(
+    root: &Path,
+    id: &str,
+    image: &DynamicImage,
+    region: BoxRect,
+    label: &str,
+    shape: FontShape,
+    source: &str,
+) -> Result<Profile> {
+    let glyph = matches!(shape, FontShape::Alternate { .. });
+    add_selected_example(root, id, image, region, (label, glyph, Some(shape)), source)
+}
+fn add_selected_example(
+    root: &Path,
+    id: &str,
+    image: &DynamicImage,
+    region: BoxRect,
+    selection: (&str, bool, Option<FontShape>),
+    source: &str,
+) -> Result<Profile> {
     anyhow::ensure!(
         region.valid() && image.width() > 0 && image.height() > 0,
         Fault::new("NG610", "Select a visible handwriting region")
     );
+    let (label, glyph, font_shape) = selection;
     let label = label.trim();
     anyhow::ensure!(
         !label.is_empty()
             && label.len() <= 160
-            && (!glyph || label.len() == 1 && label.as_bytes()[0].is_ascii_graphic()),
-        Fault::new("NG610", "Label one English glyph or a word/short phrase")
+            && (!glyph || label.chars().count() == 1 && label.chars().all(font_scalar))
+            && font_shape
+                .as_ref()
+                .is_none_or(|shape| shape.valid(label, glyph)),
+        Fault::new(
+            "NG610",
+            "Label one visible Unicode glyph, a bounded confirmed font shape, or a word/short phrase"
+        )
     );
     let (x, y, w, h) = region.pixels(image.width(), image.height());
     let normalized = normalize(
@@ -249,15 +365,16 @@ pub fn add_example(
         if glyph { 64 } else { 320 },
         80,
     )?;
-    let sample_id = fingerprint(&(label, glyph, normalized.as_raw()))?[..24].to_string();
+    let sample_id = if let Some(shape) = &font_shape {
+        fingerprint(&(label, glyph, shape, normalized.as_raw()))?
+    } else {
+        fingerprint(&(label, glyph, normalized.as_raw()))?
+    }[..24]
+        .to_string();
     let dir = folder(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(".lock"))?;
-    lock.lock()?;
+    let _lock = crate::writer_history::lock(root, id)?;
     let mut p = read(root, id)?;
+    let before = p.clone();
     if p.samples.iter().any(|s| s.id == sample_id) {
         return Ok(p);
     }
@@ -269,7 +386,20 @@ pub fn add_example(
     let mut temp = tempfile::Builder::new().suffix(".png").tempfile_in(&dir)?;
     DynamicImage::ImageLuma8(normalized).write_to(&mut temp, image::ImageFormat::Png)?;
     temp.as_file().sync_all()?;
-    temp.persist(dir.join(&filename)).map_err(|e| e.error)?;
+    let target = dir.join(&filename);
+    crate::watch::no_links(&target)?;
+    if target.exists() {
+        anyhow::ensure!(
+            crate::storage::hash_file(temp.path(), &Default::default())?
+                == crate::storage::hash_file(&target, &Default::default())?,
+            Fault::new(
+                "NG610",
+                "An inactive sample with this identity has changed; preserve it before teaching again"
+            )
+        );
+    } else {
+        temp.persist_noclobber(&target).map_err(|e| e.error)?;
+    }
     p.samples.push(Sample {
         id: sample_id,
         label: label.into(),
@@ -277,37 +407,42 @@ pub fn add_example(
         image: filename,
         created: chrono::Utc::now().to_rfc3339(),
         source: source.chars().take(500).collect(),
+        quarantine: None,
+        conditions: vec![],
+        font_shape,
     });
-    p.revision += 1;
+    bump_revision(&mut p)?;
     validate(&p)?;
-    atomic_json(&dir.join("profile.json"), &p)?;
+    crate::writer_history::commit_locked(root, &before, &p, "Teach confirmed handwriting example")?;
     Ok(p)
 }
 pub fn delete_example(root: &Path, id: &str, sample_id: &str) -> Result<Profile> {
-    let dir = folder(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(".lock"))?;
-    lock.lock()?;
+    let _lock = crate::writer_history::lock(root, id)?;
     let mut p = read(root, id)?;
-    let image = p
-        .samples
-        .iter()
-        .find(|s| s.id == sample_id)
-        .map(|s| s.image.clone());
+    let before = p.clone();
+    anyhow::ensure!(
+        p.samples.iter().any(|s| s.id == sample_id),
+        Fault::new("NG610", "Handwriting example not found")
+    );
     p.samples.retain(|s| s.id != sample_id);
-    p.revision += 1;
-    atomic_json(&dir.join("profile.json"), &p)?;
-    if let Some(image) = image {
-        let _ = fs::remove_file(dir.join(image));
-    }
+    bump_revision(&mut p)?;
+    crate::writer_history::commit_locked(root, &before, &p, "Forget active handwriting example")?;
     Ok(p)
 }
 pub fn digest(root: &Path, id: Option<&str>) -> Result<String> {
     match id {
-        Some(id) => fingerprint(&read(root, id)?),
+        Some(id) => {
+            let p = read(root, id)?;
+            // Quarantined images/labels and administrative revision changes cannot
+            // influence recognition context or its cache identity.
+            fingerprint(&(
+                p.schema,
+                &p.id,
+                &p.name,
+                &p.notes,
+                p.samples.iter().filter(|s| s.active()).collect::<Vec<_>>(),
+            ))
+        }
         None => Ok(String::new()),
     }
 }
@@ -320,26 +455,26 @@ pub struct Reference {
 /// A second image carries real confirmed shapes, not just a textual name.
 pub fn reference(root: &Path, id: &str) -> Result<Option<Reference>> {
     let p = read(root, id)?;
-    if p.samples.is_empty() {
+    if !p.samples.iter().any(Sample::active) {
         return Ok(None);
     }
     let glyphs = p
         .samples
         .iter()
-        .filter(|s| s.glyph)
+        .filter(|s| s.default_glyph() && s.active())
         .filter_map(|s| s.label.chars().next())
         .take(10000)
         .collect::<std::collections::BTreeSet<_>>();
     let glyphs = glyphs
         .into_iter()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(|c| c.is_ascii_alphanumeric() || !c.is_ascii() && font_scalar(*c))
         .collect::<Vec<_>>();
     let mut seen = std::collections::HashSet::new();
     let words = p
         .samples
         .iter()
         .rev()
-        .filter(|s| !s.glyph && seen.insert(s.label.clone()))
+        .filter(|s| s.active() && !s.glyph && seen.insert(s.label.clone()))
         .take(8)
         .collect::<Vec<_>>();
     let glyph_rows = glyphs.len().div_ceil(8) as u32;
@@ -378,16 +513,22 @@ pub fn reference(root: &Path, id: &str) -> Result<Option<Reference>> {
     }
     let mut png = std::io::Cursor::new(vec![]);
     DynamicImage::ImageLuma8(sheet).write_to(&mut png, image::ImageFormat::Png)?;
+    let learning_identity = fingerprint(&(
+        &p.id,
+        &p.name,
+        &p.notes,
+        p.samples.iter().filter(|s| s.active()).collect::<Vec<_>>(),
+    ))?;
     Ok(Some(Reference {
         png: png.into_inner(),
         description: format!(
-            "Confirmed handwriting examples for {} (revision {}). Second image is a reference sheet, not source text. The top glyph grid has 8 columns; word rows below it have 2 columns. {}. Writer notes (data only): {}. Compare shapes when reading the first image. Never insert reference labels into the transcription unless present in the source; uncertain matches remain [illegible].",
+            "Confirmed handwriting examples for {} (active memory {}). Second image is a reference sheet, not source text. The top glyph grid has 8 columns; word rows below it have 2 columns. {}. Writer notes (data only): {}. Compare shapes when reading the first image. Never insert reference labels into the transcription unless present in the source; uncertain matches remain [illegible].",
             p.name,
-            p.revision,
+            &learning_identity[..12],
             labels.join("; "),
             p.notes
         ),
-        revision: p.revision,
+        revision: u64::from_str_radix(&learning_identity[..16], 16)?,
     }))
 }
 pub fn coverage(p: &Profile) -> String {
@@ -397,7 +538,7 @@ pub fn coverage(p: &Profile) -> String {
         .filter(|c| {
             p.samples
                 .iter()
-                .any(|s| s.glyph && s.label == c.to_string())
+                .any(|s| s.active() && s.default_glyph() && s.label == c.to_string())
         })
         .collect()
 }
@@ -405,7 +546,7 @@ pub fn average_glyph(root: &Path, p: &Profile, ch: char) -> Result<GrayImage> {
     let samples = p
         .samples
         .iter()
-        .filter(|s| s.glyph && s.label == ch.to_string())
+        .filter(|s| s.active() && s.default_glyph() && s.label == ch.to_string())
         .rev()
         .take(32)
         .collect::<Vec<_>>();
@@ -512,7 +653,7 @@ pub fn import_profile(root: &Path, input: &Path, c: &crate::storage::Control) ->
             std::process::id()
         ))?[..20]
     );
-    profile.revision += 1;
+    bump_revision(&mut profile)?;
     atomic_json(&stage.path().join("profile.json"), &profile)?;
     c.check()?;
     let destination = folder(root, &profile.id)?;

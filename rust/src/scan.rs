@@ -11,18 +11,42 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub fn ocr_args(args: &[String], s: &Settings) -> Vec<String> {
+    let mut args = args.to_vec();
+    if !s.tessdata_dir.as_os_str().is_empty() {
+        args.splice(
+            2.min(args.len())..2.min(args.len()),
+            [
+                "--tessdata-dir".into(),
+                s.tessdata_dir.to_string_lossy().into_owned(),
+            ],
+        );
+    }
+    args
+}
 pub fn run(
     exe: &Path,
     args: &[String],
     timeout: Duration,
     c: &Control,
 ) -> Result<(bool, String, String)> {
+    run_with_threads(exe, args, timeout, c, 4)
+}
+pub fn run_with_threads(
+    exe: &Path,
+    args: &[String],
+    timeout: Duration,
+    c: &Control,
+    threads: usize,
+) -> Result<(bool, String, String)> {
     c.check()?;
-    let mut out = tempfile::tempfile()?;
-    let mut err = tempfile::tempfile()?;
-    let mut child = command(exe)
+    let mut out = crate::storage::temporary_file(c)?;
+    let mut err = crate::storage::temporary_file(c)?;
+    let mut process = command(exe);
+    crate::storage::configure_temporary_environment(&mut process, c)?;
+    let mut child = process
         .args(args)
-        .env("OMP_THREAD_LIMIT", "4")
+        .env("OMP_THREAD_LIMIT", threads.clamp(1, 512).to_string())
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(err.try_clone()?)
@@ -43,8 +67,16 @@ pub fn run(
             )
             .into());
         }
-        if let Some(s) = child.try_wait()? {
-            break s;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                // Do not release a private worker's scratch while a native
+                // process may still be using it after an observation failure.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
         }
         std::thread::sleep(Duration::from_millis(30));
     };
@@ -166,7 +198,7 @@ pub fn enhance(im: &DynamicImage) -> GrayImage {
         })
         .position(|v| v >= count - count / 100)
         .unwrap_or(255) as u8;
-    if high > low + 10 {
+    if high.saturating_sub(low) > 10 {
         g.as_mut().par_iter_mut().for_each(|p| {
             *p = ((p.saturating_sub(low) as u32 * 255) / (high - low) as u32).min(255) as u8
         });
@@ -222,10 +254,10 @@ pub fn parse_tsv(text: &str) -> Vec<Word> {
                 return None;
             }
             let confidence = r.get(10)?.parse::<f32>().ok()? / 100.;
-            if confidence < 0. {
+            if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
                 return None;
             }
-            Some(Word {
+            let word = Word {
                 text,
                 x: r.get(6)?.parse().ok()?,
                 y: r.get(7)?.parse().ok()?,
@@ -237,9 +269,150 @@ pub fn parse_tsv(text: &str) -> Vec<Word> {
                     r.get(3)?.parse().ok()?,
                     r.get(4)?.parse().ok()?,
                 ),
-            })
+            };
+            (word.w > 0
+                && word.h > 0
+                && word.x.checked_add(word.w).is_some()
+                && word.y.checked_add(word.h).is_some())
+            .then_some(word)
         })
         .collect()
+}
+pub(crate) fn checked_words(text: &str, width: u32, height: u32) -> Result<Vec<Word>> {
+    let mut native = 0usize;
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .quoting(false)
+        .flexible(true)
+        .from_reader(text.as_bytes());
+    let header = reader
+        .headers()
+        .map_err(|_| Fault::new("NG110", "Malformed Tesseract TSV header"))?;
+    anyhow::ensure!(
+        header.len() == 12
+            && header.get(0) == Some("level")
+            && header.get(6) == Some("left")
+            && header.get(10) == Some("conf")
+            && header.get(11) == Some("text"),
+        Fault::new("NG110", "Unrecognized Tesseract TSV header")
+    );
+    for row in reader.records() {
+        let row = row.map_err(|_| Fault::new("NG110", "Malformed Tesseract TSV"))?;
+        if row.get(0) == Some("5") && row.get(11).is_some_and(|value| !value.trim().is_empty()) {
+            anyhow::ensure!(
+                row.len() == 12,
+                Fault::new("NG110", "Tesseract TSV word has unexpected fields")
+            );
+            native += 1;
+        }
+        anyhow::ensure!(
+            native <= 30_000,
+            Fault::new("NG110", "Tesseract word count exceeds its geometry budget")
+        );
+    }
+    let words = parse_tsv(text);
+    anyhow::ensure!(
+        words.len() == native
+            && words
+                .iter()
+                .all(|word| word.x + word.w <= width && word.y + word.h <= height),
+        Fault::new(
+            "NG110",
+            "Tesseract supplied invalid word coordinates or confidence; source retained for review"
+        )
+    );
+    Ok(words)
+}
+fn word_region(word: &Word, width: u32, height: u32) -> Option<BoxRect> {
+    let right = word.x.checked_add(word.w)?;
+    let bottom = word.y.checked_add(word.h)?;
+    if width == 0 || height == 0 || right > width || bottom > height || word.w == 0 || word.h == 0 {
+        return None;
+    }
+    Some(BoxRect {
+        left: word.x as f32 / width as f32,
+        top: word.y as f32 / height as f32,
+        right: right as f32 / width as f32,
+        bottom: bottom as f32 / height as f32,
+    })
+}
+pub(crate) fn observed_geometry(
+    words: &[&Word],
+    width: u32,
+    height: u32,
+    grid: Option<crate::geometry::TableGrid>,
+) -> crate::geometry::BlockGeometry {
+    use crate::geometry::{BlockGeometry, CellAddress, CellBox, LineRegion, Origin, Quad, WordBox};
+    let mut groups = BTreeMap::<(u32, u32, u32), Vec<&Word>>::new();
+    for word in words {
+        if word_region(word, width, height).is_some() {
+            groups.entry(word.group).or_default().push(word);
+        }
+    }
+    let mut ordinals = BTreeMap::new();
+    let mut lines = vec![];
+    for (ordinal, (key, group)) in groups.iter().enumerate() {
+        ordinals.insert(*key, ordinal);
+        let left = group.iter().map(|word| word.x).min().unwrap();
+        let top = group.iter().map(|word| word.y).min().unwrap();
+        let right = group.iter().map(|word| word.x + word.w).max().unwrap();
+        let bottom = group.iter().map(|word| word.y + word.h).max().unwrap();
+        lines.push(LineRegion {
+            ordinal,
+            shape: Quad::rectangle(&BoxRect {
+                left: left as f32 / width as f32,
+                top: top as f32 / height as f32,
+                right: right as f32 / width as f32,
+                bottom: bottom as f32 / height as f32,
+            }),
+            origin: Origin::TesseractTsv,
+        });
+    }
+    let mut result = BlockGeometry {
+        lines,
+        grid,
+        ..Default::default()
+    };
+    if let Some(grid) = &result.grid {
+        for row in 0..grid.row_edges.len() - 1 {
+            for col in 0..grid.column_edges.len() - 1 {
+                result.cells.push(CellBox {
+                    row,
+                    col,
+                    region: grid.cell(row, col).expect("validated grid shape"),
+                    origin: Origin::DetectedGrid,
+                });
+            }
+        }
+    }
+    for word in words {
+        let Some(region) = word_region(word, width, height) else {
+            continue;
+        };
+        let cell = result.grid.as_ref().and_then(|grid| {
+            let x = (region.left + region.right) / 2.;
+            let y = (region.top + region.bottom) / 2.;
+            Some(CellAddress {
+                row: grid
+                    .row_edges
+                    .windows(2)
+                    .position(|v| v[0] <= y && y <= v[1])?,
+                col: grid
+                    .column_edges
+                    .windows(2)
+                    .position(|v| v[0] <= x && x <= v[1])?,
+            })
+        });
+        result.words.push(WordBox {
+            text: word.text.clone(),
+            region,
+            confidence: Some(word.confidence),
+            line: ordinals.get(&word.group).copied(),
+            cell,
+            origin: Origin::TesseractTsv,
+        });
+    }
+    result
 }
 #[derive(Clone, Copy, Debug)]
 struct Line {
@@ -366,6 +539,9 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
         }
         let mut rows = vec![vec![String::new(); xs.len() - 1]; ys.len() - 1];
         let mut confidences = vec![];
+        let mut table_words = vec![];
+        // ResultIterator TSV is already in logical reading order, including
+        // mixed RTL words/numbers. Never sort cell words by their physical x.
         for word in words {
             let x = word.x + word.w / 2;
             let y = word.y + word.h / 2;
@@ -378,6 +554,7 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
                 }
                 rows[row][col].push_str(&word.text);
                 confidences.push(word.confidence);
+                table_words.push(word);
             }
         }
         out.push(Block {
@@ -394,14 +571,47 @@ pub fn tables(g: &GrayImage, words: &[Word]) -> Vec<Block> {
             } else {
                 confidences.iter().sum::<f32>() / confidences.len() as f32
             }),
+            geometry: Some(observed_geometry(
+                &table_words,
+                g.width(),
+                g.height(),
+                Some(crate::geometry::TableGrid {
+                    row_edges: ys.iter().map(|y| *y as f32 / g.height() as f32).collect(),
+                    column_edges: xs.iter().map(|x| *x as f32 / g.width() as f32).collect(),
+                    origin: crate::geometry::Origin::DetectedGrid,
+                }),
+            )),
             ..Default::default()
         });
     }
     out
 }
+#[derive(Clone, Copy)]
+pub enum PrintedLayout {
+    Automatic,
+    Paragraph,
+    Line,
+}
 pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageContent> {
-    let dir = tempfile::tempdir()?;
-    let mut gray = enhance(im);
+    printed_with_layout(im, s, c, PrintedLayout::Automatic)
+}
+pub fn printed_with_layout(
+    im: &DynamicImage,
+    s: &Settings,
+    c: &Control,
+    layout: PrintedLayout,
+) -> Result<PageContent> {
+    let dir = crate::storage::temporary_dir(c, "notegen-ocr-")?;
+    let within_budget_pool =
+        rayon::current_thread_index().is_some() && rayon::current_num_threads() <= s.cpu_threads;
+    let mut gray = if s.cpu_threads == 0 || within_budget_pool {
+        enhance(im)
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(s.cpu_threads.clamp(1, 512))
+            .build()?
+            .install(|| enhance(im))
+    };
     let original = gray.clone();
     for l in lines(&gray) {
         for y in l.y0.saturating_sub(2)..=(l.y1 + 2).min(gray.height() - 1) {
@@ -412,19 +622,35 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
     }
     let path = dir.path().join("ocr.png");
     gray.save(&path)?;
-    let (ok, text, _) = run(
+    if !s.tessdata_dir.as_os_str().is_empty() {
+        crate::languages::verify_selection(&s.tessdata_dir, &s.languages, c)?;
+    }
+    let (ok, text, _) = run_with_threads(
         &s.tesseract,
-        &[
-            path.to_string_lossy().into(),
-            "stdout".into(),
-            "-l".into(),
-            s.languages.clone(),
-            "--psm".into(),
-            "3".into(),
-            "tsv".into(),
-        ],
+        &ocr_args(
+            &[
+                path.to_string_lossy().into(),
+                "stdout".into(),
+                "-l".into(),
+                s.languages.clone(),
+                "--psm".into(),
+                match layout {
+                    PrintedLayout::Automatic => "3",
+                    PrintedLayout::Paragraph => "6",
+                    PrintedLayout::Line => "7",
+                }
+                .into(),
+                "tsv".into(),
+            ],
+            s,
+        ),
         Duration::from_secs(90),
         c,
+        if s.cpu_threads == 0 {
+            4
+        } else {
+            s.cpu_threads.min(4)
+        },
     )?;
     anyhow::ensure!(
         ok,
@@ -433,12 +659,16 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
             "Tesseract failed; check executable and language data"
         )
     );
-    let words = parse_tsv(&text);
-    let mut blocks = tables(&original, &words);
+    let words = checked_words(&text, im.width(), im.height())?;
+    Ok(assemble_printed(&original, &words))
+}
+fn assemble_printed(original: &GrayImage, words: &[Word]) -> PageContent {
+    let (width, height) = original.dimensions();
+    let mut blocks = tables(original, words);
     let mut groups: BTreeMap<(u32, u32), Vec<&Word>> = BTreeMap::new();
-    for w in &words {
-        let x = (w.x + w.w / 2) as f32 / im.width() as f32;
-        let y = (w.y + w.h / 2) as f32 / im.height() as f32;
+    for w in words {
+        let x = (w.x + w.w / 2) as f32 / width as f32;
+        let y = (w.y + w.h / 2) as f32 / height as f32;
         if blocks.iter().any(|b| {
             b.bbox
                 .as_ref()
@@ -449,6 +679,8 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
         groups.entry((w.group.0, w.group.1)).or_default().push(w);
     }
     for group in groups.values() {
+        // Native logical order, not visual x order: sorting reverses RTL words
+        // and can scramble otherwise LTR numeric runs inside an RTL paragraph.
         let text = group
             .iter()
             .map(|w| w.text.as_str())
@@ -462,16 +694,17 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
             kind: "text".into(),
             text,
             bbox: Some(BoxRect {
-                left: x as f32 / im.width() as f32,
-                top: y as f32 / im.height() as f32,
-                right: (r as f32 / im.width() as f32).min(1.),
-                bottom: (b as f32 / im.height() as f32).min(1.),
+                left: x as f32 / width as f32,
+                top: y as f32 / height as f32,
+                right: (r as f32 / width as f32).min(1.),
+                bottom: (b as f32 / height as f32).min(1.),
             }),
             confidence: Some(group.iter().map(|w| w.confidence).sum::<f32>() / group.len() as f32),
+            geometry: Some(observed_geometry(group, width, height, None)),
             ..Default::default()
         });
     }
-    blocks.extend(graphics(&original, &words, &blocks));
+    blocks.extend(graphics(original, words, &blocks));
     blocks.sort_by(|a, b| {
         a.bbox
             .as_ref()
@@ -489,41 +722,84 @@ pub fn printed(im: &DynamicImage, s: &Settings, c: &Control) -> Result<PageConte
             .push("No printed text recognized; AI or manual transcription is required.".into());
     }
     result.summary = result.plain().chars().take(2000).collect();
-    Ok(result)
+    result
+}
+pub struct OrientationResult {
+    pub image: DynamicImage,
+    pub detection: crate::language_routing::ScriptObservation,
+}
+/// Detect on the supplied (already masked, when applicable) raster. Never rotates.
+pub fn detect_script(
+    im: &DynamicImage,
+    s: &Settings,
+    c: &Control,
+) -> Result<crate::language_routing::ScriptObservation> {
+    detect_script_with_timeout(im, s, c, Duration::from_secs(20))
+}
+pub fn detect_script_with_timeout(
+    im: &DynamicImage,
+    s: &Settings,
+    c: &Control,
+    timeout: Duration,
+) -> Result<crate::language_routing::ScriptObservation> {
+    anyhow::ensure!(
+        !timeout.is_zero() && timeout <= Duration::from_secs(20),
+        Fault::new("NG110", "Invalid script detection time budget")
+    );
+    let d = crate::storage::temporary_dir(c, "notegen-script-")?;
+    let p = d.path().join("osd.png");
+    im.thumbnail(1800, 1800).save(&p)?;
+    let r = run_with_threads(
+        &s.tesseract,
+        &ocr_args(
+            &[
+                p.to_string_lossy().into(),
+                "stdout".into(),
+                "-l".into(),
+                "osd".into(),
+                "--psm".into(),
+                "0".into(),
+            ],
+            s,
+        ),
+        timeout,
+        c,
+        if s.cpu_threads == 0 {
+            4
+        } else {
+            s.cpu_threads.min(4)
+        },
+    );
+    c.check()?;
+    if let Ok((true, text, _)) = r {
+        return Ok(crate::language_routing::parse_osd(&text)
+            .unwrap_or_else(|_| crate::language_routing::ScriptObservation::unavailable()));
+    }
+    Ok(crate::language_routing::ScriptObservation::unavailable())
+}
+pub fn orient_with_detection(
+    im: DynamicImage,
+    s: &Settings,
+    c: &Control,
+) -> Result<OrientationResult> {
+    let detection = detect_script(&im, s, c)?;
+    let image = if s.auto_rotate {
+        match detection.rotate_degrees {
+            90 => im.rotate90(),
+            180 => im.rotate180(),
+            270 => im.rotate270(),
+            _ => im,
+        }
+    } else {
+        im
+    };
+    Ok(OrientationResult { image, detection })
 }
 pub fn orient(im: DynamicImage, s: &Settings, c: &Control) -> Result<DynamicImage> {
     if !s.auto_rotate {
         return Ok(im);
     }
-    let d = tempfile::tempdir()?;
-    let p = d.path().join("osd.png");
-    im.thumbnail(1800, 1800).save(&p)?;
-    let r = run(
-        &s.tesseract,
-        &[
-            p.to_string_lossy().into(),
-            "stdout".into(),
-            "--psm".into(),
-            "0".into(),
-        ],
-        Duration::from_secs(20),
-        c,
-    );
-    if let Ok((true, text, _)) = r {
-        let angle = text
-            .lines()
-            .find_map(|l| l.strip_prefix("Rotate: "))
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .unwrap_or(0);
-        return Ok(match angle {
-            90 => im.rotate90(),
-            180 => im.rotate180(),
-            270 => im.rotate270(),
-            _ => im,
-        });
-    }
-    c.check()?;
-    Ok(im)
+    Ok(orient_with_detection(im, s, c)?.image)
 }
 pub fn crop_regions(
     content: &PageContent,
@@ -751,4 +1027,78 @@ pub fn graphics(source: &GrayImage, words: &[Word], blocks: &[Block]) -> Vec<Blo
         }
     }
     out
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    const HEADER: &str = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n";
+    #[test]
+    fn rtl_tsv_logical_words_and_mixed_numbers_stay_in_order_in_paragraphs_and_cells() {
+        let tsv = format!(
+            "{HEADER}5\t1\t1\t1\t1\t1\t145\t30\t30\t15\t99\tשלום\n5\t1\t1\t1\t1\t2\t95\t30\t35\t15\t99\t1250.50\n5\t1\t1\t1\t1\t3\t30\t30\t40\t15\t99\tעולם\n"
+        );
+        let words = checked_words(&tsv, 420, 220).unwrap();
+        let blank = GrayImage::from_pixel(420, 220, Luma([255]));
+        let paragraph = assemble_printed(&blank, &words);
+        assert_eq!(paragraph.blocks[0].text, "שלום 1250.50 עולם");
+        let precision = paragraph.blocks[0].geometry.as_ref().unwrap();
+        assert_eq!(precision.words[0].text, "שלום");
+        assert!(precision.words[0].region.left > precision.words[2].region.left);
+        let mut grid = blank;
+        for y in [10, 100, 200] {
+            for x in 10..=400 {
+                grid.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for x in [10, 200, 400] {
+            for y in 10..=200 {
+                grid.put_pixel(x, y, Luma([0]));
+            }
+        }
+        let cells = tables(&grid, &words);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].rows[0][0], "שלום 1250.50 עולם");
+        assert_eq!(cells[0].rows[0][1], "");
+        assert_eq!(cells[0].geometry.as_ref().unwrap().words[1].text, "1250.50");
+    }
+    #[test]
+    fn native_tsv_keeps_actual_word_line_geometry_and_rejects_corrupt_precision() {
+        let text = format!(
+            "{HEADER}5\t1\t2\t3\t4\t1\t10\t20\t30\t40\t92.5\t1250\n5\t1\t2\t3\t4\t2\t50\t20\t20\t40\t40\tword\n"
+        );
+        let words = checked_words(&text, 100, 100).unwrap();
+        let refs = words.iter().collect::<Vec<_>>();
+        let data = observed_geometry(&refs, 100, 100, None);
+        assert_eq!(data.words.len(), 2);
+        assert_eq!(data.lines.len(), 1);
+        assert_eq!(data.words[0].text, "1250");
+        assert_eq!(data.words[0].confidence, Some(0.925));
+        assert_eq!(
+            data.words[0].region,
+            BoxRect {
+                left: 0.1,
+                top: 0.2,
+                right: 0.4,
+                bottom: 0.6
+            }
+        );
+        assert_eq!(
+            data.lines[0].shape.bounds(),
+            BoxRect {
+                left: 0.1,
+                top: 0.2,
+                right: 0.7,
+                bottom: 0.6
+            }
+        );
+        for record in [
+            "5\t1\t1\t1\t1\t1\t90\t0\t30\t20\t90\toutside\n",
+            "5\t1\t1\t1\t1\t1\t0\t0\t10\t20\tNaN\tnan\n",
+            "5\t1\t1\t1\t1\t1\t4294967295\t0\t20\t20\t90\toverflow\n",
+        ] {
+            assert!(checked_words(&format!("{HEADER}{record}"), 100, 100).is_err());
+        }
+        assert!(checked_words("not a TSV header\n", 100, 100).is_err());
+    }
 }

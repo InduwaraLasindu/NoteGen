@@ -3,20 +3,24 @@
 param(
  [Parameter(Mandatory)][string]$Payload,
  [Parameter(Mandatory)][string]$Compiler,
- [string]$Version='0.4.1',
+ [string]$Version='0.5.0',
  [string]$Output='dist/installer'
 )
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Use a numeric major.minor.patch version.'}
 $sourceRoot=Split-Path $PSScriptRoot -Parent
 $Payload=(Resolve-Path $Payload).Path
-foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/llama-server.exe','runtime/tesseract/tesseract.exe','assets/model-downloads.json','LICENSE')) {
+foreach($f in @('NoteGen.exe','notegen-cli.exe','runtime/pdfium.dll','runtime/llama-server.exe','runtime/tesseract/tesseract.exe','assets/model-downloads.json','provenance/build-provenance.json','provenance/notegen.cdx.json','provenance/provenance.sha256','LICENSE')) {
  if(-not(Test-Path (Join-Path $Payload $f))){throw "Verified payload is incomplete: $f"}
 }
 # The original package smoke test leaves only synthetic checkpoints. None belong in an installer.
 foreach($p in @('.notegen','package-test.docx','package-scan.docx')) {
- $path=Join-Path $Payload $p
- if(Test-Path $path){Remove-Item $path -Recurse -Force}
+ $path=[IO.Path]::GetFullPath((Join-Path $Payload $p))
+ if(-not $path.StartsWith($Payload+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'QA cleanup target escapes the explicit payload directory'}
+ if(Test-Path -LiteralPath $path){
+  if((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Refusing to clean a linked QA payload path'}
+  Remove-Item -LiteralPath $path -Recurse -Force
+ }
 }
 if(Test-Path (Join-Path $Payload 'models')){throw 'The installer payload must not contain downloaded model weights.'}
 Copy-Item (Join-Path $sourceRoot 'README.md') $Payload -Force

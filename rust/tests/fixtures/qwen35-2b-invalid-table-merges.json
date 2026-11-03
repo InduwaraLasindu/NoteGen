@@ -1,0 +1,74 @@
+{
+  "blocks": [
+    {
+      "box": {
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 1.0,
+        "top": 0.0
+      },
+      "description": "A table with two columns and two rows. The first row contains the headers 'Item' and 'Amount'. The second row contains the value 'Sales' in the first column and '1250' in the second column.",
+      "interpretation": "An accounting table showing sales data.",
+      "kind": "table",
+      "rows": [
+        [
+          "Item",
+          "Amount"
+        ],
+        [
+          "Sales",
+          "1250"
+        ]
+      ],
+      "text": "Item\nAmount\nSales\n1250","uncertain":false,"header_rows":0,"merges":[
+        {
+          "col": 0,
+          "colspan": 2,
+          "row": 0,
+          "rowspan": 1
+        },
+        {
+          "col": 1,
+          "colspan": 2,
+          "row": 0,
+          "rowspan": 1
+        },
+        {
+          "col": 0,
+          "colspan": 2,
+          "row": 1,
+          "rowspan": 1
+        },
+        {
+          "col": 1,
+          "colspan": 2,
+          "row": 1,
+          "rowspan": 1
+        }
+      ]
+    },
+    {
+      "box": {
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 1.0,
+        "top": 0.0
+      },
+      "description": "Text on a separate line stating 'Revenue is 1250 in October.'",
+      "interpretation": "A statement confirming revenue for October.",
+      "kind": "text",
+      "rows": [
+        [
+          "Revenue is 1250 in October."
+        ]
+      ],
+      "text": "Revenue is 1250 in October.",
+      "uncertain":false
+    }
+  ],
+  "summary": "The document contains two distinct sections: an accounting table listing sales data and a text statement confirming October revenue.",
+  "warnings": [
+    "The source text is a scanned image with potential for OCR errors, though the content appears clear.",
+    "The table structure is simple with no complex formatting or merged cells beyond the basic two-column layout."
+  ]
+}

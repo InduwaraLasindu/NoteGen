@@ -1,0 +1,602 @@
+use notegen::{
+    bundles, models, setup,
+    storage::{Control, hash_file},
+    types::*,
+};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::Path,
+    sync::atomic::Ordering,
+};
+
+fn fixture(root: &Path) -> Settings {
+    fs::create_dir_all(root).unwrap();
+    let weights = root.join("weights.gguf");
+    let projector = root.join("projector.gguf");
+    fs::write(&weights, b"GGUFconfirmed fixture weights").unwrap();
+    fs::write(&projector, b"GGUFconfirmed fixture projector").unwrap();
+    let (mut model, _) = setup::pinned("glm-ocr").unwrap();
+    model.id = "fixture-reader".into();
+    model.name = "Offline fixture".into();
+    model.family = "fixture".into();
+    model.revision = "local-fixture-1".into();
+    model.weights = weights;
+    model.projector = projector;
+    let models_dir = root.join("registry");
+    models::save_custom(&models_dir, model, &Control::default()).unwrap();
+    Settings {
+        models_dir,
+        server: root.join("runtime/llama-server.exe"),
+        subject: "PRIVATE DOCUMENT CONTEXT".into(),
+        ..Default::default()
+    }
+}
+fn ids() -> Vec<String> {
+    vec!["fixture-reader".into()]
+}
+fn bundle(s: &Settings, root: &Path) -> std::path::PathBuf {
+    let output = root.join("bundle.zip");
+    bundles::export(s, &ids(), None, &output, &Control::default()).unwrap();
+    output
+}
+fn entries(path: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut zip = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    (0..zip.len())
+        .map(|i| {
+            let mut item = zip.by_index(i).unwrap();
+            let name = item.name().to_string();
+            let mut bytes = vec![];
+            item.read_to_end(&mut bytes).unwrap();
+            (name, bytes)
+        })
+        .collect()
+}
+fn altered(input: &Path, output: &Path, change: impl FnOnce(&mut Vec<(String, Vec<u8>)>)) {
+    let mut all = entries(input);
+    change(&mut all);
+    let mut zip = zip::ZipWriter::new(fs::File::create(output).unwrap());
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in all {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(&bytes).unwrap();
+    }
+    zip.finish().unwrap();
+}
+fn change_inventory(all: &mut [(String, Vec<u8>)], change: impl FnOnce(&mut serde_json::Value)) {
+    let entry = all.iter_mut().find(|(n, _)| n == "inventory.json").unwrap();
+    let mut v = serde_json::from_slice(&entry.1).unwrap();
+    change(&mut v);
+    entry.1 = serde_json::to_vec(&v).unwrap();
+}
+
+#[test]
+fn offline_preview_lists_exact_bytes_hashes_and_excludes_private_settings_paths_and_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let c = Control::default();
+    let preview = bundles::preview(&s, &ids(), None, &c).unwrap();
+    assert_eq!(preview.readers.len(), 1);
+    assert_eq!(preview.files.len(), 2);
+    assert_eq!(
+        preview.total_bytes,
+        preview.files.iter().map(|f| f.bytes).sum::<u64>()
+    );
+    assert!(preview.readers[0].model.weights.as_os_str().is_empty());
+    assert!(preview.readers[0].model.projector.as_os_str().is_empty());
+    assert!(preview.readers[0].model.endpoint.is_none());
+    let output = bundle(&s, dir.path());
+    let contents = entries(&output);
+    let metadata = String::from_utf8(
+        contents
+            .iter()
+            .find(|(n, _)| n == "inventory.json")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    assert!(!metadata.contains("PRIVATE DOCUMENT CONTEXT"));
+    assert!(!metadata.contains("source/registry"));
+    assert_eq!(contents.len(), 3);
+    let checked = bundles::inspect(&output, &c).unwrap();
+    assert_eq!(checked.total_bytes, preview.total_bytes);
+}
+#[test]
+fn validated_import_with_missing_native_runtime_preserves_working_registry_and_retains_pending_candidates()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let source = fixture(&dir.path().join("source"));
+    let input = bundle(&source, dir.path());
+    let mut target = fixture(&dir.path().join("target"));
+    target.shared_model_store = dir.path().join("isolated-store");
+    let active = target.models_dir.join("fixture-reader.notegen.json");
+    let original_active = fs::read(&active).unwrap();
+    let original_bundle = hash_file(&input, &Control::default()).unwrap();
+    let destination = dir.path().join("pending-import");
+    let error = bundles::import_validated(
+        &target,
+        &input,
+        &destination,
+        &Control::default(),
+        &notegen::storage::Activity::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("remains isolated/pending"));
+    assert_eq!(fs::read(active).unwrap(), original_active);
+    assert!(
+        !target
+            .models_dir
+            .join("fixture-reader.previous.json")
+            .exists()
+    );
+    assert_eq!(
+        hash_file(&input, &Control::default()).unwrap(),
+        original_bundle
+    );
+    let payload = destination.join("payload");
+    assert!(
+        payload
+            .join("pending-registry/fixture-reader.notegen.json")
+            .is_file()
+    );
+    assert!(!payload.join("models/fixture-reader.notegen.json").exists());
+    let status: serde_json::Value =
+        notegen::storage::read_json(&payload.join("canary-status.json"), 10_000).unwrap();
+    assert_eq!(status["state"], "pending");
+    let candidates = fs::read_dir(payload.join("models/candidates"))
+        .unwrap()
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    let prepared = models::read_prepared(
+        &candidates[0].path().join("candidate.json"),
+        &Settings {
+            models_dir: payload.join("models"),
+            ..target.clone()
+        },
+        &Control::default(),
+    )
+    .unwrap();
+    assert!(prepared.summary().status.contains("not active"));
+    assert!(
+        bundles::import_validated(
+            &target,
+            &input,
+            &destination,
+            &Control::default(),
+            &notegen::storage::Activity::default()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(target.models_dir.join("fixture-reader.notegen.json")).unwrap(),
+        original_active
+    );
+}
+#[test]
+fn valid_registration_metadata_is_bounded_before_preview_or_bundle_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = fixture(&dir.path().join("source"));
+    let template = notegen::runtime::inventory(&settings.models_dir)
+        .unwrap()
+        .remove(0);
+    let mut selected = vec![];
+    for index in 0..20 {
+        let mut model = template.clone();
+        model.id = format!("metadata-reader-{index}");
+        model.source = "s".repeat(60_000);
+        models::validate_model(&model).unwrap();
+        models::save_custom(&settings.models_dir, model.clone(), &Control::default()).unwrap();
+        assert!(
+            fs::metadata(
+                settings
+                    .models_dir
+                    .join(format!("{}.notegen.json", model.id))
+            )
+            .unwrap()
+            .len()
+                < 100_000
+        );
+        selected.push(model.id);
+    }
+    // A supported subset round-trips without discarding any valid registration metadata.
+    let supported = dir.path().join("supported.zip");
+    bundles::export(
+        &settings,
+        &selected[..10],
+        None,
+        &supported,
+        &Control::default(),
+    )
+    .unwrap();
+    let inspected = bundles::inspect(&supported, &Control::default()).unwrap();
+    assert_eq!(inspected.readers.len(), 10);
+    assert!(
+        inspected
+            .readers
+            .iter()
+            .all(|reader| reader.model.source.len() == 60_000)
+    );
+    // Every descriptor is individually valid, but the combined canonical manifest exceeds1MB.
+    let error = bundles::preview(&settings, &selected, None, &Control::default()).unwrap_err();
+    assert!(error.to_string().contains("inventory exceeds 1 MB"));
+    let too_large = dir.path().join("too-large.zip");
+    assert!(bundles::export(&settings, &selected, None, &too_large, &Control::default()).is_err());
+    assert!(!too_large.exists());
+    assert!(bundles::inspect(&supported, &Control::default()).is_ok());
+}
+#[test]
+fn offline_import_isolated_registry_activates_only_via_returned_settings_and_keeps_old_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = fixture(&dir.path().join("source"));
+    let original = fixture(&dir.path().join("destination-original"));
+    let c = Control::default();
+    let output = bundle(&source, dir.path());
+    let old_descriptor = original.models_dir.join("fixture-reader.notegen.json");
+    let before = fs::read(&old_descriptor).unwrap();
+    let destination = dir.path().join("imported");
+    let next = bundles::import(&original, &output, &destination, &c).unwrap();
+    assert_eq!(fs::read(&old_descriptor).unwrap(), before);
+    assert_ne!(next.models_dir, original.models_dir);
+    assert_eq!(next.server, original.server);
+    let models = notegen::runtime::inventory(&next.models_dir).unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].revision, "local-fixture-1");
+    assert!(models[0].weights.starts_with(&destination));
+    assert!(
+        next.models_dir
+            .join("fixture-reader.previous.json")
+            .is_file()
+    );
+    assert_eq!(
+        hash_file(&models[0].weights, &c).unwrap(),
+        bundles::inspect(&output, &c)
+            .unwrap()
+            .files
+            .iter()
+            .find(|f| f.path.ends_with(".gguf")
+                && f.bytes == models[0].weights.metadata().unwrap().len())
+            .unwrap()
+            .sha256
+    );
+}
+#[test]
+fn repeated_objects_are_stored_once_and_nontransferred_existing_readers_are_retained() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let c = Control::default();
+    let mut model = notegen::runtime::inventory(&s.models_dir)
+        .unwrap()
+        .remove(0);
+    model.id = "another-reader".into();
+    model.projector = model.weights.clone();
+    models::save_custom(&s.models_dir, model, &c).unwrap();
+    let only_other = vec!["another-reader".into()];
+    let preview = bundles::preview(&s, &only_other, None, &c).unwrap();
+    assert_eq!(preview.files.len(), 1);
+    let output = dir.path().join("dedup.zip");
+    bundles::export(&s, &only_other, None, &output, &c).unwrap();
+    let next = bundles::import(&s, &output, &dir.path().join("dedup-import"), &c).unwrap();
+    let models = notegen::runtime::inventory(&next.models_dir).unwrap();
+    assert_eq!(models.len(), 2);
+    assert!(models.iter().any(|m| m.id == "fixture-reader"));
+}
+#[test]
+fn altered_checksums_fail_transactionally_and_existing_output_or_destination_is_never_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let output = bundle(&s, dir.path());
+    let c = Control::default();
+    let old = fs::read(&output).unwrap();
+    assert!(bundles::export(&s, &ids(), None, &output, &c).is_err());
+    assert_eq!(fs::read(&output).unwrap(), old);
+    let bad = dir.path().join("corrupt.zip");
+    altered(&output, &bad, |all| {
+        all.iter_mut()
+            .find(|(n, _)| n.ends_with(".gguf"))
+            .unwrap()
+            .1[4] ^= 1;
+    });
+    let active = fs::read(s.models_dir.join("fixture-reader.notegen.json")).unwrap();
+    let destination = dir.path().join("bad-import");
+    assert!(bundles::import(&s, &bad, &destination, &c).is_err());
+    assert!(!destination.exists());
+    assert!(bundles::inspect(&bad, &c).is_err());
+    assert_eq!(
+        fs::read(s.models_dir.join("fixture-reader.notegen.json")).unwrap(),
+        active
+    );
+    let existing = dir.path().join("exists");
+    fs::create_dir(&existing).unwrap();
+    fs::write(existing.join("keep.txt"), b"keep").unwrap();
+    assert!(bundles::import(&s, &output, &existing, &c).is_err());
+    assert_eq!(fs::read(existing.join("keep.txt")).unwrap(), b"keep");
+}
+#[test]
+fn bundle_parser_rejects_traversal_duplicate_entries_extra_content_and_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let output = bundle(&s, dir.path());
+    let c = Control::default();
+    for (i, name) in [
+        "../escape.dll",
+        "objects/../../escape.dll",
+        "C:/escape.dll",
+        "objects\\escape.dll",
+        "extra.txt",
+        "INVENTORY.JSON",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let bad = dir.path().join(format!("unsafe-{i}.zip"));
+        altered(&output, &bad, |all| {
+            all.push((name.to_string(), b"bad".to_vec()))
+        });
+        assert!(bundles::inspect(&bad, &c).is_err(), "accepted {name}");
+        assert!(
+            bundles::import(&s, &bad, &dir.path().join(format!("unsafe-import-{i}")), &c).is_err()
+        );
+    }
+    let bad = dir.path().join("symlink.zip");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&bad).unwrap());
+    for (name, bytes) in entries(&output) {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&bytes).unwrap();
+    }
+    zip.add_symlink(
+        "objects/link.gguf",
+        "../outside",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.finish().unwrap();
+    assert!(bundles::inspect(&bad, &c).is_err());
+    assert!(!dir.path().join("escape.dll").exists());
+}
+#[test]
+fn oversized_manifest_unpinned_runtime_and_private_endpoint_metadata_are_rejected_before_extraction()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let output = bundle(&s, dir.path());
+    let c = Control::default();
+    for kind in 0..4 {
+        let bad = dir.path().join(format!("metadata-{kind}.zip"));
+        altered(&output, &bad, |all| {
+            change_inventory(all, |v| match kind {
+                0 => {
+                    v["files"][0]["bytes"] = serde_json::json!(100_000_000_001u64);
+                }
+                1 => {
+                    v["readers"][0]["model"]["endpoint"] =
+                        serde_json::json!("http://127.0.0.1:1234");
+                    v["readers"][0]["model"]["alias"] = serde_json::json!("secret endpoint");
+                }
+                2 => {
+                    v["runtime"] = serde_json::json!({"backend":"cpu","build":"b1","archives":[]});
+                }
+                _ => {
+                    v["files"][0]["path"] = serde_json::json!("objects/../escape.gguf");
+                }
+            })
+        });
+        assert!(bundles::inspect(&bad, &c).is_err());
+        let destination = dir.path().join(format!("bad-meta-{kind}"));
+        assert!(bundles::import(&s, &bad, &destination, &c).is_err());
+        assert!(!destination.exists());
+    }
+}
+#[test]
+fn cancellation_and_changed_registered_models_preserve_all_active_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let output = bundle(&s, dir.path());
+    let c = Control::default();
+    c.cancelled.store(true, Ordering::Relaxed);
+    assert!(bundles::preview(&s, &ids(), None, &c).is_err());
+    assert!(bundles::inspect(&output, &c).is_err());
+    let destination = dir.path().join("cancelled");
+    assert!(bundles::import(&s, &output, &destination, &c).is_err());
+    assert!(!destination.exists());
+    let model = notegen::runtime::inventory(&s.models_dir)
+        .unwrap()
+        .remove(0);
+    fs::write(&model.weights, b"GGUFtampered weights").unwrap();
+    assert!(bundles::preview(&s, &ids(), None, &Control::default()).is_err());
+    assert!(!dir.path().join("no-output.zip").exists());
+}
+#[test]
+fn preflight_counts_pinned_remaining_bytes_and_cards_do_not_invent_license_or_languages() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let c = Control::default();
+    let (_, pin) = setup::pinned("glm-ocr").unwrap();
+    let check = bundles::preflight(&s, &["glm-ocr".into()], Some("cpu"), &c).unwrap();
+    assert!(check.selected_bytes > pin.weights.bytes + pin.projector.bytes);
+    assert_eq!(check.verified_reusable_bytes, 0);
+    assert_eq!(check.remaining_download_bytes, check.selected_bytes);
+    assert!(check.runtime_expansion_is_upper_bound);
+    assert!(check.additional_disk_bytes >= check.remaining_download_bytes + 4_000_000_000);
+    let cards = bundles::capability_cards().unwrap();
+    assert_eq!(cards.len(), notegen::planning::catalog().len());
+    for card in cards {
+        assert_eq!(card.pinned_revision.len(), 40);
+        assert!(card.tested_languages.is_empty());
+        assert!(card.license.contains("Publisher model declaration:"));
+        assert!(card.source.starts_with("https://"));
+        assert!(card.download_bytes > 0);
+    }
+    assert!(bundles::preview(&s, &ids(), Some("unsupported"), &c).is_err());
+    assert!(bundles::preview(&s, &[], None, &c).is_err());
+}
+
+#[test]
+fn packaged_capability_cards_separate_primary_sources_conversions_estimates_and_unmeasured_claims()
+{
+    use bundles::{CapabilitySourceKind as S, LicenseScope as L, MemoryEstimateBasis as M};
+    let cards = bundles::capability_cards().unwrap();
+    for card in &cards {
+        let (model, pin) = setup::pinned(&card.id).unwrap();
+        assert_eq!(card.provenance.conversion_repository, pin.repository);
+        assert_eq!(card.provenance.conversion_revision, pin.revision);
+        assert_eq!(card.provenance.upstream_documentation_revision.len(), 40);
+        assert!(
+            card.provenance.upstream_weights_revision.is_none(),
+            "a documentation snapshot must not invent the converter's base commit"
+        );
+        assert_ne!(
+            card.provenance.upstream_publisher_account,
+            card.provenance.conversion_repository_owner
+        );
+        assert_eq!(card.assets.len(), 2);
+        for (role, asset) in [("weights", &pin.weights), ("projector", &pin.projector)] {
+            let actual = card.assets.iter().find(|a| a.role == role).unwrap();
+            assert_eq!(actual.file, asset.file);
+            assert_eq!(actual.bytes, asset.bytes);
+            assert_eq!(actual.sha256, asset.sha256);
+            assert_eq!(
+                actual.immutable_url,
+                format!(
+                    "https://huggingface.co/{}/resolve/{}/{}",
+                    pin.repository, pin.revision, asset.file
+                )
+            );
+        }
+        assert_eq!(card.download_bytes, pin.weights.bytes + pin.projector.bytes);
+        assert_eq!(card.memory_estimate.basis, M::PlanningCatalogEstimate);
+        assert_eq!(card.memory_estimate.resident_mib, model.resident_mib);
+        assert_eq!(
+            card.estimated_resident_mib,
+            card.memory_estimate.resident_mib
+        );
+        assert!(card.memory_estimate.measured_peak_mib.is_none());
+        assert!(card.tested_languages.is_empty());
+        assert!(!card.publisher_claims.is_empty());
+        assert!(!card.task_protocols.is_empty());
+        assert!(
+            card.task_protocols.iter().all(|p| p.adapter == model.prompt
+                && p.evidence_note.contains("not a measured accuracy"))
+        );
+        assert!(card.sources.iter().any(|s| s.kind == S::PublisherModelCard));
+        assert!(
+            card.sources
+                .iter()
+                .any(|s| s.kind == S::ConversionModelCard)
+        );
+        for source in &card.sources {
+            assert_eq!(source.sha256.len(), 64);
+            assert!(source.bytes > 0);
+            assert!(source.url.contains(&format!("/raw/{}/", source.revision)));
+            assert!(!source.url.contains("/main/"));
+        }
+        let license = card
+            .license_declarations
+            .iter()
+            .find(|l| l.scope == L::PublisherModel)
+            .unwrap();
+        if card.id.starts_with("qwen") {
+            assert_eq!(license.declared_identifier.as_deref(), Some("apache-2.0"));
+            assert!(license.separate_license_file_available);
+            assert!(
+                card.sources
+                    .iter()
+                    .any(|s| s.kind == S::PublisherLicenseFile
+                        && s.sha256
+                            == "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a")
+            );
+        }
+    }
+    let glm = cards.iter().find(|c| c.id == "glm-ocr").unwrap();
+    assert_eq!(glm.provenance.upstream_repository, "zai-org/GLM-OCR");
+    assert_eq!(glm.download_repository, "ggml-org/GLM-OCR-GGUF");
+    assert_eq!(
+        glm.license_declarations
+            .iter()
+            .find(|l| l.scope == L::PublisherModel)
+            .unwrap()
+            .declared_identifier
+            .as_deref(),
+        Some("mit")
+    );
+    assert!(
+        glm.license_declarations
+            .iter()
+            .find(|l| l.scope == L::ConversionModel)
+            .unwrap()
+            .declared_identifier
+            .is_none()
+    );
+    assert_eq!(
+        glm.publisher_declared_languages,
+        vec!["zh", "en", "fr", "es", "ru", "de", "ja", "ko"]
+    );
+    assert_eq!(
+        glm.task_protocols
+            .iter()
+            .map(|p| p.request.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Text Recognition:", "Table Recognition:"]
+    );
+    assert!(glm.publisher_claims.iter().any(|s| s.contains("formula")));
+    assert!(!glm.tasks.iter().any(|s| s.contains("formula")));
+    let light1 = cards.iter().find(|c| c.id == "lighton3-1b").unwrap();
+    let light4 = cards.iter().find(|c| c.id == "lighton3-4b").unwrap();
+    assert!(
+        light1
+            .publisher_claims
+            .iter()
+            .any(|s| s.contains("handwriting"))
+    );
+    assert!(
+        !light4
+            .publisher_claims
+            .iter()
+            .any(|s| s.contains("handwriting"))
+    );
+    assert_eq!(light1.task_protocols[0].request, "grounding");
+    assert!(light1.publisher_declared_languages.is_empty());
+    assert!(!light1.license_declarations[0].separate_license_file_available);
+    assert!(
+        cards
+            .iter()
+            .find(|c| c.id == "qwen35-2b")
+            .unwrap()
+            .publisher_claims
+            .iter()
+            .any(|s| s.contains("201"))
+    );
+    assert!(
+        cards
+            .iter()
+            .find(|c| c.id == "qwen38-27b")
+            .unwrap()
+            .publisher_claims
+            .iter()
+            .all(|s| !s.contains("201"))
+    );
+    let again = bundles::capability_cards().unwrap();
+    assert_eq!(
+        serde_json::to_vec(&cards).unwrap(),
+        serde_json::to_vec(&again).unwrap()
+    );
+}
+#[cfg(unix)]
+#[test]
+fn source_and_destination_symlinks_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = fixture(&dir.path().join("source"));
+    let output = bundle(&s, dir.path());
+    let c = Control::default();
+    let link = dir.path().join("bundle-link.zip");
+    std::os::unix::fs::symlink(&output, &link).unwrap();
+    assert!(bundles::inspect(&link, &c).is_err());
+    let target = dir.path().join("actual");
+    fs::create_dir(&target).unwrap();
+    let link = dir.path().join("linked-dir");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(bundles::import(&s, &output, &link.join("new"), &c).is_err());
+}

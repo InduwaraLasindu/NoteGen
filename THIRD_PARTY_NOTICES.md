@@ -8,6 +8,7 @@ setup preserves upstream notices. Models are separate downloads.
 | Component | Purpose / source |
 |---|---|
 | egui / eframe | Rust GUI · MIT / Apache-2.0 · https://github.com/emilk/egui |
+| AccessKit | Native accessibility bridge · MIT / Apache-2.0 · https://github.com/AccessKit/accesskit |
 | wgpu | GPU rendering · MIT / Apache-2.0 · https://github.com/gfx-rs/wgpu |
 | PDFium | PDF rendering · BSD-style plus third-party terms · https://pdfium.googlesource.com/pdfium/ |
 | pdfium-render | Rust bindings · MIT / Apache-2.0 · https://github.com/ajrcarey/pdfium-render |

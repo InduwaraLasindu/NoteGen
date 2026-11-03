@@ -19,18 +19,98 @@ pub type Clarifier =
 pub struct Control {
     pub cancelled: Arc<AtomicBool>,
     pub paused: Arc<AtomicBool>,
+    /// Scheduling request, observed only after an explicitly durable stage.
+    pub yield_requested: Arc<AtomicBool>,
     pub clarify: Option<Clarifier>,
+    pub downloads: Option<crate::downloads::Manager>,
+    pub transfer_cancelled: Option<Arc<AtomicBool>>,
+    /// Ephemeral, already-private workspace directory. Never persisted in settings.
+    pub private_temp_root: Option<PathBuf>,
 }
-impl Control {
-    pub fn check(&self) -> Result<()> {
-        while self.paused.load(Ordering::Relaxed) && !self.cancelled.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(50));
-        }
+fn checked_temp_root(c: &Control) -> Result<Option<&Path>> {
+    c.check()?;
+    if let Some(root) = &c.private_temp_root {
+        crate::watch::no_links(root)?;
         anyhow::ensure!(
-            !self.cancelled.load(Ordering::Relaxed),
+            fs::metadata(root)?.is_dir(),
+            Fault::new(
+                "NG682",
+                "Private temporary storage is unavailable; no global temporary fallback was used"
+            )
+        );
+        Ok(Some(root))
+    } else {
+        Ok(None)
+    }
+}
+pub fn temporary_dir(c: &Control, prefix: &str) -> Result<tempfile::TempDir> {
+    anyhow::ensure!(
+        !prefix.is_empty()
+            && prefix.len() <= 64
+            && prefix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+        Fault::new("NG682", "Invalid temporary workspace prefix")
+    );
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    Ok(if let Some(root) = checked_temp_root(c)? {
+        builder.tempdir_in(root)?
+    } else {
+        builder.tempdir()?
+    })
+}
+pub fn temporary_file(c: &Control) -> Result<fs::File> {
+    Ok(if let Some(root) = checked_temp_root(c)? {
+        tempfile::tempfile_in(root)?
+    } else {
+        tempfile::tempfile()?
+    })
+}
+/// Override native-child temporary storage without changing the parent process environment.
+pub fn configure_temporary_environment(
+    command: &mut std::process::Command,
+    c: &Control,
+) -> Result<()> {
+    if let Some(root) = checked_temp_root(c)? {
+        command
+            .env("TEMP", root)
+            .env("TMP", root)
+            .env("TMPDIR", root);
+    }
+    Ok(())
+}
+
+impl Control {
+    /// Call only after a checkpoint is fully published. Ordinary checks never
+    /// interrupt a request merely because a higher priority job arrived.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.check()?;
+        anyhow::ensure!(
+            !self.yield_requested.load(Ordering::Acquire),
+            Fault::new("NG901", "Yielded after a saved stage for urgent work")
+        );
+        Ok(())
+    }
+    /// A nonblocking cancellation check for open HTTP responses. Pausing a
+    /// transfer must drop its response before waiting, rather than hold a socket.
+    pub fn check_cancelled(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.cancelled.load(Ordering::Relaxed)
+                && !self
+                    .transfer_cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed)),
             Fault::new("NG900", "Cancelled; completed work is preserved")
         );
         Ok(())
+    }
+    pub fn check(&self) -> Result<()> {
+        while self.paused.load(Ordering::Relaxed) {
+            self.check_cancelled()?;
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.check_cancelled()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,17 +249,35 @@ pub fn hash_file(path: &Path, c: &Control) -> Result<String> {
     }
     Ok(hex::encode(h.finalize()))
 }
-pub fn fingerprint<T: Serialize>(value: &T) -> Result<String> {
+pub fn fingerprint<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
 }
 pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let parent = path.parent().unwrap_or(Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let mut f = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer_pretty(&mut f, value)?;
     f.flush()?;
     f.as_file().sync_all()?;
     f.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+/// Create a new JSON artifact without a race that could replace an existing file.
+pub fn protected_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut file, value)?;
+    file.flush()?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path)
+        .map_err(|_| Fault::new("NG401", "Output exists or its folder is unavailable"))?;
     Ok(())
 }
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
@@ -213,6 +311,7 @@ pub struct Project {
 impl Project {
     pub fn open(root: PathBuf, manifest: Manifest) -> Result<Self> {
         fs::create_dir_all(&root)?;
+        crate::migrations::recover(&root, &Control::default())?;
         let p = root.join("project.json");
         if p.exists() {
             let old: Manifest = read_json(&p, 1_000_000)?;
@@ -229,6 +328,7 @@ impl Project {
         Ok(Self { root, manifest })
     }
     pub fn read(root: PathBuf) -> Result<Self> {
+        crate::migrations::recover(&root, &Control::default())?;
         let m: Manifest = read_json(&root.join("project.json"), 1_000_000)?;
         anyhow::ensure!(
             m.schema == 2,
@@ -245,7 +345,9 @@ impl Project {
             Fault::new("NG500", "Invalid project page list")
         );
         m.settings.validate()?;
-        Ok(Self { root, manifest: m })
+        let project = Self { root, manifest: m };
+        crate::review::recover(&project)?;
+        Ok(project)
     }
     pub fn image(&self, n: usize) -> PathBuf {
         self.root.join(format!("page-{n:05}.png"))
@@ -254,6 +356,7 @@ impl Project {
         self.root.join(format!("page-{n:05}.json"))
     }
     pub fn load(&self, n: usize) -> Result<Page> {
+        self.ensure_current()?;
         let manual = self.root.join(format!("page-{n:05}.edits.json"));
         let path = if manual.is_file() {
             manual
@@ -265,20 +368,117 @@ impl Project {
             p.page == n && p.image == format!("page-{n:05}.png"),
             Fault::new("NG500", "Checkpoint page or source path mismatch")
         );
-        p.content.validate()?;
+        p.validate()?;
         Ok(p)
     }
     pub fn save(&self, p: &Page) -> Result<()> {
+        self.ensure_current()?;
         anyhow::ensure!(
             self.manifest.pages.contains(&p.page) && p.image == format!("page-{:05}.png", p.page),
             Fault::new("NG500", "Checkpoint page or source path mismatch")
         );
-        p.content.validate()?;
+        p.validate()?;
         let path = if p.edited || p.reviewed {
             self.root.join(format!("page-{:05}.edits.json", p.page))
         } else {
             self.page_path(p.page)
         };
         atomic_json(&path, p)
+    }
+    pub fn ensure_current(&self) -> Result<()> {
+        crate::migrations::ensure_readable(&self.root)?;
+        let current: Manifest = read_json(&self.root.join("project.json"), 1_000_000)?;
+        anyhow::ensure!(
+            current.schema == self.manifest.schema
+                && current.input_sha256 == self.manifest.input_sha256
+                && current.fingerprint == self.manifest.fingerprint
+                && current.pages == self.manifest.pages
+                && current.models == self.manifest.models,
+            Fault::new(
+                "NG500",
+                "Project layout or identity changed; reopen before reading or saving"
+            )
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod private_temp_tests {
+    use super::*;
+    #[test]
+    fn urgent_work_is_observed_only_at_a_durable_boundary_and_cancel_wins() {
+        let control = Control::default();
+        control.yield_requested.store(true, Ordering::Release);
+        control.check().unwrap();
+        assert_eq!(
+            control
+                .checkpoint()
+                .unwrap_err()
+                .downcast_ref::<Fault>()
+                .unwrap()
+                .code,
+            "NG901"
+        );
+        control.cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(
+            control
+                .checkpoint()
+                .unwrap_err()
+                .downcast_ref::<Fault>()
+                .unwrap()
+                .code,
+            "NG900"
+        );
+        assert!(!Control::default().yield_requested.load(Ordering::Acquire));
+    }
+    #[test]
+    fn temporary_artifacts_and_child_environment_stay_under_the_selected_private_root() {
+        let root = tempfile::tempdir().unwrap();
+        let control = Control {
+            private_temp_root: Some(root.path().into()),
+            ..Default::default()
+        };
+        let directory = temporary_dir(&control, "notegen-private-").unwrap();
+        assert_eq!(directory.path().parent(), Some(root.path()));
+        let mut file = temporary_file(&control).unwrap();
+        file.write_all(b"private stdout").unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 14);
+        let previous = std::env::var_os("TEMP");
+        let mut command = std::process::Command::new("unused-native-command");
+        configure_temporary_environment(&mut command, &control).unwrap();
+        for name in ["TEMP", "TMP", "TMPDIR"] {
+            let value = command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .unwrap();
+            assert_eq!(Path::new(value), root.path());
+        }
+        assert_eq!(std::env::var_os("TEMP"), previous);
+    }
+    #[test]
+    fn missing_cancelled_or_invalid_private_temp_requests_never_fall_back() {
+        let root = tempfile::tempdir().unwrap();
+        let control = Control {
+            private_temp_root: Some(root.path().join("missing")),
+            ..Default::default()
+        };
+        assert!(temporary_dir(&control, "private-").is_err());
+        assert!(temporary_file(&control).is_err());
+        assert!(
+            configure_temporary_environment(&mut std::process::Command::new("unused"), &control)
+                .is_err()
+        );
+        assert!(!root.path().join("missing").exists());
+        let control = Control {
+            private_temp_root: Some(root.path().into()),
+            ..Default::default()
+        };
+        assert!(temporary_dir(&control, "../outside").is_err());
+        control.cancelled.store(true, Ordering::Relaxed);
+        assert!(temporary_dir(&control, "private-").is_err());
+        assert!(temporary_file(&control).is_err());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

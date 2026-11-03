@@ -12,6 +12,24 @@ pub fn normalize(s: &str) -> String {
 pub fn similarity(a: &str, b: &str) -> f64 {
     strsim::normalized_levenshtein(&normalize(a), &normalize(b))
 }
+fn content_similarity(a: &PageContent, b: &PageContent) -> f64 {
+    if a.blocks
+        .iter()
+        .chain(&b.blocks)
+        .any(|block| block.kind == "code")
+    {
+        strsim::normalized_levenshtein(&a.plain(), &b.plain())
+    } else {
+        similarity(&a.plain(), &b.plain())
+    }
+}
+fn code_readings(page: &PageContent) -> Vec<&str> {
+    page.blocks
+        .iter()
+        .filter(|block| block.kind == "code")
+        .map(|block| block.text.as_str())
+        .collect()
+}
 
 pub fn overlap(a: &BoxRect, b: &BoxRect) -> f32 {
     let intersection = (a.right.min(b.right) - a.left.max(b.left)).max(0.)
@@ -82,6 +100,10 @@ pub fn refine_regions(page: &mut Page, s: &Settings) {
         if text.len() < block.plain().len() / 3 || text.len() > block.plain().len().max(20) * 4 {
             continue;
         }
+        // Agreement measures matching readings, not whether a reader's layout
+        // or legibility concern has been resolved. Table replacement below must
+        // retain both the original concern and uncertainty in the selected crop.
+        let prior_uncertain = block.uncertain;
         block.alternatives = readings
             .iter()
             .map(|r| format!("{}: {}", r.model_id, r.content.plain()))
@@ -99,7 +121,9 @@ pub fn refine_regions(page: &mut Page, s: &Settings) {
                 block.text = text;
             }
         }
-        block.uncertain = agreement < s.agreement_threshold
+        block.uncertain = prior_uncertain
+            || result.blocks.iter().any(|b| b.uncertain)
+            || agreement < s.agreement_threshold
             || result.warnings.iter().any(|w| w.contains("Numeric"));
         if !result.warnings.is_empty() {
             page.content.warnings.extend(result.warnings);
@@ -134,8 +158,7 @@ pub fn select(candidates: &[Candidate], minimum: usize, threshold: f64) -> (Page
         let score = voters
             .iter()
             .map(|other| {
-                similarity(&c.content.plain(), &other.content.plain())
-                    * other.reliability.clamp(0.1, 1.)
+                content_similarity(&c.content, &other.content) * other.reliability.clamp(0.1, 1.)
             })
             .sum::<f64>()
             / voters
@@ -159,14 +182,17 @@ pub fn select(candidates: &[Candidate], minimum: usize, threshold: f64) -> (Page
             .content
             .blocks
             .iter()
-            .filter(|b| b.kind == "table" || b.kind == "figure")
+            .filter(|b| b.kind == "table" || b.kind == "figure" || b.kind == "code")
         {
             let matched = result.blocks.iter().enumerate().position(|(index, b)| {
                 !assigned.contains(&index)
                     && b.kind == block.kind
                     && match b.bbox.as_ref().zip(block.bbox.as_ref()) {
                         Some((a, b)) => overlap(a, b) > 0.35,
-                        None => b.kind == "table" && similarity(&b.plain(), &block.plain()) > 0.85,
+                        None => {
+                            (b.kind == "table" || b.kind == "code")
+                                && similarity(&b.plain(), &block.plain()) > 0.85
+                        }
                     }
             });
             if let Some(index) = matched {
@@ -181,13 +207,16 @@ pub fn select(candidates: &[Candidate], minimum: usize, threshold: f64) -> (Page
             }
         }
     }
-    let agreement = if voters.len() < minimum {
+    let code_disagreement = voters
+        .iter()
+        .any(|v| code_readings(&v.content) != code_readings(&chosen.content));
+    let agreement = if voters.len() < minimum || code_disagreement {
         0.
     } else {
         voters
             .iter()
             .filter(|v| v.model_id != chosen.model_id)
-            .map(|v| similarity(&chosen.content.plain(), &v.content.plain()))
+            .map(|v| content_similarity(&chosen.content, &v.content))
             .sum::<f64>()
             / (voters.len() - 1).max(1) as f64
     };
@@ -197,6 +226,14 @@ pub fn select(candidates: &[Candidate], minimum: usize, threshold: f64) -> (Page
             voters.len(),
             minimum
         ));
+    }
+    if code_disagreement {
+        result.warnings.push("Code readings differ in literal whitespace, punctuation, characters or block coverage. Review the original indentation and line numbers; no syntax repair was performed.".into());
+        for block in &mut result.blocks {
+            if block.kind == "code" {
+                block.uncertain = true;
+            }
+        }
     }
     if agreement < threshold {
         result.warnings.push("Independent readers disagree. Selected an existing reading; alternatives are preserved for review.".into());
