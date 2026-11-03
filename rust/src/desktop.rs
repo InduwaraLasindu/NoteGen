@@ -3081,15 +3081,34 @@ mod acceptance {
         .unwrap();
         project.save(&page).unwrap();
         let checkpoint = project.load(1).unwrap();
+        let checkpoint_bytes = fs::read(project.page_path(1)).unwrap();
         let ctx = egui::Context::default();
         let review = Review::load(project.clone(), 0, &ctx).unwrap();
+        let visible = project.load(1).unwrap();
         assert_eq!(
             fingerprint(&review.baseline).unwrap(),
-            fingerprint(&checkpoint).unwrap()
+            fingerprint(&visible).unwrap()
         );
         assert_eq!(
             fingerprint(&review.page).unwrap(),
+            fingerprint(&visible).unwrap()
+        );
+        assert_ne!(
+            fingerprint(&visible).unwrap(),
             fingerprint(&checkpoint).unwrap()
+        );
+        assert_eq!(visible.content.plain(), "[redacted]");
+        assert!(visible.candidates.is_empty());
+        assert_eq!(
+            visible.confirmed_redactions,
+            checkpoint.confirmed_redactions
+        );
+        assert!(review.issue_notice.contains("recoverable review revision"));
+        let history = crate::review::timeline(&project).unwrap();
+        assert_eq!(history.revisions.len(), 1);
+        assert_eq!(
+            history.revisions[0].label,
+            "Apply confirmed mask visibility"
         );
         let pixels = uploaded_crop(&ctx, review.texture.as_ref().unwrap().id());
         assert_eq!(pixels[(20, 20)], Color32::BLACK);
@@ -3105,7 +3124,18 @@ mod acceptance {
         assert_eq!(fs::read(project.image(1)).unwrap(), original);
         assert_eq!(
             fingerprint(&project.load(1).unwrap()).unwrap(),
+            fingerprint(&visible).unwrap()
+        );
+        assert_eq!(fs::read(project.page_path(1)).unwrap(), checkpoint_bytes);
+        crate::review::undo(&project).unwrap();
+        assert_eq!(
+            fingerprint(&project.load(1).unwrap()).unwrap(),
             fingerprint(&checkpoint).unwrap()
+        );
+        crate::review::redo(&project).unwrap();
+        assert_eq!(
+            fingerprint(&project.load(1).unwrap()).unwrap(),
+            fingerprint(&visible).unwrap()
         );
         image::RgbImage::from_pixel(40, 40, image::Rgb([0, 255, 0]))
             .save(project.image(1))
