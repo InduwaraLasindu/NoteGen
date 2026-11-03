@@ -661,16 +661,16 @@ pub fn preview_restore(path: &Path, settings: &Settings, c: &Control) -> Result<
         .sum::<u64>();
     let mut archive_bytes = 0;
     let needs_runtime_objects = missing.iter().any(|item| item.kind == Kind::RuntimeFile);
-    if needs_runtime_objects {
-        if let Some(source) = lock.runtime.as_ref().and_then(|pin| pin.source.as_ref()) {
-            for asset in &source.assets {
-                let id = ObjectId {
-                    sha256: asset.sha256.clone(),
-                    bytes: asset.bytes,
-                };
-                if store.resolve(&id, Kind::Archive, c)?.is_none() {
-                    archive_bytes += asset.bytes;
-                }
+    if needs_runtime_objects
+        && let Some(source) = lock.runtime.as_ref().and_then(|pin| pin.source.as_ref())
+    {
+        for asset in &source.assets {
+            let id = ObjectId {
+                sha256: asset.sha256.clone(),
+                bytes: asset.bytes,
+            };
+            if store.resolve(&id, Kind::Archive, c)?.is_none() {
+                archive_bytes += asset.bytes;
             }
         }
     }
@@ -753,10 +753,10 @@ pub fn restore(
                     .join(&file.name),
                 crate::setup::runtime_root(settings).join(&file.name),
             ];
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(folder) = exe.parent() {
-                    candidates.push(folder.join("runtime").join(&file.name));
-                }
+            if let Ok(exe) = std::env::current_exe()
+                && let Some(folder) = exe.parent()
+            {
+                candidates.push(folder.join("runtime").join(&file.name));
             }
             for path in candidates {
                 if path.is_file()
@@ -773,38 +773,37 @@ pub fn restore(
             store
                 .resolve(&runtime_object(file), Kind::RuntimeFile, c)
                 .is_ok_and(|path| path.is_none())
-        }) {
-            if let Some(source) = &pin.source {
-                for asset in &source.assets {
-                    c.check()?;
-                    let (_, archive) = store.download_object(
-                        &asset.url,
-                        &crate::models::Asset {
-                            file: asset.file.clone(),
-                            bytes: asset.bytes,
-                            sha256: asset.sha256.clone(),
-                        },
-                        Kind::Archive,
-                        c,
-                        log,
-                    )?;
-                    let stage = tempfile::Builder::new()
-                        .prefix("runtime-restore-")
-                        .tempdir_in(store.root.join("incoming"))?;
-                    crate::setup::extract_runtime(&archive, stage.path(), c)?;
-                    for file in &pin.identity.files {
-                        let id = runtime_object(file);
-                        if store.resolve(&id, Kind::RuntimeFile, c)?.is_some() {
-                            continue;
-                        }
-                        let path = stage.path().join(&file.name);
-                        if path.is_file()
-                            && crate::model_store::inspect(&path, id.bytes, Kind::RuntimeFile, c)
-                                .is_ok_and(|candidate| candidate == id)
-                        {
-                            store.ingest(&path, &id, Kind::RuntimeFile, c)?;
-                            restored_objects += 1;
-                        }
+        }) && let Some(source) = &pin.source
+        {
+            for asset in &source.assets {
+                c.check()?;
+                let (_, archive) = store.download_object(
+                    &asset.url,
+                    &crate::models::Asset {
+                        file: asset.file.clone(),
+                        bytes: asset.bytes,
+                        sha256: asset.sha256.clone(),
+                    },
+                    Kind::Archive,
+                    c,
+                    log,
+                )?;
+                let stage = tempfile::Builder::new()
+                    .prefix("runtime-restore-")
+                    .tempdir_in(store.root.join("incoming"))?;
+                crate::setup::extract_runtime(&archive, stage.path(), c)?;
+                for file in &pin.identity.files {
+                    let id = runtime_object(file);
+                    if store.resolve(&id, Kind::RuntimeFile, c)?.is_some() {
+                        continue;
+                    }
+                    let path = stage.path().join(&file.name);
+                    if path.is_file()
+                        && crate::model_store::inspect(&path, id.bytes, Kind::RuntimeFile, c)
+                            .is_ok_and(|candidate| candidate == id)
+                    {
+                        store.ingest(&path, &id, Kind::RuntimeFile, c)?;
+                        restored_objects += 1;
                     }
                 }
             }
@@ -848,14 +847,14 @@ pub fn import_missing(
     let store = Store::open(&settings.shared_model_store)?;
     store.ingest(source, &missing.object, missing.kind, c)?;
     let lock = read(&plan.lock_path, c)?;
-    if let Some(pin) = &lock.runtime {
-        if pin.identity.files.iter().all(|f| {
+    if let Some(pin) = &lock.runtime
+        && pin.identity.files.iter().all(|f| {
             store
                 .resolve(&runtime_object(f), Kind::RuntimeFile, c)
                 .is_ok_and(|p| p.is_some())
-        }) {
-            materialize_runtime(&store, pin, c)?;
-        }
+        })
+    {
+        materialize_runtime(&store, pin, c)?;
     }
     Ok(RestoreReport {
         restored_objects: 1,

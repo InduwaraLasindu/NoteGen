@@ -7,7 +7,7 @@ use crate::{
 };
 
 pub(super) enum StudioMessage {
-    Project(Project, String),
+    Project(Box<Project>, String),
     Update(models::Update),
     Web(Vec<assistance::WebSource>),
     Done(String),
@@ -167,6 +167,7 @@ impl Desktop {
             }
 
             StudioMessage::Project(project, notice) => {
+                let project = *project;
                 if self.open_review(project.root, ctx) {
                     self.notice = notice;
                 }

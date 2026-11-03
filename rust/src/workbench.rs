@@ -12,7 +12,7 @@ struct WordPreview {
 }
 
 enum Report {
-    Routing(PathBuf, crate::language_routing::RereadPreview),
+    Routing(PathBuf, Box<crate::language_routing::RereadPreview>),
     Catalog(Vec<crate::projects::Entry>),
     Search(crate::projects::SearchReport),
     Text(String),
@@ -116,7 +116,7 @@ impl Workbench {
                 Ok(Report::Routing(project, preview)) => {
                     if self.geometry_project.as_ref() == Some(&project) {
                         self.report="Regional OCR preview is ready. Compare its source and visible text before applying.".into();
-                        self.route_preview = Some(preview);
+                        self.route_preview = Some(*preview);
                     } else {
                         self.report="The completed regional preview belongs to another project. Reopen it and refresh the preview before applying.".into();
                     }
@@ -406,7 +406,7 @@ impl Review {
         self.dirty = false;
         Ok(())
     }
-    fn visible_revision_comparison(&self, revision: u64) -> Result<String> {
+    pub(super) fn visible_revision_comparison(&self, revision: u64) -> Result<String> {
         let mut old = crate::review::snapshot(&self.project, revision, self.page.page)?;
         if !self.page.confirmed_redactions.is_empty() {
             old.confirmed_redactions = self.page.confirmed_redactions.clone();
@@ -505,25 +505,25 @@ impl Desktop {
                 );
             }
         }
-        if let Some(grid) = &data.grid {
-            if let (Some(left), Some(right), Some(top), Some(bottom)) = (
+        if let Some(grid) = &data.grid
+            && let (Some(left), Some(right), Some(top), Some(bottom)) = (
                 grid.column_edges.first(),
                 grid.column_edges.last(),
                 grid.row_edges.first(),
                 grid.row_edges.last(),
-            ) {
-                for y in &grid.row_edges {
-                    ui.painter().line_segment(
-                        [point(*left, *y), point(*right, *y)],
-                        egui::Stroke::new(1.4, color),
-                    );
-                }
-                for x in &grid.column_edges {
-                    ui.painter().line_segment(
-                        [point(*x, *top), point(*x, *bottom)],
-                        egui::Stroke::new(1.4, color),
-                    );
-                }
+            )
+        {
+            for y in &grid.row_edges {
+                ui.painter().line_segment(
+                    [point(*left, *y), point(*right, *y)],
+                    egui::Stroke::new(1.4, color),
+                );
+            }
+            for x in &grid.column_edges {
+                ui.painter().line_segment(
+                    [point(*x, *top), point(*x, *bottom)],
+                    egui::Stroke::new(1.4, color),
+                );
             }
         }
     }
@@ -675,13 +675,13 @@ impl Desktop {
                     w.task(ctx, move || {
                         Ok(Report::Routing(
                             project.root.clone(),
-                            crate::language_routing::reread_preview(
+                            Box::new(crate::language_routing::reread_preview(
                                 &project,
                                 &page,
                                 &page.region_languages,
                                 &settings,
                                 &Control::default(),
-                            )?,
+                            )?),
                         ))
                     });
                 }
@@ -773,7 +773,7 @@ impl Desktop {
             let settings = self.state.settings.clone();
             self.studio_task(ctx,move|c,log|{
                 let project=pipeline::prepare_for_review(&input,&output,&settings,&c,&log)?;
-                Ok(studio::StudioMessage::Project(project,"Source pages prepared without OCR or AI. Inspect the source and confirm masks in Privacy tools before recognizing this prepared project.".into()))
+                Ok(studio::StudioMessage::Project(Box::new(project),"Source pages prepared without OCR or AI. Inspect the source and confirm masks in Privacy tools before recognizing this prepared project.".into()))
             });
         }
         let Some((project, page, region, dirty)) = self.review.as_ref().map(|r| {
@@ -818,7 +818,10 @@ impl Desktop {
                         done.review,
                         done.output.display()
                     );
-                    Ok(studio::StudioMessage::Project(done.project, notice))
+                    Ok(studio::StudioMessage::Project(
+                        Box::new(done.project),
+                        notice,
+                    ))
                 });
             }
         }

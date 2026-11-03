@@ -28,7 +28,7 @@ Printed English OCR works immediately. Select **Install local AI** for handwriti
 | CPU, CUDA or Vulkan readers | Numeric/table checks and disagreement overlays | Word, Markdown, HTML, LaTeX and Excel |
 | Verified AI setup and offline bundles | Writer examples, quarantine and font proofs | Source links and uncertainty annotations |
 
-Open **Projects & tools** or press **Ctrl+K**. The [workbench guide](docs/WORKBENCH.md) covers the desktop and CLI tools. The [0.5.0 implementation ledger](docs/FEATURES_0.5.0.md) records the status of all 100 proposals, including limits and work that remains.
+Open **Projects & tools** or use the command palette (default **Ctrl+K**). See the [workbench guide](docs/WORKBENCH.md) and [source review guide](docs/SOURCE_REVIEW.md). The [0.5.0 implementation ledger](docs/FEATURES_0.5.0.md) records all 100 proposals, including limits and work that remains.
 
 ## Local by default
 

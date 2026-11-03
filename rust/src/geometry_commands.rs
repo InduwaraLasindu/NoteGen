@@ -50,6 +50,10 @@ pub enum Action {
         block: usize,
         quads: PathBuf,
     },
+    RereadLine {
+        project: PathBuf,
+        request: PathBuf,
+    },
     PreviewGrid {
         project: PathBuf,
         page: usize,
@@ -172,6 +176,13 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
                 &project, &page, block, &quads, c,
             )?)
         }
+        Action::RereadLine { project, request } => super::print(notegen::pipeline::reread_line(
+            &Project::read(project)?,
+            &read_json(&request, 100_000)?,
+            s,
+            c,
+            &Default::default(),
+        )?),
         Action::PreviewGrid {
             project,
             page,
