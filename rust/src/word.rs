@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
+#[path = "reference_word.rs"]
+mod reference_word;
 pub const INVALIDATED_SOURCE_WARNING: &str = "WARNING: SOURCE CHANGED OR UNAVAILABLE";
 pub const RECOVERY_EXPORT_NOTICE: &str = "This manual recovery export contains preserved recognition. The input changed or became unavailable during conversion. Verify every page against the original source.";
 pub const ROUNDTRIP_UNAVAILABLE_NOTICE: &str = "Word correction import is unavailable for this large export. All content is preserved. Export a smaller project to enable correction import.";
@@ -220,14 +222,9 @@ fn table(
         ));
     }
     o.push_str("</w:tblBorders>");
-    if b.rows
-        .iter()
-        .flatten()
-        .find_map(|s| s.chars().find(|c| c.is_alphabetic()))
-        .is_some_and(rtl)
-    {
-        o.push_str("<w:bidiVisual/>");
-    }
+    // Canonical cell indices describe physical left-to-right source columns.
+    // bidiVisual would mirror them (including merges). Individual cell
+    // paragraphs still carry their own logical RTL direction.
     o.push_str("</w:tblPr><w:tblGrid>");
     let cols = b.rows[0].len();
     for _ in 0..cols {
@@ -357,6 +354,13 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
         r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
     );
     let mut baseline = crate::roundtrip::baseline(project)?;
+    let references = reference_word::ReferenceExport::new(project, c)?;
+    if references.has_notes() {
+        rels.push_str(r#"<Relationship Id="notegenFootnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>"#);
+    }
+    if references.has_sources() {
+        rels.push_str(r#"<Relationship Id="notegenBibliography" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item2.xml"/>"#);
+    }
     let redacted = crate::redactions::is_export_projection(project);
     if redacted {
         crate::roundtrip::disable(&mut baseline);
@@ -366,6 +370,12 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
     if invalidated {
         body.write_all(format!("<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:rPr><w:b/><w:color w:val=\"C62828\"/><w:sz w:val=\"28\"/></w:rPr><w:t>{}</w:t></w:r></w:p>",xml(INVALIDATED_SOURCE_WARNING)).as_bytes())?;
         body.write_all(paragraph(RECOVERY_EXPORT_NOTICE, "Normal").as_bytes())?;
+    }
+    for warning in &references.resolved.warnings {
+        body.write_all(paragraph(warning, "Caption").as_bytes())?;
+    }
+    if references.active() {
+        body.write_all(paragraph("Confirmed footnotes and citations are semantic Word fields. Their paragraphs/bodies are outside Word correction import; use NoteGen Review to edit them. Updating these fields in Word can change the preserved source layout. Bibliography author names are stored literally, without name splitting.","Caption").as_bytes())?;
     }
     for (index, n) in project.manifest.pages.iter().enumerate() {
         c.check()?;
@@ -414,6 +424,9 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
         for (block_index, b) in page.content.blocks.iter().enumerate() {
             c.check()?;
             b.validate()?;
+            if references.relocated(*n, block_index) {
+                continue;
+            }
             for layer in layers
                 .iter()
                 .filter(|a| a.confirmed() && a.assignment.block == block_index)
@@ -566,17 +579,21 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
                         "code" => "Code",
                         _ => "Normal",
                     };
-                    body.write_all(
-                        crate::roundtrip::tagged(
-                            &mut baseline,
-                            *n,
-                            block_index,
-                            "text",
-                            &b.text,
-                            &paragraph(&b.text, style),
-                        )
-                        .as_bytes(),
-                    )?;
+                    if let Some(linked) = references.paragraph(*n, block_index, &b.text, style)? {
+                        body.write_all(linked.as_bytes())?;
+                    } else {
+                        body.write_all(
+                            crate::roundtrip::tagged(
+                                &mut baseline,
+                                *n,
+                                block_index,
+                                "text",
+                                &b.text,
+                                &paragraph(&b.text, style),
+                            )
+                            .as_bytes(),
+                        )?;
+                    }
                     if b.uncertain {
                         body.write_all(
                             paragraph("[uncertain] — verify this source region.", "Caption")
@@ -586,6 +603,9 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
                 }
             }
         }
+    }
+    if let Some(bibliography) = references.bibliography() {
+        body.write_all(bibliography.as_bytes())?;
     }
     body.write_all(b"<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1080\" w:right=\"1080\" w:bottom=\"1080\" w:left=\"1080\"/></w:sectPr></w:body></w:document>")?;
     body.flush()?;
@@ -607,6 +627,12 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
         );
         if baseline_xml.is_some() {
             content_types.push_str(r#"<Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>"#);
+        }
+        if references.has_notes() {
+            content_types.push_str(r#"<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>"#);
+        }
+        if references.has_sources() {
+            content_types.push_str(r#"<Override PartName="/customXml/itemProps2.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>"#);
         }
         content_types.push_str("</Types>");
         for (name, content) in [
@@ -631,6 +657,26 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
                 (
                     "customXml/_rels/item1.xml.rels",
                     r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="properties" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>"#,
+                ),
+            ] {
+                zip.start_file(name, opts)?;
+                zip.write_all(content.as_bytes())?;
+            }
+        }
+        if let Some(notes) = references.notes_xml() {
+            zip.start_file("word/footnotes.xml", opts)?;
+            zip.write_all(notes.as_bytes())?;
+        }
+        if let Some(sources) = references.sources_xml() {
+            for (name, content) in [
+                ("customXml/item2.xml", sources.as_str()),
+                (
+                    "customXml/itemProps2.xml",
+                    r#"<?xml version="1.0" encoding="UTF-8"?><ds:datastoreItem ds:itemID="{81BA5E6F-438C-40A1-A49B-11E8492F694E}" xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"><ds:schemaRefs><ds:schemaRef ds:uri="http://schemas.openxmlformats.org/officeDocument/2006/bibliography"/></ds:schemaRefs></ds:datastoreItem>"#,
+                ),
+                (
+                    "customXml/_rels/item2.xml.rels",
+                    r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="properties" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps2.xml"/></Relationships>"#,
                 ),
             ] {
                 zip.start_file(name, opts)?;
@@ -664,6 +710,7 @@ fn export_inner(project: &Project, target: &Path, c: &Control) -> Result<()> {
     }
     tmp.as_file_mut().flush()?;
     tmp.as_file().sync_all()?;
+    references.resolved.verify_unchanged(project, c)?;
     tmp.persist_noclobber(target)
         .map_err(|_| Fault::new("NG401", "Output collision or unavailable output folder"))?;
     Ok(())

@@ -12,6 +12,8 @@ struct WordPreview {
 }
 
 enum Report {
+    Reference(PathBuf, Box<crate::references::Preview>),
+    ReferenceSaved(PathBuf, u64),
     Code(PathBuf, Box<crate::code_transcription::CodePreview>),
     Routing(PathBuf, Box<crate::language_routing::RereadPreview>),
     Catalog(Vec<crate::projects::Entry>),
@@ -75,6 +77,17 @@ pub(super) struct Workbench {
     code_options: crate::code_transcription::CodeOptions,
     code_preview: Option<crate::code_transcription::CodePreview>,
     project_tools: super::project_workbench::ProjectTools,
+    reference_project: Option<PathBuf>,
+    reference_marker: String,
+    reference_occurrence: usize,
+    reference_page: usize,
+    reference_block: usize,
+    reference_citation: bool,
+    reference_title: String,
+    reference_author: String,
+    reference_year: String,
+    reference_preview: Option<crate::references::Preview>,
+    reopen_reference: Option<PathBuf>,
     rx: Option<mpsc::Receiver<std::result::Result<Report, String>>>,
 }
 impl Drop for Workbench {
@@ -117,6 +130,21 @@ impl Workbench {
         if let Some(value) = value {
             self.rx = None;
             match value {
+                Ok(Report::Reference(project, preview)) => {
+                    if self.reference_project.as_ref() == Some(&project) {
+                        self.reference_preview = Some(*preview);
+                        self.report = "Reference preview ready. Confirm its exact source marker and target body.".into();
+                    } else {
+                        self.report =
+                            "Reference preview belongs to another project; preview again.".into();
+                    }
+                }
+                Ok(Report::ReferenceSaved(project, revision)) => {
+                    self.reference_preview = None;
+                    self.reopen_reference = Some(project);
+                    self.report =
+                        format!("Reference relationship saved as review revision {revision}.");
+                }
                 Ok(Report::Code(project, preview)) => {
                     if self.geometry_project.as_ref() == Some(&project) {
                         self.code_preview = Some(*preview);
@@ -777,6 +805,220 @@ impl Desktop {
             if let Some(preview)=w.grid_preview.clone(){ui.label(&preview.note);ui.label("Previewed grid is overlaid in Review. Inspect the cell mapping and all retained values before applying.");if ui.add_enabled(ready,egui::Button::new("Apply reviewed grid repair")).clicked(){match crate::geometry_repair::apply_grid(&project,&page,&preview,&preview.token,&Control::default()){Ok(revision)=>{w.grid_preview=None;w.report=format!("Table grid saved as revision {revision}");let _=self.open_review(project.root.clone(),ctx);},Err(error)=>w.report=error.to_string()}}}
         });
         }
+    }
+    fn reference_tools(&mut self, w: &mut Workbench, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some((project, page, index, dirty)) = self.review.as_ref().map(|r| {
+            (
+                r.project.clone(),
+                r.page.clone(),
+                r.selected,
+                r.dirty || r.raw_open,
+            )
+        }) else {
+            return;
+        };
+        if w.reference_project.as_ref() != Some(&project.root) {
+            w.reference_project = Some(project.root.clone());
+            w.reference_preview = None;
+            w.reference_marker.clear();
+            w.reference_page = page.page;
+            w.reference_block = 1;
+        }
+        let ready = !dirty && self.worker.is_none() && w.rx.is_none() && !self.vault.blocks_close();
+        ui.separator();
+        ui.heading("Confirmed footnotes and citations");
+        ui.label("Select the block containing a source marker, then enter that exact marker and choose its note or bibliography block. Nothing is linked automatically. Confirmed links have their own review undo/redo history.");
+        let before = fingerprint(&(
+            index,
+            &w.reference_marker,
+            w.reference_occurrence,
+            w.reference_page,
+            w.reference_block,
+            w.reference_citation,
+            &w.reference_title,
+            &w.reference_author,
+            &w.reference_year,
+        ))
+        .unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut w.reference_marker)
+                    .char_limit(256)
+                    .hint_text("Exact marker, for example [1] or *"),
+            )
+            .accessible_name("Exact source footnote or citation marker");
+            ui.add(
+                egui::DragValue::new(&mut w.reference_occurrence)
+                    .range(0..=255)
+                    .prefix("Occurrence (0 = first): "),
+            );
+            ui.add(
+                egui::DragValue::new(&mut w.reference_page)
+                    .range(1..=3000)
+                    .prefix("Target page slot: "),
+            );
+            ui.add(
+                egui::DragValue::new(&mut w.reference_block)
+                    .range(1..=500)
+                    .prefix("Target block (1 = first): "),
+            );
+        });
+        ui.checkbox(
+            &mut w.reference_citation,
+            "Citation with explicitly confirmed bibliography details",
+        );
+        if w.reference_citation {
+            ui.add(
+                egui::TextEdit::singleline(&mut w.reference_title)
+                    .char_limit(2048)
+                    .hint_text("Confirmed source title"),
+            )
+            .accessible_name("Explicit bibliography title");
+            ui.add(
+                egui::TextEdit::singleline(&mut w.reference_author)
+                    .char_limit(512)
+                    .hint_text("Confirmed author, or leave empty"),
+            )
+            .accessible_name("Explicit bibliography author");
+            ui.add(
+                egui::TextEdit::singleline(&mut w.reference_year)
+                    .char_limit(32)
+                    .hint_text("Confirmed year, or leave empty"),
+            )
+            .accessible_name("Explicit bibliography year");
+        }
+        let after = fingerprint(&(
+            index,
+            &w.reference_marker,
+            w.reference_occurrence,
+            w.reference_page,
+            w.reference_block,
+            w.reference_citation,
+            &w.reference_title,
+            &w.reference_author,
+            &w.reference_year,
+        ))
+        .unwrap_or_default();
+        if before != after {
+            w.reference_preview = None;
+        }
+        if ui
+            .add_enabled(
+                ready && !w.reference_marker.is_empty(),
+                egui::Button::new("Preview confirmed reference link"),
+            )
+            .clicked()
+        {
+            let request = (|| -> Result<crate::references::Request> {
+                let block = page
+                    .content
+                    .blocks
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("Select the source marker block"))?;
+                let (start, marker) = block
+                    .text
+                    .match_indices(w.reference_marker.as_str())
+                    .nth(w.reference_occurrence)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "The exact marker occurrence was not found in the selected source block"
+                        )
+                    })?;
+                Ok(crate::references::Request {
+                    kind: if w.reference_citation {
+                        crate::references::Kind::Citation
+                    } else {
+                        crate::references::Kind::Footnote
+                    },
+                    anchor_block: index,
+                    marker_start: start,
+                    marker_end: start + marker.len(),
+                    target_page: w.reference_page,
+                    target_block: w.reference_block.saturating_sub(1),
+                    bibliography: w
+                        .reference_citation
+                        .then(|| crate::references::Bibliography {
+                            title: w.reference_title.clone(),
+                            author: w.reference_author.clone(),
+                            year: w.reference_year.clone(),
+                        }),
+                })
+            })();
+            match request {
+                Ok(request) => {
+                    let project = project.clone();
+                    let page = page.clone();
+                    w.reference_preview = None;
+                    w.task(ctx, move || {
+                        Ok(Report::Reference(
+                            project.root.clone(),
+                            Box::new(crate::references::preview(
+                                &project,
+                                &page,
+                                &request,
+                                &Control::default(),
+                            )?),
+                        ))
+                    });
+                }
+                Err(error) => w.report = error.to_string(),
+            }
+        }
+        if let Some(preview) = w.reference_preview.clone() {
+            ui.label(&preview.note);
+            ui.label(format!(
+                "Source marker: {} · target page {}, block {}",
+                preview.link.marker,
+                preview.link.target.page,
+                preview.link.target.block_hint + 1
+            ));
+            ui.label(&preview.target_text);
+            if ui
+                .add_enabled(
+                    ready,
+                    egui::Button::new("Confirm this marker and reference body"),
+                )
+                .clicked()
+            {
+                let project = project.clone();
+                let page = page.clone();
+                w.task(ctx, move || {
+                    let revision = crate::references::confirm(
+                        &project,
+                        &page,
+                        &preview,
+                        &preview.token,
+                        &Control::default(),
+                    )?;
+                    Ok(Report::ReferenceSaved(project.root, revision))
+                });
+            }
+        }
+        for link in &page.confirmed_references {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "{:?}: {} → page {}, block {}",
+                    link.kind,
+                    link.marker,
+                    link.target.page,
+                    link.target.block_hint + 1
+                ));
+                if ui
+                    .add_enabled(ready, egui::Button::new("Remove confirmed relationship"))
+                    .clicked()
+                {
+                    let project = project.clone();
+                    let page = page.clone();
+                    let id = link.id.clone();
+                    w.task(ctx, move || {
+                        let revision =
+                            crate::references::remove(&project, &page, &id, &Control::default())?;
+                        Ok(Report::ReferenceSaved(project.root, revision))
+                    });
+                }
+            });
+        }
+        ui.small("Semantic note/citation paragraphs and relocated note bodies remain outside Word correction import. Other text remains importable. Stale or masked references remain plain source text with review warnings.");
     }
     fn redaction_tools(&mut self, w: &mut Workbench, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.separator();
@@ -2168,6 +2410,7 @@ impl Desktop {
                         }else{ui.label("Open a project to inspect recovery or attach references.");}
                         self.region_reread_tools(&mut w,ui,ctx);
                         self.geometry_tools(&mut w,ui,ctx);
+                        self.reference_tools(&mut w,ui,ctx);
                     }
                     4=>{
                         let project=self.review.as_ref().map(|r|r.project.clone());
@@ -2217,6 +2460,12 @@ impl Desktop {
         w.open = open;
         if !open {
             w.clear_secret(ctx);
+        }
+        if self.worker.is_none()
+            && self.review.as_ref().is_none_or(|r| !r.dirty && !r.raw_open)
+            && let Some(path) = w.reopen_reference.take()
+        {
+            jump = Some((path, None));
         }
         self.workbench = w;
         if let Some((path, target)) = jump

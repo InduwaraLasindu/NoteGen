@@ -9,6 +9,11 @@ use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Explicitly confirmed footnotes and citations, independent from attached background files.
+    References {
+        #[command(subcommand)]
+        command: Reference,
+    },
     /// Supported, backed-up project/settings migrations and conflict-safe recovery.
     Migrations {
         #[command(subcommand)]
@@ -23,6 +28,29 @@ pub enum Action {
     Reuse {
         #[command(subcommand)]
         command: Reuse,
+    },
+}
+#[derive(Subcommand)]
+pub enum Reference {
+    Inspect {
+        project: PathBuf,
+    },
+    Preview {
+        project: PathBuf,
+        page: usize,
+        request: PathBuf,
+    },
+    Confirm {
+        project: PathBuf,
+        page: usize,
+        request: PathBuf,
+        #[arg(long)]
+        confirmation_token: String,
+    },
+    Remove {
+        project: PathBuf,
+        page: usize,
+        id: String,
     },
 }
 #[derive(Subcommand)]
@@ -112,9 +140,53 @@ pub enum Reuse {
 }
 pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
     match action {
+        Action::References { command } => reference(command, c),
         Action::Migrations { command } => migration(command, c),
         Action::Layout { command } => layout(command, c),
         Action::Reuse { command } => reuse(command, s, c),
+    }
+}
+fn reference(action: Reference, c: &Control) -> Result<()> {
+    use notegen::references;
+    match action {
+        Reference::Inspect { project } => {
+            super::print(references::resolve(&Project::read(project)?, c)?)
+        }
+        Reference::Preview {
+            project,
+            page,
+            request,
+        } => {
+            let project = Project::read(project)?;
+            let page = project.load(page)?;
+            super::print(references::preview(
+                &project,
+                &page,
+                &read_json(&request, 100_000)?,
+                c,
+            )?)
+        }
+        Reference::Confirm {
+            project,
+            page,
+            request,
+            confirmation_token,
+        } => {
+            let project = Project::read(project)?;
+            let page = project.load(page)?;
+            let preview = references::preview(&project, &page, &read_json(&request, 100_000)?, c)?;
+            super::print(references::confirm(
+                &project,
+                &page,
+                &preview,
+                &confirmation_token,
+                c,
+            )?)
+        }
+        Reference::Remove { project, page, id } => {
+            let project = Project::read(project)?;
+            super::print(references::remove(&project, &project.load(page)?, &id, c)?)
+        }
     }
 }
 fn migration(action: Migration, c: &Control) -> Result<()> {

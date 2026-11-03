@@ -2,7 +2,7 @@ name: Rust verification and Windows executable
 on:
   push:
     branches: [main]
-    paths: ['Cargo.toml', 'Cargo.lock', 'rust/**', 'scripts/Build-Windows.ps1', 'scripts/Setup-Runtime.ps1', 'scripts/Install-Models.ps1', 'scripts/Smoke-AI.ps1', 'scripts/Test-Font.ps1', '.github/workflows/verify-and-build.yml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'rust/**', 'scripts/**', '.github/workflows/verify-and-build.yml']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -140,7 +140,8 @@ jobs:
         run: ./scripts/Setup-Runtime.ps1 -Backend CPU
       - name: Release Windows executables
         if: runner.os == 'Windows'
-        run: cargo build --locked --release --features desktop --bins -j 2
+        shell: pwsh
+        run: ./scripts/Build-Reproducible.ps1
       - name: Package and test actual scanned-PDF conversion
         if: runner.os == 'Windows'
         shell: pwsh
@@ -205,4 +206,69 @@ jobs:
             build/ai-smoke/NoteGen/maximum-smoke.docx
           if-no-files-found: ignore
           retention-days: 30
-
+  reproducibility:
+    name: Independent Windows executable build
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: NoteGen-Rust-Windows-x64
+          path: build/reference
+      - name: Exercise comparison failure contracts twice
+        shell: pwsh
+        run: |
+          ./scripts/Test-Reproducibility.ps1
+          ./scripts/Test-Reproducibility.ps1
+      - name: Compile independently without target artifacts
+        shell: pwsh
+        run: |
+          if(Test-Path build/reproduction-target){throw 'Independent target must start empty'}
+          ./scripts/Build-Reproducible.ps1 -TargetDirectory build/reproduction-target
+      - name: Compare actual executable bytes and source recipe
+        shell: pwsh
+        run: |
+          $source=(& git rev-parse HEAD).Trim()
+          if($LASTEXITCODE -ne 0){throw 'Cannot identify checked-out source'}
+          ./scripts/Compare-Reproducible.ps1 -ReferenceArchive build/reference/NoteGen-Rust-Windows-x64.zip -CandidateDirectory build/reproduction-target/release -SourceCommit $source
+          $comparison=Get-Content build/reproducibility.json -Raw | ConvertFrom-Json
+          if(-not $comparison.independent_jobs){throw 'Independent producer jobs were not established by the build records'}
+          $support=if('${{ github.event.repository.visibility }}' -eq 'public' -or '${{ vars.ENABLE_PRIVATE_ATTESTATIONS }}' -eq 'true'){'configured'}else{'not-configured-for-private-repository'}
+          @{schema=1;native_attestation=$support;note='GitHub private/internal artifact attestations require Enterprise Cloud. Unsupported service is never represented as a signed attestation.'} | ConvertTo-Json | Set-Content build/attestation-support.json -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: Windows-reproducibility-evidence
+          path: |
+            build/reproducibility.json
+            build/attestation-support.json
+          retention-days: 30
+  attest:
+    name: Attest verified release artifacts
+    needs: reproducibility
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (github.event.repository.visibility == 'public' || vars.ENABLE_PRIVATE_ATTESTATIONS == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: NoteGen-Rust-Windows-x64
+          path: artifacts
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: Windows-reproducibility-evidence
+          path: evidence
+      - name: Generate native build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            artifacts/NoteGen-Rust-Windows-x64.zip
+            evidence/reproducibility.json

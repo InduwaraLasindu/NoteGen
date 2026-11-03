@@ -83,6 +83,11 @@ pub struct Traceability {
     pub project_fingerprint: String,
     pub evidence_note: String,
     pub pages: Vec<PageTrace>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::references::Resolution::is_empty"
+    )]
+    pub confirmed_references: crate::references::Resolution,
 }
 
 fn file_uri(path: &Path) -> Result<String> {
@@ -181,6 +186,7 @@ pub fn traceability(project: &Project, c: &Control) -> Result<Traceability> {
     if let Some(projection) = &projection {
         projection.verify_unchanged(project, c)?;
     }
+    result.confirmed_references.verify_unchanged(project, c)?;
     Ok(result)
 }
 fn traceability_inner(project: &Project, c: &Control) -> Result<Traceability> {
@@ -191,6 +197,7 @@ fn traceability_inner(project: &Project, c: &Control) -> Result<Traceability> {
         project_fingerprint: project.manifest.fingerprint.clone(),
         evidence_note: "Source coordinates refer to the saved scan, not an inferred cell grid. Exact reader-value matches are candidates, not proof of correctness; repeated values may match multiple regions. At most four exact matches per value and 100,000 distinct evidence values per page are retained. Missing evidence means no exact match was retained. Confidence is uncalibrated. Source links depend on the local project remaining available.".into(),
         pages: vec![],
+        confirmed_references: crate::references::resolve(project,c)?,
     };
     if crate::redactions::is_export_projection(project) {
         result.evidence_note = crate::redactions::EXPORT_NOTICE.into();
@@ -380,7 +387,133 @@ fn latex_code(text: &str) -> String {
     out.push_str("\\endgroup\n");
     out
 }
+fn reference_inline(
+    text: &str,
+    links: &[&crate::references::ResolvedLink],
+    format: Format,
+) -> Result<String> {
+    let escape = |value: &str| match format {
+        Format::Html => xml(value),
+        Format::Latex => latex(value),
+        _ => markdown(value),
+    };
+    let mut out = String::new();
+    let mut cursor = 0;
+    for link in links {
+        out.push_str(&escape(&text[cursor..link.link.marker_start]));
+        let marker = escape(&link.link.marker);
+        let id = &link.link.id;
+        match (format,link.link.kind){
+            (Format::Html,crate::references::Kind::Footnote)=>out.push_str(&format!("<sup id=\"fnref-{id}\"><a role=\"doc-noteref\" href=\"#fn-{id}\">{marker}</a></sup>")),
+            (Format::Html,crate::references::Kind::Citation)=>out.push_str(&format!("<a role=\"doc-biblioref\" href=\"#bib-{}\">{marker}</a>",link.entry_id()?)),
+            (Format::Latex,crate::references::Kind::Footnote)=>out.push_str(&format!("{{\\renewcommand{{\\thefootnote}}{{\\textnormal{{{marker}}}}}\\footnote{{{} {}}}}}",latex(&link.target_text),link.target_notes.iter().map(|n|latex(n)).collect::<Vec<_>>().join(" "))),
+            (Format::Latex,crate::references::Kind::Citation)=>{let entry=link.entry_id()?;out.push_str(&format!("\\hyperlink{{bib-{entry}}}{{{marker}}}\\nocite{{NG{entry}}}"));},
+            (_,crate::references::Kind::Footnote)=>out.push_str(&format!("{marker}[^ng-{id}]")),
+            (_,crate::references::Kind::Citation)=>out.push_str(&format!("[{marker}](#bib-{})",link.entry_id()?)),
+        }
+        cursor = link.link.marker_end;
+    }
+    out.push_str(&escape(&text[cursor..]));
+    Ok(out)
+}
+fn reference_endmatter(
+    references: &crate::references::Resolution,
+    format: Format,
+    out: &mut impl Write,
+) -> Result<()> {
+    let notes = references
+        .links
+        .iter()
+        .filter(|r| r.link.kind == crate::references::Kind::Footnote)
+        .collect::<Vec<_>>();
+    if format == Format::Html && !notes.is_empty() {
+        writeln!(
+            out,
+            "<section role=\"doc-endnotes\"><h2>Confirmed footnotes</h2><ol>"
+        )?;
+    }
+    for link in notes {
+        let id = &link.link.id;
+        match format {
+            Format::Html => writeln!(
+                out,
+                "<li id=\"fn-{id}\"><div style=\"white-space:pre-wrap\">{}</div><p>{}</p><a role=\"doc-backlink\" href=\"#fnref-{id}\">Back to {}</a></li>",
+                xml(&link.target_text),
+                xml(&link.target_notes.join(" ")),
+                xml(&link.link.marker)
+            )?,
+            Format::Latex => {}
+            _ => {
+                let body = markdown(&link.target_text);
+                writeln!(
+                    out,
+                    "[^ng-{id}]: {body} {}\n",
+                    markdown(&link.target_notes.join(" "))
+                )?;
+            }
+        }
+    }
+    if format == Format::Html
+        && references
+            .links
+            .iter()
+            .any(|r| r.link.kind == crate::references::Kind::Footnote)
+    {
+        writeln!(out, "</ol></section>")?;
+    }
+    let mut bibliography = std::collections::BTreeMap::new();
+    for link in &references.links {
+        if link.link.kind == crate::references::Kind::Citation {
+            bibliography.entry(link.entry_id()?).or_insert(link);
+        }
+    }
+    if !bibliography.is_empty() {
+        match format {
+            Format::Html => writeln!(
+                out,
+                "<section role=\"doc-bibliography\"><h2>Confirmed bibliography</h2>"
+            )?,
+            Format::Latex => writeln!(out, "\\begin{{thebibliography}}{{99}}")?,
+            _ => writeln!(out, "## Confirmed bibliography\n")?,
+        }
+    }
+    for (id, link) in bibliography {
+        match format {
+            Format::Html => writeln!(
+                out,
+                "<div id=\"bib-{id}\" role=\"doc-biblioentry\" style=\"white-space:pre-wrap\">{}<p>{}</p></div>",
+                xml(&link.target_text),
+                xml(&link.target_notes.join(" "))
+            )?,
+            Format::Latex => writeln!(
+                out,
+                "\\bibitem{{NG{id}}}\\hypertarget{{bib-{id}}}{{{}}} {}",
+                latex(&link.target_text),
+                latex(&link.target_notes.join(" "))
+            )?,
+            _ => writeln!(
+                out,
+                "<a id=\"bib-{id}\"></a>\n\n{}\n\n{}\n",
+                markdown(&link.target_text),
+                markdown(&link.target_notes.join(" "))
+            )?,
+        }
+    }
+    if references
+        .links
+        .iter()
+        .any(|r| r.link.kind == crate::references::Kind::Citation)
+    {
+        match format {
+            Format::Html => writeln!(out, "</section>")?,
+            Format::Latex => writeln!(out, "\\end{{thebibliography}}")?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
 fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Control) -> Result<()> {
+    let references = crate::references::resolve(project, c)?;
     match format {
         Format::Html => out.write_all(b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>NoteGen export</title><style>body{font:1rem/1.6 system-ui;max-width:80ch;margin:2rem auto;padding:1rem}table{border-collapse:collapse}th,td{border:1px solid #777;padding:.4rem;white-space:pre-wrap}.review{border-left:4px solid #a65b00;padding-left:1rem}pre{white-space:pre-wrap}</style></head><body><h1>NoteGen transcription</h1><p>Confidence is uncalibrated. Compare uncertain content with its source scan. Local source links require the project files.</p>\n")?,
         Format::Latex => out.write_all(b"% Compile with XeLaTeX or LuaLaTeX for Unicode text.\n\\documentclass{article}\n\\usepackage{fontspec}\n\\usepackage{hyperref}\n\\usepackage{longtable}\n\\begin{document}\n\\section*{NoteGen transcription}\nConfidence is uncalibrated. Compare uncertain content with the source scan. Local links require the project files.\n\n")?,
@@ -395,6 +528,13 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
             )?,
             Format::Latex => writeln!(out, "{}\\par", latex(crate::redactions::EXPORT_NOTICE))?,
             _ => writeln!(out, "> {}\n", markdown(crate::redactions::EXPORT_NOTICE))?,
+        }
+    }
+    for warning in &references.warnings {
+        match format {
+            Format::Html => writeln!(out, "<p class=\"review\">{}</p>", xml(warning))?,
+            Format::Latex => writeln!(out, "{}\\par", latex(warning))?,
+            _ => writeln!(out, "> {}\n", markdown(warning))?,
         }
     }
     for n in &project.manifest.pages {
@@ -435,6 +575,10 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
         }
         for (index, b) in page.content.blocks.iter().enumerate() {
             c.check()?;
+            if references.relocated(*n, index) {
+                continue;
+            }
+            let linked = reference_inline(&b.text, &references.anchors(*n, index), format)?;
             let uri = source_uri(
                 project,
                 &page,
@@ -510,14 +654,14 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                             }
                             writeln!(out, "</table>")?;
                         }
-                        "heading" => writeln!(out, "<h3>{}</h3>", xml(&b.text))?,
+                        "heading" => writeln!(out, "<h3>{linked}</h3>")?,
                         "figure" => writeln!(
                             out,
                             "<p>Observed: {}</p><p>Contextual interpretation (verify against source): {}</p>",
                             xml(&b.description),
                             xml(&b.interpretation)
                         )?,
-                        _ => writeln!(out, "<pre>{}</pre>", xml(&b.text))?,
+                        _ => writeln!(out, "<pre>{linked}</pre>")?,
                     }
                     writeln!(out, "</article>")?;
                 }
@@ -567,9 +711,9 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                     } else if b.kind == "code" {
                         write!(out, "{}", latex_code(&b.text))?;
                     } else if b.kind == "heading" {
-                        writeln!(out, "\\subsection*{{{}}}", latex(&b.text))?;
+                        writeln!(out, "\\subsection*{{{linked}}}")?;
                     } else {
-                        writeln!(out, "{}\\par", latex(&b.text))?;
+                        writeln!(out, "{linked}\\par")?;
                     }
                 }
                 _ => {
@@ -625,7 +769,7 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
                             out,
                             "{}{}\n",
                             if b.kind == "heading" { "### " } else { "" },
-                            markdown(&b.text)
+                            linked
                         )?;
                     }
                 }
@@ -635,11 +779,13 @@ fn text_export(project: &Project, format: Format, out: &mut impl Write, c: &Cont
             writeln!(out, "</section>")?;
         }
     }
+    reference_endmatter(&references, format, out)?;
     if format == Format::Html {
         out.write_all(b"</body></html>\n")?;
     } else if format == Format::Latex {
         out.write_all(b"\\end{document}\n")?;
     }
+    references.verify_unchanged(project, c)?;
     Ok(())
 }
 

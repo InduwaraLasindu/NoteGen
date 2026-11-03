@@ -456,6 +456,7 @@ pub struct Desktop {
     completed_at: Option<Instant>,
     warm_pool: Option<Arc<crate::warm_runtime::WarmPool>>,
     warm_preference: (bool, u64),
+    settings_output: PathBuf,
 }
 impl Desktop {
     pub fn prepare_data_directory(path: &Path) -> Result<PathBuf> {
@@ -463,6 +464,12 @@ impl Desktop {
         fs::create_dir_all(path)?;
         crate::watch::no_links(path)?;
         Ok(path.canonicalize()?)
+    }
+    fn settings_path(data_dir: Option<&Path>) -> PathBuf {
+        data_dir.map_or_else(
+            || PathBuf::from("ai-settings.json"),
+            |root| root.join("ai-settings.json"),
+        )
     }
     fn tr<'a>(&self, key: &'a str) -> &'a str {
         crate::localization::text(self.state.settings.ui.locale, key)
@@ -477,6 +484,7 @@ impl Desktop {
             state.settings.experience.warm_reader_ttl_secs,
         );
         Self {
+            settings_output: Self::settings_path(None),
             downloads: download_ui::Downloads::default(),
             vault: vault_ui::VaultUi::default(),
             workbench: workbench::Workbench::default(),
@@ -608,8 +616,8 @@ impl Desktop {
         state.recover();
         // Installer settings are imported once per setup change, preserving user
         // appearance, queue and document settings during upgrades.
-        if data_dir.is_none()
-            && let Ok(profile) = read_json::<Settings>(Path::new("ai-settings.json"), 1_000_000)
+        let settings_output = Self::settings_path(data_dir);
+        if let Ok(profile) = read_json::<Settings>(&settings_output, 1_000_000)
             && profile.validate().is_ok()
             && let Ok(stamp) = fingerprint(&(&profile.server, profile.backend, &profile.models_dir))
             && state.installation_stamp != stamp
@@ -620,6 +628,7 @@ impl Desktop {
             state.installation_stamp = stamp;
         }
         let mut app = Self::new(state);
+        app.settings_output = settings_output;
         app.refresh(&cc.egui_ctx);
         app
     }
@@ -1501,11 +1510,18 @@ impl Desktop {
         let mut settings = self.state.settings.clone();
         let preset = settings.preset;
         settings.preset = Preset::Maximum;
+        let output = self.settings_output.clone();
         self.studio_task(ctx, move |c, log| {
-            let mut next =
-                crate::setup::install(&settings, &crate::setup::Options::default(), &c, &log)?;
-            next.preset = preset;
-            atomic_json(Path::new("ai-settings.json"), &next)?;
+            let next = crate::setup::install_to(
+                &settings,
+                &crate::setup::Options {
+                    output_preset: Some(preset),
+                    ..Default::default()
+                },
+                &output,
+                &c,
+                &log,
+            )?;
             Ok(studio::StudioMessage::Setup(Box::new(next)))
         });
     }
@@ -1973,26 +1989,19 @@ impl Desktop {
             )
             .clicked()
         {
-            let (dir, id, w, p) = (
-                self.draft.models_dir.clone(),
+            let (settings, id, w, p) = (
+                self.draft.clone(),
                 self.model_id.clone(),
                 PathBuf::from(&self.weights),
                 PathBuf::from(&self.projector),
             );
-            let tx = self.tx.clone();
-            let ctx = ctx.clone();
-            self.busy_setup = true;
-            self.worker = Some(thread::spawn(move || {
-                let msg = match runtime::register(&dir, &id, &w, &p) {
-                    Ok(m) => Message::Notice(format!(
-                        "Registered {}. Apply settings to use this registry.",
-                        m.name
-                    )),
-                    Err(e) => failure(e),
-                };
-                let _ = tx.send(msg);
-                ctx.request_repaint();
-            }));
+            self.studio_task(ctx, move |c, log| {
+                let m = crate::models::register_validated(&settings, &id, &w, &p, &c, &log)?;
+                Ok(studio::StudioMessage::Done(format!(
+                    "Registered {}. Apply settings to use this registry.",
+                    m.name
+                )))
+            });
         }
         if self.busy_setup {
             ui.horizontal(|ui| {
@@ -2722,6 +2731,7 @@ fn code_static(s: &str) -> &'static str {
         "NG630" => "NG630",
         "NG640" => "NG640",
         "NG650" => "NG650",
+        "NG661" => "NG661",
         "NG900" => "NG900",
         "NG901" => "NG901",
         _ => "NG500",
@@ -3586,6 +3596,14 @@ mod acceptance {
         assert_eq!(state.settings.models_dir, root.join("models"));
         assert_eq!(state.settings.writer.root, root.join("writers"));
         assert_eq!(state.settings.shared_model_store, root.join("model-store"));
+        assert_eq!(
+            Desktop::settings_path(Some(root)),
+            root.join("ai-settings.json")
+        );
+        assert_eq!(
+            Desktop::settings_path(None),
+            PathBuf::from("ai-settings.json")
+        );
         assert!(state.queue.is_empty() && state.recent.is_empty());
         state.settings.validate().unwrap();
     }

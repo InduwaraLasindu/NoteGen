@@ -219,7 +219,7 @@ fn renamed_duplicate_reuses_exact_project_or_preserves_private_history_in_a_new_
 fn reuse_rejects_different_recognition_settings_and_a_changed_confirmed_duplicate() {
     let (_temp, source, settings, project) = fixture();
     let mut changed = settings.clone();
-    changed.handwriting = true;
+    changed.deskew = !settings.deskew;
     let different = project_reuse::preview(
         &source,
         &changed,

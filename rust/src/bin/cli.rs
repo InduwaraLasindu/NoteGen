@@ -262,8 +262,7 @@ fn run() -> Result<()> {
         }
         Action::ApplyUpdates { report, output } => {
             let report = read_json(&report, 4_000_000)?;
-            let next = notegen::maintenance::apply(&s, &report, &c, &log)?;
-            atomic_json(&output, &next)?;
+            notegen::maintenance::apply_to(&s, &report, &output, &c, &log)?;
         }
         Action::Optimize { output } => {
             atomic_json(&output, &notegen::tuning::run(&s, &c, &log)?)?;
@@ -283,26 +282,43 @@ fn run() -> Result<()> {
                 s.backend = serde_json::from_value(serde_json::Value::String(backend))?;
             }
             s.validate()?;
-            let next = notegen::setup::install(
+            let next = notegen::setup::install_to(
                 &s,
                 &notegen::setup::Options {
                     models_only,
                     runtime_only,
                     model_ids,
+                    output_preset: None,
                 },
+                &output,
                 &c,
                 &log,
             )?;
-            atomic_json(&output, &next)?;
-            println!("AI setup complete. Settings saved to {}", output.display());
+            let pending = notegen::setup::pending_runtime(&next, &c)?.is_some();
+            if pending {
+                println!(
+                    "Runtime staged. Complete model setup to run recognition canaries before activation. Candidate settings saved to {}",
+                    output.display()
+                );
+            } else {
+                println!("AI setup complete. Settings saved to {}", output.display());
+            }
             if installer {
-                println!("NGPROGRESS|1000|AI runtime and all selected models verified and ready");
+                if pending {
+                    println!(
+                        "NGPROGRESS|1000|Runtime staged; complete model setup before recognition is ready"
+                    );
+                } else {
+                    println!(
+                        "NGPROGRESS|1000|AI runtime and all selected models verified and ready"
+                    );
+                }
             }
         }
 
         Action::RegisterReader { spec } => {
             let model = read_json(&spec, 100_000)?;
-            let m = notegen::models::save_custom(&s.models_dir, model, &c)?;
+            let m = notegen::models::save_custom_validated(&s, model, &c, &log)?;
             println!("Registered {}", m.id);
         }
         Action::CheckUpdate { id } => {
@@ -321,7 +337,7 @@ fn run() -> Result<()> {
                 .find(|m| m.id == id)
                 .ok_or_else(|| Fault::new("NG650", "Reader is not registered"))?;
             let update = notegen::models::check(&model, &c)?;
-            let installed = notegen::models::install(&s.models_dir, &model, &update, &c, &log)?;
+            let installed = notegen::models::install_validated(&s, &model, &update, &c, &log)?;
             println!("Activated {} at {}", installed.id, installed.revision);
         }
         Action::Writers => println!(
@@ -427,7 +443,7 @@ fn run() -> Result<()> {
             weights,
             projector,
         } => {
-            let m = runtime::register(&s.models_dir, &id, &weights, &projector)?;
+            let m = notegen::models::register_validated(&s, &id, &weights, &projector, &c, &log)?;
             println!(
                 "Registered {} with verified local GGUFs and checksum {}",
                 m.name, m.sha256

@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod assistance;
 pub mod bundles;
 pub mod canary;
@@ -43,6 +44,7 @@ pub mod project_lock;
 pub mod project_reuse;
 pub mod projects;
 pub mod redactions;
+pub mod references;
 pub mod resources;
 pub mod review;
 pub mod roundtrip;

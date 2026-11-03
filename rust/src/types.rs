@@ -55,6 +55,9 @@ impl Fault {
             "NG650" => {
                 "Check model metadata, available disk space and the publisher revision. The active version is preserved."
             }
+            "NG661" => {
+                "Preserve pending AI candidates and the activation journal. Retry setup with the same settings to recover; inspect conflicting registry/settings edits before changing them."
+            }
             "NG680" => {
                 "Inspect the marked session and keep its artifacts. Export completed output or a recovery ZIP before selecting any cleanup; recover an interrupted cleanup first."
             }
@@ -131,6 +134,8 @@ pub struct Settings {
     pub models_dir: PathBuf,
     pub shared_model_store: PathBuf,
     pub project_lock: Option<PathBuf>,
+    pub measured_policy: Option<PathBuf>,
+    pub memory_history: Option<PathBuf>,
     pub endpoint: String,
     pub external_server: bool,
     pub subject: String,
@@ -200,6 +205,8 @@ impl Default for Settings {
             models_dir: "models".into(),
             shared_model_store: crate::model_store::default_root().unwrap_or_default(),
             project_lock: None,
+            measured_policy: None,
+            memory_history: None,
             endpoint: "http://127.0.0.1:18745".into(),
             external_server: false,
             subject: String::new(),
@@ -415,6 +422,14 @@ impl Settings {
                     || path.to_string_lossy().len() > 4096
                     || path.to_string_lossy().chars().any(char::is_control)
             })
+            || [&self.measured_policy, &self.memory_history]
+                .into_iter()
+                .flatten()
+                .any(|path| {
+                    path.as_os_str().is_empty()
+                        || path.to_string_lossy().len() > 4096
+                        || path.to_string_lossy().chars().any(char::is_control)
+                })
         {
             return bad("Choose a bounded shared model store and optional project lock path");
         }
@@ -673,6 +688,9 @@ pub struct Page {
     pub script_detection: Option<crate::language_routing::BoundScriptObservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub region_languages: Vec<crate::language_routing::RegionLanguage>,
+    /// Only explicit source-bound review confirmation creates semantic references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_references: Vec<crate::references::ConfirmedLink>,
 }
 impl Page {
     pub fn validate(&self) -> Result<()> {
@@ -696,6 +714,13 @@ impl Page {
         self.content.validate()?;
         crate::geometry::validate_page(self)?;
         crate::language_routing::validate_page(self)?;
+        crate::references::validate_metadata(&self.confirmed_references)?;
+        anyhow::ensure!(
+            self.confirmed_references
+                .iter()
+                .all(|link| link.anchor.page == self.page),
+            Fault::new("NG500", "Reference anchor belongs to another source page")
+        );
         crate::layers::validate_metadata(&self.manual_layers)?;
         crate::redactions::validate_metadata(&self.confirmed_redactions)?;
         anyhow::ensure!(

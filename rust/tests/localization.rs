@@ -45,3 +45,83 @@ fn old_settings_without_interface_locale_or_custom_tessdata_still_load() {
     assert!(restored.tessdata_dir.as_os_str().is_empty());
     assert_eq!(restored.languages, "eng");
 }
+
+#[test]
+fn catalog_templates_reorder_ui_words_but_preserve_opaque_paths_documents_tokens_and_braces() {
+    validate_catalog().unwrap();
+    let name = "Save {password} sin+eng NG100: not a message".to_owned();
+    let path = "C:\\Users\\Private\\passphrase-{secret}\\Qwen3.5-2B.gguf".to_owned();
+    let args = [("name", name.clone()), ("path", path.clone())];
+    assert_eq!(
+        render(Locale::En, "job.saved", &args).unwrap(),
+        format!("Saved {name} to {path}")
+    );
+    assert_eq!(
+        render(Locale::Si, "job.saved", &args).unwrap(),
+        format!("{path} වෙත {name} සුරකින ලදි.")
+    );
+    assert_eq!(
+        render(Locale::Ta, "job.saved", &args).unwrap(),
+        format!("{name} {path} இல் சேமிக்கப்பட்டது.")
+    );
+    assert_ne!(text(Locale::Si, "save"), "Save");
+    assert_eq!(name, "Save {password} sin+eng NG100: not a message");
+    assert_eq!(
+        render(Locale::En, "JSON {{literal braces}}", &[]).unwrap(),
+        "JSON {literal braces}"
+    );
+    assert_eq!(error_code("NG682: Private path retained"), Some("NG682"));
+    assert_eq!(error_code("Document content mentions NG682"), None);
+    assert_eq!(error_code("NG6820 is document data"), None);
+    assert_eq!(error_code("தமிழ்"), None);
+}
+
+#[test]
+fn template_argument_mistakes_and_resource_bounds_fail_without_echoing_private_values() {
+    for args in [
+        vec![],
+        vec![("name", "secret".into())],
+        vec![("name", "secret".into()), ("name", "second".into())],
+        vec![
+            ("name", "secret".into()),
+            ("path", "private".into()),
+            ("unexpected", "other".into()),
+        ],
+        vec![("name", "secret".into()), ("path", "x".repeat(65_537))],
+    ] {
+        let error = render(Locale::Si, "job.saved", &args)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret"));
+        assert!(!error.contains("private"));
+    }
+    for invalid in [
+        "{unterminated",
+        "unmatched }",
+        "{argument.with.field}",
+        "{nested{value}}",
+    ] {
+        assert!(template_signature(invalid).is_err());
+    }
+    let unknown = remedy(Locale::Ta, "invalid/document/identifier");
+    assert_eq!(unknown.code, "unknown");
+    assert_ne!(unknown.title, remedy(Locale::En, "unknown").title);
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn independent_ui_contexts_keep_their_own_locale_without_mutating_settings_or_other_contexts() {
+    let first = eframe::egui::Context::default();
+    let second = eframe::egui::Context::default();
+    set_context_locale(&first, Locale::Si);
+    set_context_locale(&second, Locale::Ta);
+    assert_eq!(context(&first, "save"), "සුරකින්න");
+    assert_eq!(context(&second, "save"), "சேமி");
+    set_context_locale(&first, Locale::En);
+    assert_eq!(context(&first, "save"), "Save");
+    assert_eq!(context(&second, "save"), "சேமி");
+    assert_eq!(
+        context_locale(&eframe::egui::Context::default()),
+        Locale::En
+    );
+}

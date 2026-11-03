@@ -541,6 +541,9 @@ fn projected(
         confirmed_redactions: masks(page, from, to, source)?,
         ..Default::default()
     };
+    if !page.confirmed_references.is_empty() {
+        result.content.warnings.push("Confirmed footnote/citation links remain on the archived parent. Reconfirm relationships against this derived source before semantic export.".into());
+    }
     if !result.confirmed_redactions.is_empty() {
         result.content = redactions::enforce_view(
             &result.content,
@@ -863,6 +866,12 @@ pub fn preview(p: &Project, operation: Operation, c: &Control) -> Result<LayoutP
                 });
             }
             result.content.warnings=vec!["Merged page: readings were geometrically projected from retained source pages; review before approval.".into()];
+            if parents
+                .iter()
+                .any(|(page, _)| !page.confirmed_references.is_empty())
+            {
+                result.content.warnings.push("Confirmed footnote/citation links remain on archived parents. Reconfirm relationships against this merged source before semantic export.".into());
+            }
             if !result.confirmed_redactions.is_empty() {
                 result.content = redactions::enforce_view(
                     &result.content,

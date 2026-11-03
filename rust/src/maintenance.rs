@@ -2,7 +2,12 @@
 use crate::{models, runtime, setup, storage::*, types::*};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fs, io::Read, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const RELEASES: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20";
 const RELEASE_LIST_LIMIT: usize = 20;
@@ -440,6 +445,15 @@ pub fn check(s: &Settings, c: &Control, log: &Activity) -> Result<Report> {
     Ok(report)
 }
 pub fn apply(s: &Settings, report: &Report, c: &Control, log: &Activity) -> Result<Settings> {
+    apply_to(s, report, Path::new("ai-settings.json"), c, log)
+}
+pub fn apply_to(
+    s: &Settings,
+    report: &Report,
+    settings_output: &Path,
+    c: &Control,
+    log: &Activity,
+) -> Result<Settings> {
     use crate::progress::{Phase, Work};
     let total = report.download_bytes().div_ceil(1024).max(1) as usize;
     let actions = report.models.len() + usize::from(report.runtime.is_some());
@@ -476,15 +490,15 @@ pub fn apply(s: &Settings, report: &Report, c: &Control, log: &Activity) -> Resu
     };
     let mut next = s.clone();
     if let Some(r) = &report.runtime {
-        let active = setup::install_runtime_release(s, &r.build, &r.assets, c, &events)?;
+        let active =
+            setup::install_runtime_release_to(s, &r.build, &r.assets, settings_output, c, &events)?;
         next.server = active.server;
         next.backend = active.backend;
-        // Persist each successful activation, even if a later model is cancelled.
-        atomic_json(&PathBuf::from("ai-settings.json"), &next)?;
+        next.external_server = false;
     }
     for (index, change) in report.models.iter().enumerate() {
         c.check()?;
-        models::install(&s.models_dir, &change.model, &change.update, c, &events)?;
+        models::install_validated(&next, &change.model, &change.update, c, &events)?;
         log.work(
             Work::new(Phase::Activate, index + 1, actions, 1500, false),
             format!("{} updated and verified", change.model.name),
@@ -501,31 +515,15 @@ pub fn apply(s: &Settings, report: &Report, c: &Control, log: &Activity) -> Resu
     Ok(next)
 }
 pub fn rollback_runtime(s: &Settings, c: &Control) -> Result<Settings> {
-    let root = setup::runtime_root(s);
-    let previous: setup::RuntimeRecord =
-        read_json(&root.join("previous-ai-runtime.json"), 100_000)?;
-    let path = previous.server.canonicalize()?;
-    anyhow::ensure!(
-        path.starts_with(root.canonicalize()?.join("ai-backends"))
-            && path.file_name().is_some_and(|n| n == "llama-server.exe"),
-        "Previous runtime is outside the managed folder"
-    );
-    let (ok, _, _) = crate::scan::run(
-        &path,
-        &["--list-devices".into()],
-        Duration::from_secs(30),
-        c,
-    )?;
-    anyhow::ensure!(ok, "Previous runtime no longer starts");
-    if let Some(active) = setup::saved_runtime(&root) {
-        atomic_json(&root.join("previous-ai-runtime.json"), &active)?;
-    }
-    atomic_json(&root.join("active-ai-runtime.json"), &previous)?;
-    let mut next = s.clone();
-    next.server = previous.server;
-    next.backend = previous.backend;
-    atomic_json(&PathBuf::from("ai-settings.json"), &next)?;
-    Ok(next)
+    rollback_runtime_to(s, Path::new("ai-settings.json"), c, &Activity::default())
+}
+pub fn rollback_runtime_to(
+    s: &Settings,
+    settings_output: &Path,
+    c: &Control,
+    log: &Activity,
+) -> Result<Settings> {
+    setup::rollback_runtime_to(s, settings_output, c, log)
 }
 pub fn download_app(release: &AppRelease, c: &Control, log: &Activity) -> Result<PathBuf> {
     // Revalidate reports loaded from disk before executing their contents.

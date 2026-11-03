@@ -807,10 +807,10 @@ impl Desktop {
                             )
                             .clicked()
                         {
-                            let dir = self.state.settings.models_dir.clone();
+                            let settings = self.state.settings.clone();
                             let id = m.id.clone();
-                            self.studio_task(ctx, move |_, _| {
-                                models::rollback(&dir, &id)?;
+                            self.studio_task(ctx, move |c, log| {
+                                models::rollback_validated(&settings, &id, &c, &log)?;
                                 Ok(StudioMessage::Done(format!(
                                     "Restored previous version of {id}"
                                 )))
@@ -854,10 +854,12 @@ impl Desktop {
                             if let Err(error) = self.prepare_download_control() {
                                 self.notice = error.to_string();
                             } else {
-                                let dir = self.state.settings.models_dir.clone();
+                                let settings = self.state.settings.clone();
                                 let model = m.clone();
                                 self.studio_task(ctx, move |c, log| {
-                                    let m = models::install(&dir, &model, &update, &c, &log)?;
+                                    let m = models::install_validated(
+                                        &settings, &model, &update, &c, &log,
+                                    )?;
                                     Ok(StudioMessage::Done(format!(
                                         "Activated {}. Previous version retained.",
                                         m.name
@@ -895,7 +897,7 @@ impl Desktop {
     ui.checkbox(&mut self.studio.hub,"Enable optional Hugging Face revision updates");
     if self.studio.hub{ui.horizontal(|ui|{ui.label("owner/repository");ui.text_edit_singleline(&mut self.studio.hub_repo);});ui.horizontal(|ui|{ui.label("Weights filename");ui.text_edit_singleline(&mut self.studio.hub_weights);});ui.horizontal(|ui|{ui.label("Projector filename");ui.text_edit_singleline(&mut self.studio.hub_projector);});}
     if ui.button("Verify & register third-party reader").clicked(){let mut model=self.studio.custom.clone();if !self.studio.external{model.endpoint=None;}
-    if self.studio.hub{model.hub=Some(models::Hub{repository:self.studio.hub_repo.clone(),weights:self.studio.hub_weights.clone(),projector:self.studio.hub_projector.clone()});}else{model.hub=None;}let dir=self.state.settings.models_dir.clone();self.studio_task(ctx,move|c,_|{let m=models::save_custom(&dir,model,&c)?;Ok(StudioMessage::Done(format!("Registered {}. Select it automatically or in the reader allow-list.",m.name)))});}
+    if self.studio.hub{model.hub=Some(models::Hub{repository:self.studio.hub_repo.clone(),weights:self.studio.hub_weights.clone(),projector:self.studio.hub_projector.clone()});}else{model.hub=None;}let settings=self.state.settings.clone();self.studio_task(ctx,move|c,log|{let m=models::save_custom_validated(&settings,model,&c,&log)?;Ok(StudioMessage::Done(format!("Registered {}. Select it automatically or in the reader allow-list.",m.name)))});}
    });
   });
         if ui.button("Curated catalog & runtime settings").clicked() {

@@ -331,6 +331,7 @@ pub fn capture(
     c.check()?;
     anyhow::ensure!(
         digest(&project.manifest.input_sha256)
+            && (models.is_empty() || !settings.external_server)
             && models.len() <= 32
             && models
                 .iter()
@@ -559,6 +560,7 @@ pub fn ensure_conversion_lock(
     c: &Control,
 ) -> Result<Option<PathBuf>> {
     if settings.preset == Preset::Fast
+        || settings.external_server
         || models.is_empty()
         || models.iter().any(|m| m.endpoint.is_some())
     {

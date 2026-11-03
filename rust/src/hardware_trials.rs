@@ -559,8 +559,8 @@ struct Deadline {
 impl Deadline {
     fn start(parent: &Control, seconds: u64) -> Self {
         let control = Control {
-            paused: parent.paused.clone(),
-            ..Default::default()
+            cancelled: Arc::new(AtomicBool::new(false)),
+            ..parent.clone()
         };
         let done = Arc::new(AtomicBool::new(false));
         let closed = done.clone();
@@ -921,4 +921,36 @@ pub fn run(
         report.notes.push("No automatic device recommendation: some requests failed or observed reader outputs differed. Compare source quality and per-device results before choosing.".into());
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod deadline_privacy {
+    use super::*;
+    use std::path::PathBuf;
+    #[test]
+    fn real_deadline_child_inherits_private_temporary_scope_without_cancelling_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = Control {
+            private_temp_root: Some(root.path().into()),
+            ..Default::default()
+        };
+        let deadline = Deadline::start(&parent, 10);
+        let (program, args) = if cfg!(windows) {
+            ("powershell.exe",vec!["-NoProfile".into(),"-NonInteractive".into(),"-Command".into(),"[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);[Console]::Out.Write($env:TMP)".into()])
+        } else {
+            ("sh", vec!["-c".into(), "printf '%s' \"$TMPDIR\"".into()])
+        };
+        let (ok, out, error) = crate::scan::run(
+            Path::new(program),
+            &args,
+            Duration::from_secs(5),
+            &deadline.control,
+        )
+        .unwrap();
+        assert!(ok, "{error}");
+        assert_eq!(PathBuf::from(out.trim()), root.path());
+        assert!(!Arc::ptr_eq(&deadline.control.cancelled, &parent.cancelled));
+        drop(deadline);
+        assert!(!parent.cancelled.load(Ordering::Relaxed));
+    }
 }

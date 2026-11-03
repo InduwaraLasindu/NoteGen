@@ -4,7 +4,7 @@ use std::{fs, sync::atomic::Ordering};
 fn supported_settings_migration_has_exact_backup_and_byte_exact_rollback() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("settings.json");
-    let original = b"{\n  \"preset\": \"fast\", \"handwriting\": true\n}\n";
+    let original = b"{\n  \"preset\": \"balanced\", \"handwriting\": true\n}\n";
     fs::write(&path, original).unwrap();
     let plan = migrations::preview_settings(&path, &Control::default()).unwrap();
     assert!(migrations::apply(&plan, "wrong", &Control::default()).is_err());
@@ -12,7 +12,7 @@ fn supported_settings_migration_has_exact_backup_and_byte_exact_rollback() {
     let receipt = migrations::apply(&plan, &plan.token, &Control::default()).unwrap();
     let after: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(after["handwriting"], true);
-    assert_eq!(after["preset"], "fast");
+    assert_eq!(after["preset"], "balanced");
     assert!(after.get("experience").is_some());
     assert!(receipt.backup.join("before-0").is_file());
     let rollback = migrations::rollback_preview(&receipt, &Control::default()).unwrap();
@@ -30,7 +30,7 @@ fn migration_rejects_stale_preview_later_edits_unknown_fields_and_cancellation()
     cancel.cancelled.store(true, Ordering::Relaxed);
     assert!(migrations::apply(&plan, &plan.token, &cancel).is_err());
     assert!(!root.path().join("project-transaction.json").exists());
-    fs::write(&path, b"{\"preset\":\"fast\",\"handwriting\":true}").unwrap();
+    fs::write(&path, b"{\"preset\":\"balanced\",\"handwriting\":true}").unwrap();
     let concurrent = fs::read(&path).unwrap();
     assert!(migrations::apply(&plan, &plan.token, &Control::default()).is_err());
     assert_eq!(fs::read(&path).unwrap(), concurrent);

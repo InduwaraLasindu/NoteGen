@@ -87,6 +87,27 @@ jobs:
           $manifest | ConvertTo-Json | Set-Content build/installer-provenance.json -Encoding utf8
           "version=$env:RELEASE_VERSION" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "source_sha=$env:SOURCE_SHA" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Require independently reproduced executable evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $artifacts=(& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/artifacts") | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0){throw 'Reproducibility artifact lookup failed'}
+          $evidence=@($artifacts.artifacts | Where-Object name -EQ 'Windows-reproducibility-evidence')
+          if($evidence.Count -ne 1 -or $evidence[0].expired -or $evidence[0].digest -notmatch '^sha256:[a-f0-9]{64}$'){throw 'Independent reproducibility evidence is unavailable'}
+          & gh run download $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --name Windows-reproducibility-evidence --dir build/reproducibility-evidence
+          if($LASTEXITCODE -ne 0){throw 'Independent evidence download failed'}
+          $report=Get-Content build/reproducibility-evidence/reproducibility.json -Raw | ConvertFrom-Json
+          if($report.schema -ne 1 -or -not $report.matched -or -not $report.independent_jobs -or $report.source_commit -cne $env:SOURCE_SHA -or $report.subjects.Count -ne 2){throw 'Independent comparison does not match the verified source'}
+          foreach($name in @('NoteGen.exe','notegen-cli.exe')){
+            $subject=@($report.subjects | Where-Object name -CEQ $name)
+            if($subject.Count -ne 1 -or (Get-FileHash -LiteralPath "build/installer-payload/NoteGen/$name" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $subject[0].sha256){throw "Reproduced executable differs from installer payload: $name"}
+          }
+          Copy-Item build/reproducibility-evidence/reproducibility.json build/installer-payload/NoteGen/provenance/reproducibility.json
+          Copy-Item build/reproducibility-evidence/attestation-support.json build/installer-payload/NoteGen/provenance/attestation-support.json
+          $manifest=Get-Content build/installer-provenance.json -Raw | ConvertFrom-Json -AsHashtable
+          $manifest.reproducibility=@{artifact=$evidence[0].id;artifact_digest=$evidence[0].digest;report_sha256=(Get-FileHash build/reproducibility-evidence/reproducibility.json -Algorithm SHA256).Hash.ToLowerInvariant();scope=$report.scope}
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content build/installer-provenance.json -Encoding utf8NoBOM
       - name: Install the SHA256-pinned compiler
         shell: pwsh
         run: |
@@ -153,7 +174,11 @@ jobs:
           })
           Copy-Item (Join-Path $payload 'provenance/build-provenance.json') dist/installer/portable-build-provenance.json
           Copy-Item (Join-Path $payload 'provenance/notegen.cdx.json') dist/installer/portable-notegen.cdx.json
-          $metadataFiles=@('portable-build-provenance.json','portable-notegen.cdx.json')
+          Copy-Item (Join-Path $payload 'provenance/reproducible-build.json') dist/installer/portable-build-recipe.json
+          Copy-Item (Join-Path $payload 'provenance/reproducibility.json') dist/installer/windows-reproducibility.json
+          Copy-Item (Join-Path $payload 'provenance/attestation-support.json') dist/installer/attestation-support.json
+          Copy-Item build/verified-artifact/NoteGen-Rust-Windows-x64.zip,build/verified-artifact/NoteGen-Rust-Windows-x64.zip.sha256 dist/installer
+          $metadataFiles=@('portable-build-provenance.json','portable-notegen.cdx.json','portable-build-recipe.json','windows-reproducibility.json','attestation-support.json')
           $manifest.portable_metadata=@(foreach($name in $metadataFiles){@{name=$name;sha256=(Get-FileHash "dist/installer/$name" -Algorithm SHA256).Hash.ToLowerInvariant()}})
           $manifest.portable_provenance_scope='Hashes and dependency inventory from the verified portable application. Installer-added CRT binaries are recorded in installer_payload_binaries.'
           $manifest.authenticode_signed=$false
@@ -194,6 +219,9 @@ jobs:
           Corpus collection and Windows signing were excluded by request. The
           installer is unsigned. SHA256, installer payload hashes and the verified
           portable application's dependency inventory/provenance accompany the assets.
+          The two NoteGen executables also matched an independent Windows build.
+          See windows-reproducibility.json for the exact subjects, recipe and scope.
+          Native build attestation availability is recorded in attestation-support.json.
           [Usage and AI setup](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/INSTALLER.md)
           "@ | Set-Content dist/installer/release-notes.md -Encoding utf8
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -229,6 +257,7 @@ jobs:
           cd dist
           sha256sum --check "NoteGen-Setup-$RELEASE_VERSION.exe.sha256"
           sha256sum --check portable-metadata.sha256
+          sha256sum --check NoteGen-Rust-Windows-x64.zip.sha256
           head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
           test "$head" = "$GITHUB_SHA"
           tag="v$RELEASE_VERSION"
@@ -236,5 +265,5 @@ jobs:
             echo 'This release version already exists; use a new version instead of replacing published binaries.'
             exit 1
           fi
-          gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" installer-manifest.json portable-build-provenance.json portable-notegen.cdx.json portable-metadata.sha256 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Windows installer" --notes-file release-notes.md --draft
+          gh release create "$tag" "NoteGen-Setup-$RELEASE_VERSION.exe" "NoteGen-Setup-$RELEASE_VERSION.exe.sha256" NoteGen-Rust-Windows-x64.zip NoteGen-Rust-Windows-x64.zip.sha256 installer-manifest.json portable-build-provenance.json portable-notegen.cdx.json portable-build-recipe.json windows-reproducibility.json attestation-support.json portable-metadata.sha256 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "NoteGen $RELEASE_VERSION — Windows installer" --notes-file release-notes.md --draft
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest

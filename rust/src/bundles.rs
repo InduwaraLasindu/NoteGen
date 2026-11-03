@@ -573,8 +573,8 @@ fn extract_runtime(archives: &[PathBuf], destination: &Path, c: &Control) -> Res
     }
     Ok(())
 }
-/// Prepares a separate registry/runtime and returns its settings. The caller can
-/// atomically save these settings after success. Existing active data is untouched.
+/// Low-level extraction into a separate registry/runtime for staging and fixtures.
+/// Production callers must use import_validated before selecting these settings.
 pub fn import(
     settings: &Settings,
     input: &Path,
@@ -753,6 +753,126 @@ pub fn import(
     Ok(next)
 }
 
+/// Import into a new isolated destination, retain failed candidates, and expose
+/// selectable settings only after fresh native print/table canaries pass. No
+/// registration or settings in the original installation is modified.
+pub fn import_validated(
+    settings: &Settings,
+    input: &Path,
+    destination: &Path,
+    c: &Control,
+    log: &crate::storage::Activity,
+) -> Result<Settings> {
+    let mut next = import(settings, input, destination, c)?;
+    next.external_server = false;
+    let payload = std::path::absolute(destination)?.join("payload");
+    let status = payload.join("canary-status.json");
+    storage::protected_json(
+        &status,
+        &serde_json::json!({
+            "schema":1, "state":"pending",
+            "note":"Isolated candidates only. Original installation/settings remain selected. A fresh native print/table canary is required before this registry can be selected."
+        }),
+    )?;
+    let result = (|| -> Result<Settings> {
+        let models = crate::runtime::inventory(&next.models_dir)?;
+        anyhow::ensure!(
+            models
+                .iter()
+                .filter(|model| model.endpoint.is_none())
+                .count()
+                <= 64,
+            Fault::new(
+                "NG660",
+                "Offline activation supports at most 64 local readers"
+            )
+        );
+        // Withdraw all private descriptor pointers before any native validation.
+        // Files stay inspectable, and a failed candidate is never installed into
+        // the source registry or made selectable through returned settings.
+        let pending = payload.join("pending-registry");
+        check_path(&pending)?;
+        anyhow::ensure!(
+            !pending.exists(),
+            Fault::new("NG401", "Pending registry collision")
+        );
+        fs::rename(&next.models_dir, &pending)?;
+        let runtime = payload.join("ai-runtime");
+        let runtime_pointer = runtime.join("active-ai-runtime.json");
+        let runtime_content = if runtime_pointer.is_file() {
+            check_path(&runtime_pointer)?;
+            let snapshot = crate::activation::snapshot(&runtime_pointer, c)?
+                .ok_or_else(|| Fault::new("NG660", "Offline runtime pointer disappeared"))?;
+            let mut pointer = tempfile::TempPath::try_from_path(&runtime_pointer)?;
+            pointer.disable_cleanup(true);
+            pointer
+                .persist_noclobber(runtime.join("pending-ai-runtime.json"))
+                .map_err(|error| error.error)?;
+            Some(snapshot.content()?)
+        } else {
+            None
+        };
+        let mut candidates = vec![];
+        let mut external = vec![];
+        for model in models {
+            c.check()?;
+            if model.endpoint.is_none() {
+                candidates.push(crate::models::prepare_custom(&next, model, c)?);
+            } else {
+                external.push(crate::activation::Change {
+                    scope: crate::activation::Scope::Models,
+                    file: format!("{}.notegen.json", model.id),
+                    expected: None,
+                    content: serde_json::to_vec_pretty(&model)?,
+                });
+            }
+        }
+        anyhow::ensure!(
+            !candidates.is_empty(),
+            Fault::new(
+                "NG660",
+                "Offline candidates remain pending until a local reader canary is available"
+            )
+        );
+        let probes = candidates
+            .iter()
+            .map(|candidate| candidate.model().clone())
+            .collect::<Vec<_>>();
+        let proofs = setup::validate_pairs(&probes, &next, &payload.join("canaries"), c, log)?;
+        for (model, proof) in probes.iter().zip(&proofs) {
+            proof.verify_current(model, &next.server, c)?;
+        }
+        let mut changes = external;
+        for candidate in &candidates {
+            changes.extend(candidate.changes(c)?);
+        }
+        if let Some(content) = runtime_content {
+            changes.push(crate::activation::Change {
+                scope: crate::activation::Scope::Runtime,
+                file: "active-ai-runtime.json".into(),
+                expected: None,
+                content,
+            });
+        }
+        crate::activation::commit(
+            &next.models_dir,
+            &setup::runtime_root(&next),
+            None,
+            changes,
+            c,
+        )?;
+        storage::atomic_json(
+            &status,
+            &serde_json::json!({
+                "schema":1, "state":"validated",
+                "note":"Known print/table compatibility canaries passed. Select the separately saved settings explicitly. Original installation remains untouched; real documents still require review."
+            }),
+        )?;
+        Ok(next.clone())
+    })();
+    result.map_err(|error| error.context(format!("Offline import remains isolated/pending at {}; the original installation and settings were preserved", destination.display())))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preflight {
     pub model_ids: Vec<String>,
@@ -850,7 +970,377 @@ pub struct CapabilityCard {
     pub license: String,
     pub tested_languages: Vec<String>,
     pub limitations: Vec<String>,
+    pub provenance: CapabilityProvenance,
+    pub publisher_claims: Vec<String>,
+    pub publisher_declared_languages: Vec<String>,
+    pub language_evidence_note: String,
+    pub license_declarations: Vec<CapabilityLicense>,
+    pub sources: Vec<CapabilitySource>,
+    pub assets: Vec<CapabilityAsset>,
+    pub task_protocols: Vec<TaskProtocol>,
+    pub memory_estimate: CapabilityMemory,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilitySourceKind {
+    PublisherModelCard,
+    ConversionModelCard,
+    PublisherLicenseFile,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitySource {
+    pub kind: CapabilitySourceKind,
+    pub url: String,
+    pub revision: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapabilityProvenance {
+    pub upstream_publisher_account: String,
+    pub upstream_repository: String,
+    /// Documentation captured independently, not the upstream revision used by the converter.
+    pub upstream_documentation_revision: String,
+    pub upstream_weights_revision: Option<String>,
+    pub conversion_repository_owner: String,
+    pub conversion_repository: String,
+    pub conversion_revision: String,
+    pub metadata_verified_on: String,
+    pub note: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LicenseScope {
+    PublisherModel,
+    ConversionModel,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapabilityLicense {
+    pub scope: LicenseScope,
+    pub declared_identifier: Option<String>,
+    pub evidence_url: String,
+    pub separate_license_file_available: bool,
+    pub note: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapabilityAsset {
+    pub role: String,
+    pub file: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub immutable_url: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskProtocol {
+    pub adapter: String,
+    pub task: String,
+    pub request: String,
+    pub response: String,
+    pub evidence_note: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEstimateBasis {
+    PlanningCatalogEstimate,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapabilityMemory {
+    pub resident_mib: u64,
+    pub basis: MemoryEstimateBasis,
+    pub measured_peak_mib: Option<u64>,
+    pub note: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapabilityFacts {
+    schema: u32,
+    verified_on: String,
+    models: Vec<ReaderFacts>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReaderFacts {
+    id: String,
+    publisher_account: String,
+    upstream_repository: String,
+    documentation_revision: String,
+    upstream_license: String,
+    publisher_license_file_available: bool,
+    conversion_repository: String,
+    conversion_revision: String,
+    conversion_license: Option<String>,
+    publisher_claims: Vec<String>,
+    declared_languages: Vec<String>,
+    language_note: String,
+    sources: Vec<CapabilitySource>,
+}
+fn capability_hex(value: &str, n: usize) -> bool {
+    value.len() == n
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+fn capability_repository(value: &str) -> bool {
+    let parts = value.split('/').collect::<Vec<_>>();
+    parts.len() == 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 150
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+}
+fn capability_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+}
+fn capability_protocols(prompt: &str) -> Result<Vec<TaskProtocol>> {
+    let adapter = prompt.to_owned();
+    let evidence_note="Application request/output contract only; not a measured accuracy or language-support claim.".to_owned();
+    let tasks: Vec<(&str, &str, &str)> = match prompt {
+        "lighton" => vec![(
+            "grounded document transcription",
+            "grounding",
+            "Publisher grounding blocks parsed into source-grounded text, tables and other emitted block kinds.",
+        )],
+        "glm" => vec![
+            (
+                "text transcription",
+                "Text Recognition:",
+                "Plain/Markdown recognition parsed into NoteGen blocks.",
+            ),
+            (
+                "table recognition",
+                "Table Recognition:",
+                "Explicit table-region pass parsed into NoteGen blocks.",
+            ),
+        ],
+        "structured" => vec![(
+            "structured document transcription",
+            "Scanned-page JSON schema instruction",
+            "Schema-bounded text, heading, list, table, figure, equation, code, caption and reference blocks. Figure interpretations require review; equations/code remain recognized text.",
+        )],
+        _ => {
+            return Err(Fault::new(
+                "NG650",
+                "Unknown reader adapter; capability protocols must be reviewed explicitly",
+            )
+            .into());
+        }
+    };
+    Ok(tasks
+        .into_iter()
+        .map(|(task, request, response)| TaskProtocol {
+            adapter: adapter.clone(),
+            task: task.into(),
+            request: request.into(),
+            response: response.into(),
+            evidence_note: evidence_note.clone(),
+        })
+        .collect())
+}
+fn capability_cards_from(facts: CapabilityFacts) -> Result<Vec<CapabilityCard>> {
+    let catalog = crate::planning::catalog();
+    anyhow::ensure!(
+        facts.schema == 1
+            && facts.models.len() == catalog.len()
+            && chrono::NaiveDate::parse_from_str(&facts.verified_on, "%Y-%m-%d").is_ok(),
+        Fault::new(
+            "NG650",
+            "Capability facts schema/date/catalog coverage is invalid"
+        )
+    );
+    let mut by_id = BTreeMap::new();
+    for fact in facts.models {
+        anyhow::ensure!(
+            by_id.insert(fact.id.clone(), fact).is_none(),
+            Fault::new("NG650", "Duplicate packaged capability facts")
+        );
+    }
+    let mut cards = vec![];
+    for model in catalog {
+        let fact = by_id.remove(&model.id).ok_or_else(|| {
+            Fault::new(
+                "NG650",
+                "Catalog reader is missing reviewed capability facts",
+            )
+        })?;
+        let (m, pin) = setup::pinned(&model.id)?;
+        anyhow::ensure!(
+            capability_repository(&fact.upstream_repository)
+                && capability_repository(&fact.conversion_repository)
+                && fact.upstream_repository.split('/').next()
+                    == Some(fact.publisher_account.as_str())
+                && capability_hex(&fact.documentation_revision, 40)
+                && fact.conversion_repository == pin.repository
+                && fact.conversion_revision == pin.revision
+                && capability_identifier(&fact.upstream_license)
+                && fact
+                    .conversion_license
+                    .as_deref()
+                    .is_none_or(capability_identifier)
+                && !fact.publisher_claims.is_empty()
+                && fact.publisher_claims.len() <= 8
+                && fact
+                    .publisher_claims
+                    .iter()
+                    .all(|s| !s.trim().is_empty() && s.len() <= 2000)
+                && fact.declared_languages.len() <= 256
+                && fact
+                    .declared_languages
+                    .iter()
+                    .all(|s| capability_identifier(s))
+                && fact.language_note.len() <= 4000,
+            Fault::new(
+                "NG650",
+                "Capability provenance does not match the compiled download pins"
+            )
+        );
+        let mut source_kinds = BTreeSet::new();
+        for source in &fact.sources {
+            let (repo, revision, file) = match source.kind {
+                CapabilitySourceKind::PublisherModelCard => (
+                    &fact.upstream_repository,
+                    &fact.documentation_revision,
+                    "README.md",
+                ),
+                CapabilitySourceKind::ConversionModelCard => (
+                    &fact.conversion_repository,
+                    &fact.conversion_revision,
+                    "README.md",
+                ),
+                CapabilitySourceKind::PublisherLicenseFile => (
+                    &fact.upstream_repository,
+                    &fact.documentation_revision,
+                    "LICENSE",
+                ),
+            };
+            anyhow::ensure!(
+                source_kinds.insert(format!("{:?}", source.kind))
+                    && source.revision == *revision
+                    && source.url == format!("https://huggingface.co/{repo}/raw/{revision}/{file}")
+                    && (1..=1_000_000).contains(&source.bytes)
+                    && capability_hex(&source.sha256, 64),
+                Fault::new("NG650", "Invalid or duplicate capability source evidence")
+            );
+        }
+        let publisher_card = fact
+            .sources
+            .iter()
+            .find(|s| s.kind == CapabilitySourceKind::PublisherModelCard)
+            .ok_or_else(|| Fault::new("NG650", "Publisher model-card source is missing"))?;
+        let conversion_card = fact
+            .sources
+            .iter()
+            .find(|s| s.kind == CapabilitySourceKind::ConversionModelCard)
+            .ok_or_else(|| Fault::new("NG650", "Pinned conversion-card source is missing"))?;
+        let license_file = fact
+            .sources
+            .iter()
+            .find(|s| s.kind == CapabilitySourceKind::PublisherLicenseFile);
+        anyhow::ensure!(
+            license_file.is_some() == fact.publisher_license_file_available,
+            Fault::new("NG650", "Capability license evidence scope is inconsistent")
+        );
+        let license_declarations=vec![CapabilityLicense{scope:LicenseScope::PublisherModel,declared_identifier:Some(fact.upstream_license.clone()),evidence_url:license_file.unwrap_or(publisher_card).url.clone(),separate_license_file_available:fact.publisher_license_file_available,note:if fact.publisher_license_file_available{"Publisher model-card declaration and captured LICENSE file."}else{"Publisher model-card declaration; no separate LICENSE file exists in the captured model repository revision."}.into()},CapabilityLicense{scope:LicenseScope::ConversionModel,declared_identifier:fact.conversion_license.clone(),evidence_url:conversion_card.url.clone(),separate_license_file_available:false,note:if fact.conversion_license.is_some(){"GGUF repository card declaration; no separate LICENSE file exists at the pinned conversion revision."}else{"The pinned conversion card does not declare a separate license. This absence is not replaced with an SDK/source-code license."}.into()}];
+        let task_protocols = capability_protocols(&m.prompt)?;
+        let tasks = task_protocols.iter().map(|p| p.task.clone()).collect();
+        let download_bytes = pin
+            .weights
+            .bytes
+            .checked_add(pin.projector.bytes)
+            .ok_or_else(|| Fault::new("NG650", "Capability asset byte count overflow"))?;
+        let assets = vec![("weights", &pin.weights), ("projector", &pin.projector)]
+            .into_iter()
+            .map(|(role, asset)| CapabilityAsset {
+                role: role.into(),
+                file: asset.file.clone(),
+                bytes: asset.bytes,
+                sha256: asset.sha256.clone(),
+                immutable_url: format!(
+                    "https://huggingface.co/{}/resolve/{}/{}",
+                    pin.repository, pin.revision, asset.file
+                ),
+            })
+            .collect();
+        let mut limitations=vec!["No versioned per-language quality measurement is packaged for this exact quantized reader; tested_languages is intentionally empty.".into(),"Publisher benchmark/feature statements concern its own model/pipeline and are not NoteGen accuracy, speed or handwriting guarantees.".into(),"Resident memory is a planning estimate, not a measured peak; context, image size, backend, KV cache and native buffers change actual use.".into(),"The captured publisher documentation revision is not proof of the upstream weights revision used by the GGUF converter; that base commit is unknown.".into()];
+        limitations.push(fact.language_note.clone());
+        if m.prompt == "glm" {
+            limitations.push("The publisher also documents Formula Recognition and schema extraction, but this NoteGen adapter emits only Text Recognition and Table Recognition prompts. The publisher's optional layout-detector SDK is a separate pipeline.".into());
+        }
+        if m.prompt == "lighton" {
+            limitations.push("Targeted tasks still use the publisher's fixed grounding protocol; arbitrary custom instructions are not claimed as supported.".into());
+        }
+        let provenance=CapabilityProvenance{upstream_publisher_account:fact.publisher_account,upstream_repository:fact.upstream_repository,upstream_documentation_revision:fact.documentation_revision,upstream_weights_revision:None,conversion_repository_owner:pin.repository.split('/').next().unwrap_or_default().into(),conversion_repository:pin.repository.clone(),conversion_revision:pin.revision.clone(),metadata_verified_on:facts.verified_on.clone(),note:"GGUF repository owner and upstream model publisher are separate identities. Repository ownership does not independently prove who authored each quantization. Sources are packaged snapshots; opening cards performs no network requests.".into()};
+        let license = format!(
+            "Publisher model declaration: {}. Pinned GGUF conversion declaration: {}.",
+            fact.upstream_license,
+            fact.conversion_license
+                .as_deref()
+                .unwrap_or("not separately recorded")
+        );
+        cards.push(CapabilityCard{id:m.id,name:m.name,family:m.family,source:m.source,download_repository:pin.repository,pinned_revision:pin.revision,tasks,estimated_resident_mib:m.resident_mib,download_bytes,license,tested_languages:vec![],limitations,provenance,publisher_claims:fact.publisher_claims,publisher_declared_languages:fact.declared_languages,language_evidence_note:fact.language_note,license_declarations,sources:fact.sources,assets,task_protocols,memory_estimate:CapabilityMemory{resident_mib:m.resident_mib,basis:MemoryEstimateBasis::PlanningCatalogEstimate,measured_peak_mib:None,note:"Estimated resident allowance copied from the compiled planning catalog, in MiB (1,048,576 bytes). No measured peak is asserted by these static cards.".into()}});
+    }
+    anyhow::ensure!(
+        by_id.is_empty(),
+        Fault::new(
+            "NG650",
+            "Capability facts include an unknown catalog reader"
+        )
+    );
+    Ok(cards)
+}
+/// Read packaged, reviewed metadata only. Never performs network requests or loads reader files.
 pub fn capability_cards() -> Result<Vec<CapabilityCard>> {
-    crate::planning::catalog().into_iter().map(|model|{let (m,pin)=setup::pinned(&model.id)?;Ok(CapabilityCard{id:m.id,name:m.name,family:m.family,source:m.source,download_repository:pin.repository,pinned_revision:pin.revision,tasks:if m.role=="vision"{vec!["structured transcription".into(),"table reconstruction".into(),"figure interpretation requiring review".into()]}else{vec!["text transcription".into(),"table recognition".into()]},estimated_resident_mib:m.resident_mib,download_bytes:pin.weights.bytes+pin.projector.bytes,license:"Not recorded in the local catalog. Inspect the original model and conversion repository licenses before redistribution.".into(),tested_languages:vec![],limitations:vec!["No per-language quality benchmark is bundled; an empty tested-language list is intentional.".into(),"Memory requirements are estimates. Agreement and confidence are not calibrated accuracy.".into(),"These task protocols do not establish measured handwriting or diagram accuracy.".into()]})}).collect()
+    let bytes = include_str!("../capabilities.json");
+    anyhow::ensure!(
+        bytes.len() <= 65_536,
+        Fault::new(
+            "NG650",
+            "Packaged capability metadata exceeds its byte budget"
+        )
+    );
+    capability_cards_from(serde_json::from_str(bytes)?)
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn stale_pins_missing_readers_and_relabelled_sources_cannot_produce_trusted_cards() {
+        let original: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities.json")).unwrap();
+        for mutate in 0..5 {
+            let mut facts = original.clone();
+            match mutate {
+                0 => facts["models"][0]["conversion_revision"] = serde_json::json!("0".repeat(40)),
+                1 => {
+                    facts["models"].as_array_mut().unwrap().pop().unwrap();
+                }
+                2 => {
+                    facts["models"][0]["sources"][0]["url"] =
+                        serde_json::json!("https://huggingface.co/other/model/raw/main/README.md")
+                }
+                3 => {
+                    let source = facts["models"][0]["sources"][0].clone();
+                    facts["models"][0]["sources"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(source);
+                }
+                _ => {
+                    facts["models"][0]["publisher_license_file_available"] = serde_json::json!(true)
+                }
+            }
+            assert!(
+                capability_cards_from(serde_json::from_value(facts).unwrap()).is_err(),
+                "variant {mutate}"
+            );
+        }
+        assert!(capability_protocols("unreviewed_adapter").is_err());
+    }
 }

@@ -28,13 +28,13 @@ Printed English OCR works immediately. Select **Install local AI** for handwriti
 | CPU, CUDA or Vulkan readers | Numeric/table checks and disagreement overlays | Word, Markdown, HTML, LaTeX and Excel |
 | Verified AI setup and offline bundles | Writer examples, quarantine and font proofs | Source links and uncertainty annotations |
 
-Open **Projects & tools** or use the command palette (default **Ctrl+K**). See the [workbench guide](docs/WORKBENCH.md) and [source review guide](docs/SOURCE_REVIEW.md). The [0.5.0 implementation ledger](docs/FEATURES_0.5.0.md) records all 100 proposals, including limits and work that remains.
+Open **Projects & tools** or use the command palette (default **Ctrl+K**). Guides cover the [workbench](docs/WORKBENCH.md), [source review](docs/SOURCE_REVIEW.md), [page organization](docs/PROJECT_OPERATIONS.md), and [confirmed references](docs/CONFIRMED_REFERENCES.md). The [0.5.0 ledger](docs/FEATURES_0.5.0.md) records all 100 proposals and remaining work.
 
 ## Local by default
 
 Recognition uses local files and loopback HTTP. Source scans are not uploaded. Update/model downloads use publisher services; optional public-topic lookup sends the query you type when enabled. Imported background references remain separate from transcription evidence.
 
-Human review remains necessary for difficult handwriting, numbers and diagram interpretations. Reader agreement is not measured accuracy. Hardware budgets are estimates; broad handwriting accuracy and device performance require representative measurements. Windows installers are unsigned; releases include checksums and provenance.
+Human review remains necessary for difficult handwriting, numbers and diagram interpretations. Reader agreement is not measured accuracy. Hardware budgets are estimates; broad handwriting accuracy and device performance require representative measurements. Windows installers are unsigned; releases include checksums and [build evidence](docs/BUILD_PROVENANCE.md).
 
 ## Build
 

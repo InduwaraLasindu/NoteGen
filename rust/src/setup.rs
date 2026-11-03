@@ -4,7 +4,7 @@ use crate::{
     models::{self, Asset, Update},
     planning::{self, Model},
     progress::{Phase, Work},
-    storage::{self, Activity, Control},
+    storage::{self, Activity, Control, fingerprint},
     types::*,
 };
 use serde::{Deserialize, Serialize};
@@ -96,12 +96,200 @@ pub struct Options {
     pub models_only: bool,
     pub runtime_only: bool,
     pub model_ids: Vec<String>,
+    pub output_preset: Option<Preset>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeRecord {
     pub server: PathBuf,
     pub backend: Backend,
     pub build: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCandidateRecord {
+    schema: u32,
+    id: String,
+    root: PathBuf,
+    record: RuntimeRecord,
+    identity: crate::canary::RuntimeIdentity,
+    source: Option<crate::project_lock::RuntimeSource>,
+    active: Option<crate::activation::Snapshot>,
+    previous: Option<crate::activation::Snapshot>,
+    reused: bool,
+}
+pub struct PreparedRuntime {
+    candidate: RuntimeCandidateRecord,
+    path: Option<PathBuf>,
+}
+impl PreparedRuntime {
+    pub fn record(&self) -> &RuntimeRecord {
+        &self.candidate.record
+    }
+    pub fn pending_record(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+    fn changes(&self) -> Result<Vec<crate::activation::Change>> {
+        if self.candidate.reused {
+            return Ok(vec![]);
+        }
+        let mut changes = vec![];
+        if let Some(active) = &self.candidate.active {
+            changes.push(crate::activation::Change {
+                scope: crate::activation::Scope::Runtime,
+                file: "previous-ai-runtime.json".into(),
+                expected: self.candidate.previous.clone(),
+                content: active.content()?,
+            });
+        }
+        changes.push(crate::activation::Change {
+            scope: crate::activation::Scope::Runtime,
+            file: "active-ai-runtime.json".into(),
+            expected: self.candidate.active.clone(),
+            content: serde_json::to_vec_pretty(&self.candidate.record)?,
+        });
+        Ok(changes)
+    }
+    fn verify(&self, c: &Control) -> Result<()> {
+        anyhow::ensure!(
+            self.candidate.schema == 1
+                && self.candidate.id
+                    == fingerprint(&(
+                        1,
+                        &self.candidate.root,
+                        &self.candidate.record,
+                        &self.candidate.identity,
+                        &self.candidate.source,
+                        &self.candidate.active,
+                        &self.candidate.previous,
+                        self.candidate.reused
+                    ))?
+                && crate::canary::runtime_identity(&self.candidate.record.server, c)?
+                    == self.candidate.identity,
+            Fault::new("NG660", "Prepared runtime changed before canary/activation")
+        );
+        Ok(())
+    }
+}
+fn runtime_candidate(
+    root: PathBuf,
+    record: RuntimeRecord,
+    source: Option<crate::project_lock::RuntimeSource>,
+    active: Option<crate::activation::Snapshot>,
+    previous: Option<crate::activation::Snapshot>,
+    reused: bool,
+    c: &Control,
+) -> Result<PreparedRuntime> {
+    let identity = crate::canary::runtime_identity(&record.server, c)?;
+    let mut candidate = RuntimeCandidateRecord {
+        schema: 1,
+        id: String::new(),
+        root,
+        record,
+        identity,
+        source,
+        active,
+        previous,
+        reused,
+    };
+    candidate.id = fingerprint(&(
+        1,
+        &candidate.root,
+        &candidate.record,
+        &candidate.identity,
+        &candidate.source,
+        &candidate.active,
+        &candidate.previous,
+        candidate.reused,
+    ))?;
+    anyhow::ensure!(
+        serde_json::to_vec_pretty(&candidate)?.len() <= 2_000_000,
+        Fault::new("NG660", "Prepared runtime metadata exceeds its bound")
+    );
+    let path = if reused {
+        None
+    } else {
+        let folder = candidate.root.join("candidates");
+        crate::watch::no_links(&folder)?;
+        fs::create_dir_all(&folder)?;
+        let path = folder.join(format!("{}.runtime.json", candidate.id));
+        if !path.exists() {
+            storage::protected_json(&path, &candidate)?;
+        }
+        Some(path)
+    };
+    Ok(PreparedRuntime { candidate, path })
+}
+pub fn read_prepared_runtime(path: &Path, s: &Settings, c: &Control) -> Result<PreparedRuntime> {
+    c.check()?;
+    crate::watch::no_links(path)?;
+    let candidate: RuntimeCandidateRecord = storage::read_json(path, 2_000_000)?;
+    anyhow::ensure!(
+        candidate.root == runtime_root(s).canonicalize()?
+            && path.canonicalize()?
+                == candidate
+                    .root
+                    .join("candidates")
+                    .join(format!("{}.runtime.json", candidate.id)),
+        Fault::new("NG660", "Prepared runtime belongs to another installation")
+    );
+    let prepared = PreparedRuntime {
+        candidate,
+        path: Some(path.canonicalize()?),
+    };
+    prepared.verify(c)?;
+    Ok(prepared)
+}
+/// Find the exact retained candidate selected by these settings. This does not
+/// activate it or accept saved reports as proof; subsequent setup runs a canary.
+pub fn pending_runtime(s: &Settings, c: &Control) -> Result<Option<PreparedRuntime>> {
+    c.check()?;
+    let root = runtime_root(s);
+    crate::watch::no_links(&root)?;
+    if !root.is_dir() || !s.server.is_file() {
+        return Ok(None);
+    }
+    let server = s.server.canonicalize()?;
+    if let Some(active) = saved_runtime(&root)
+        && active
+            .server
+            .canonicalize()
+            .is_ok_and(|path| path == server)
+    {
+        return Ok(None);
+    }
+    let folder = root.join("candidates");
+    crate::watch::no_links(&folder)?;
+    if !folder.exists() {
+        return Ok(None);
+    }
+    let mut found = None;
+    for (index, entry) in fs::read_dir(folder)?.enumerate() {
+        c.check()?;
+        anyhow::ensure!(
+            index < 1000,
+            Fault::new("NG660", "Too many pending runtime records")
+        );
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".runtime.json"))
+        {
+            continue;
+        }
+        crate::watch::no_links(&path)?;
+        let candidate: RuntimeCandidateRecord = storage::read_json(&path, 2_000_000)?;
+        if candidate.record.server == s.server && candidate.record.backend == s.backend {
+            anyhow::ensure!(
+                found.is_none(),
+                Fault::new(
+                    "NG660",
+                    "Multiple pending runtime records match; select one candidate explicitly"
+                )
+            );
+            found = Some(read_prepared_runtime(&path, s, c)?);
+        }
+    }
+    Ok(found)
 }
 pub fn saved_runtime(root: &Path) -> Option<RuntimeRecord> {
     let record: RuntimeRecord =
@@ -136,145 +324,344 @@ fn initial_work(hw: &Hardware, s: &Settings, options: &Options) -> Result<Vec<Wo
     ])
 }
 
+/// Stage and validate before changing metadata. Production callers should use
+/// install_to so the returned settings participate in the same recovery journal.
 pub fn install(s: &Settings, options: &Options, c: &Control, log: &Activity) -> Result<Settings> {
+    install_inner(s, options, None, c, log)
+}
+pub fn install_to(
+    s: &Settings,
+    options: &Options,
+    settings_output: &Path,
+    c: &Control,
+    log: &Activity,
+) -> Result<Settings> {
+    install_inner(s, options, Some(settings_output), c, log)
+}
+fn registry_dependency(
+    s: &Settings,
+    model: &Model,
+    c: &Control,
+) -> Result<crate::activation::Change> {
+    let file = format!("{}.notegen.json", model.id);
+    let path = s.models_dir.join(&file);
+    let before = crate::activation::snapshot(&path, c)?.ok_or_else(|| {
+        Fault::new(
+            "NG660",
+            "Registered reader disappeared during runtime preparation",
+        )
+    })?;
+    let current: Model = serde_json::from_slice(&before.content()?)?;
+    anyhow::ensure!(
+        current.id == model.id
+            && current.sha256 == model.sha256
+            && current.prompt == model.prompt
+            && current.family == model.family
+            && current.role == model.role
+            && current.endpoint.is_none()
+            && (current.revision.is_empty() || current.revision == model.revision),
+        Fault::new(
+            "NG660",
+            "Registered reader changed during runtime preparation"
+        )
+    );
+    Ok(crate::activation::Change {
+        scope: crate::activation::Scope::Models,
+        file,
+        content: before.content()?,
+        expected: Some(before),
+    })
+}
+fn installed_local(s: &Settings) -> Result<Vec<Model>> {
+    let (models, _) = crate::runtime::inventory_available(&s.models_dir)?;
+    Ok(models
+        .into_iter()
+        .filter(|model| model.endpoint.is_none())
+        .collect())
+}
+pub(crate) fn validate_pairs(
+    models: &[Model],
+    s: &Settings,
+    evidence: &Path,
+    c: &Control,
+    log: &Activity,
+) -> Result<Vec<crate::canary::Passed>> {
+    anyhow::ensure!(
+        models.len() <= 64,
+        Fault::new(
+            "NG660",
+            "Too many local readers for a bounded activation; reduce the active registry before updating the runtime"
+        )
+    );
+    let mut passed = vec![];
+    for (index, model) in models.iter().enumerate() {
+        c.check()?;
+        log.work(
+            Work::new(Phase::Activate, index, models.len(), 60000, true),
+            format!("Canary validation: {}", model.name),
+        );
+        passed.push(crate::canary::run(
+            model,
+            s,
+            &evidence.join(&model.id),
+            c,
+            log,
+        )?);
+    }
+    for (model, proof) in models.iter().zip(&passed) {
+        proof.verify_current(model, &s.server, c)?;
+    }
+    Ok(passed)
+}
+pub(crate) fn activate_with_pending_runtime(
+    prepared: &models::PreparedModel,
+    s: &Settings,
+    c: &Control,
+    log: &Activity,
+) -> Result<Option<Model>> {
+    let Some(runtime) = pending_runtime(s, c)? else {
+        return Ok(None);
+    };
+    let mut probes = vec![prepared.model().clone()];
+    let mut dependencies = vec![];
+    for model in installed_local(s)? {
+        if model.id != prepared.model().id {
+            dependencies.push(registry_dependency(s, &model, c)?);
+            probes.push(model);
+        }
+    }
+    let proofs = validate_pairs(
+        &probes,
+        s,
+        &s.models_dir.join("activation-canaries"),
+        c,
+        log,
+    )?;
+    runtime.verify(c)?;
+    for (model, proof) in probes.iter().zip(&proofs) {
+        proof.verify_current(model, &s.server, c)?;
+    }
+    let mut changes = dependencies;
+    changes.extend(prepared.changes(c)?);
+    changes.extend(runtime.changes()?);
+    crate::activation::commit(&s.models_dir, &runtime.candidate.root, None, changes, c)?;
+    log.emit("models", "Reader and pending runtime activated after the known print/table canary; real documents still require review", 0, 1, 1, "");
+    Ok(Some(prepared.model().clone()))
+}
+fn install_inner(
+    s: &Settings,
+    options: &Options,
+    settings_output: Option<&Path>,
+    c: &Control,
+    log: &Activity,
+) -> Result<Settings> {
     anyhow::ensure!(
         !(options.models_only && options.runtime_only),
         Fault::new("NG650", "Choose runtime-only or models-only")
     );
+    s.validate()?;
     c.check()?;
-    let mut next = s.clone();
-    for work in initial_work(&hardware::detect(), s, options)? {
-        log.work(work, "Planning the complete local AI installation");
-    }
-    log.work(
-        Work::new(
-            Phase::Runtime,
-            0,
-            usize::from(!options.models_only),
-            15000,
-            !options.models_only,
-        ),
-        "Checking the local AI runtime",
-    );
-    if !options.models_only {
-        let record = install_runtime(s, c, log)?;
-        next.server = record.server;
-        next.backend = record.backend;
-        log.work(
-            Work::new(Phase::Runtime, 1, 1, 15000, false),
-            format!("{:?} runtime verified", next.backend),
-        );
-    }
-    if options.runtime_only {
-        return Ok(next);
-    }
-    let hw = hardware::detect_for(&next, c);
-    let chosen = if options.model_ids.is_empty() {
-        recommend(&hw, &next)?.models
-    } else {
-        options
-            .model_ids
-            .iter()
-            .map(|id| pinned(id).map(|p| p.0))
-            .collect::<Result<Vec<_>>>()?
-    };
-    anyhow::ensure!(
-        !chosen.is_empty(),
-        Fault::new("NG650", "No models selected")
-    );
-    let (existing, _) = crate::runtime::inventory_available(&next.models_dir)?;
-    let pairs = chosen
-        .iter()
-        .map(|m| pinned(&m.id))
-        .collect::<Result<Vec<_>>>()?;
-    let bytes: u64 = pairs
-        .iter()
-        .map(|(_, p)| p.weights.bytes + p.projector.bytes)
-        .sum();
-    let units = bytes.div_ceil(1024) as usize;
-    log.work(
-        Work::new(Phase::Download, 0, units, 2, false),
-        "Preparing verified model downloads",
-    );
-    log.work(
-        Work::new(Phase::Activate, 0, chosen.len(), 1500, false),
-        "Preparing model registration",
-    );
-    let mut done = 0u64;
-    for (index, (model, update)) in pairs.iter().enumerate() {
-        c.check()?;
-        // Keep user-updated and third-party registrations; never silently downgrade them.
-        let healthy = if let Some(m) = existing
-            .iter()
-            .find(|m| m.id == model.id && m.endpoint.is_none())
-        {
-            let digest = storage::fingerprint(&(
-                storage::hash_file(&m.weights, c)?,
-                storage::hash_file(&m.projector, c)?,
-            ))?;
-            !m.sha256.is_empty() && digest == m.sha256
-        } else {
-            false
-        };
-        if !healthy {
-            let log_outer = log.clone();
-            let base = done;
-            let projector = update.projector.file.clone();
-            let weights_bytes = update.weights.bytes;
-            let events = Activity {
-                path: None,
-                callback: Some(Arc::new(move |e| {
-                    if e.stage == "download" {
-                        let offset = if e.message.starts_with(&projector) {
-                            weights_bytes
-                        } else {
-                            0
-                        };
-                        log_outer.work(
-                            Work::new(
-                                Phase::Download,
-                                ((base + offset + e.done as u64) / 1024) as usize,
-                                units,
-                                2,
-                                true,
-                            ),
-                            e.message.clone(),
-                        );
-                    }
-                    log_outer.publish(e);
-                })),
-            };
-            models::install(&next.models_dir, model, update, c, &events)?;
-        } else {
-            log.emit(
-                "models",
-                format!("{} already installed and checksum-verified", model.name),
-                0,
-                index,
-                chosen.len(),
-                "",
-            );
+    crate::activation::recover_all(&s.models_dir, c)?;
+    let output_path = settings_output.map(std::path::absolute).transpose()?;
+    if let Some(path) = &output_path {
+        crate::watch::no_links(path)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
         }
-        done += update.weights.bytes + update.projector.bytes;
+    }
+    let settings_before = output_path
+        .as_ref()
+        .map(|path| crate::activation::snapshot(path, c))
+        .transpose()?
+        .flatten();
+    for work in initial_work(&hardware::detect(), s, options)? {
         log.work(
-            Work::new(
-                Phase::Download,
-                done.div_ceil(1024) as usize,
-                units,
-                2,
-                false,
-            ),
-            "Model files verified",
-        );
-        log.work(
-            Work::new(Phase::Activate, index + 1, chosen.len(), 1500, false),
-            format!("{} ready", model.name),
+            work,
+            "Planning staged installation and real compatibility validation",
         );
     }
-    c.check()?;
+    let existing = installed_local(s)?;
+    let runtime = if options.models_only {
+        pending_runtime(s, c)?
+    } else {
+        let assets: Vec<Download> =
+            serde_json::from_str(include_str!("../runtime-downloads.json"))?;
+        Some(prepare_runtime_release(s, "b12032", &assets, c, log)?)
+    };
+    let mut next = s.clone();
+    if let Some(runtime) = &runtime {
+        runtime.verify(c)?;
+        next.server = runtime.record().server.clone();
+        next.backend = runtime.record().backend;
+        next.external_server = false;
+    }
+    if let Some(preset) = options.output_preset {
+        next.preset = preset;
+    }
+    let runtime_changed = runtime.as_ref().is_some_and(|runtime| {
+        !runtime.candidate.reused
+            || runtime.record().server != s.server
+            || runtime.record().backend != s.backend
+    });
+    let mut prepared = vec![];
+    if !options.runtime_only {
+        let chosen = if options.model_ids.is_empty() {
+            recommend(&hardware::detect_for(&next, c), &next)?.models
+        } else {
+            options
+                .model_ids
+                .iter()
+                .map(|id| pinned(id).map(|pair| pair.0))
+                .collect::<Result<Vec<_>>>()?
+        };
+        anyhow::ensure!(
+            !chosen.is_empty()
+                && chosen.len() <= 64
+                && chosen
+                    .iter()
+                    .map(|model| &model.id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == chosen.len(),
+            Fault::new("NG650", "Select between one and 64 distinct local readers")
+        );
+        for model in chosen {
+            c.check()?;
+            let healthy =
+                if let Some(current) = existing.iter().find(|current| current.id == model.id) {
+                    !current.sha256.is_empty()
+                        && storage::fingerprint(&(
+                            storage::hash_file(&current.weights, c)?,
+                            storage::hash_file(&current.projector, c)?,
+                        ))? == current.sha256
+                } else {
+                    false
+                };
+            if healthy {
+                log.emit(
+                    "models",
+                    format!(
+                        "{} retained without downgrade; its registered bytes are unchanged",
+                        model.name
+                    ),
+                    0,
+                    0,
+                    0,
+                    "",
+                );
+            } else {
+                let (model, update) = pinned(&model.id)?;
+                prepared.push(models::prepare(&next, &model, &update, c, log)?);
+            }
+        }
+    }
+    let mut probes = prepared
+        .iter()
+        .map(|candidate| candidate.model().clone())
+        .collect::<Vec<_>>();
+    let mut dependencies = vec![];
+    if runtime_changed {
+        for model in &existing {
+            if !probes.iter().any(|candidate| candidate.id == model.id) {
+                dependencies.push(registry_dependency(s, model, c)?);
+                probes.push(model.clone());
+            }
+        }
+        if probes.is_empty()
+            && options.runtime_only
+            && runtime.as_ref().is_some_and(|runtime| {
+                runtime.candidate.active.is_none() && !runtime.candidate.reused
+            })
+        {
+            // Explicit first-install staging supports runtime-only -> models-only
+            // without executing an untested model or publishing a working runtime.
+            if let Some(path) = &output_path {
+                crate::activation::commit(
+                    &s.models_dir,
+                    &runtime.as_ref().unwrap().candidate.root,
+                    Some(path),
+                    vec![crate::activation::Change {
+                        scope: crate::activation::Scope::Settings,
+                        file: path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .ok_or_else(|| {
+                                Fault::new("NG660", "Choose a Unicode settings filename")
+                            })?
+                            .into(),
+                        expected: settings_before,
+                        content: serde_json::to_vec_pretty(&next)?,
+                    }],
+                    c,
+                )?;
+            }
+            log.work(
+                Work::new(Phase::Activate, 1, 1, 1500, false),
+                "Runtime staged only; complete model setup and the real canary before readiness",
+            );
+            return Ok(next);
+        }
+        anyhow::ensure!(
+            !probes.is_empty(),
+            Fault::new(
+                "NG660",
+                format!(
+                    "Runtime is staged but pending a local model canary. Complete AI setup with a reader before activation. Candidate: {}",
+                    runtime
+                        .as_ref()
+                        .and_then(|r| r.pending_record())
+                        .map_or_else(
+                            || "user-selected runtime".into(),
+                            |p| p.display().to_string()
+                        )
+                )
+            )
+        );
+    }
+    let evidence = s.models_dir.join("activation-canaries");
+    let proofs = validate_pairs(&probes, &next, &evidence, c, log)?;
+    if let Some(runtime) = &runtime {
+        runtime.verify(c)?;
+    }
+    for (model, proof) in probes.iter().zip(&proofs) {
+        proof.verify_current(model, &next.server, c)?;
+    }
+    let mut changes = dependencies;
+    if let Some(runtime) = &runtime {
+        changes.extend(runtime.changes()?);
+    }
+    for candidate in &prepared {
+        changes.extend(candidate.changes(c)?);
+    }
+    if let Some(path) = &output_path {
+        changes.push(crate::activation::Change {
+            scope: crate::activation::Scope::Settings,
+            file: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| Fault::new("NG660", "Choose a Unicode settings output filename"))?
+                .into(),
+            expected: settings_before,
+            content: serde_json::to_vec_pretty(&next)?,
+        });
+    }
+    if !changes.is_empty() {
+        crate::activation::commit(
+            &s.models_dir,
+            &runtime
+                .as_ref()
+                .map_or_else(|| runtime_root(s), |r| r.candidate.root.clone()),
+            output_path.as_deref(),
+            changes,
+            c,
+        )?;
+    }
+    log.work(
+        Work::new(Phase::Activate, 1, 1, 1500, false),
+        "Validated installation metadata committed; real documents still require review",
+    );
     Ok(next)
 }
-
 fn runtime_downloads(backend: &str, assets: &[Download]) -> Vec<Download> {
     let marker = match backend {
         "cuda13" => "cuda-13.4",
@@ -301,9 +688,184 @@ fn runtime_choices(backend: Backend, nvidia: bool, require: bool) -> Vec<&'stati
     }
     choices
 }
-fn install_runtime(s: &Settings, c: &Control, log: &Activity) -> Result<RuntimeRecord> {
-    let assets: Vec<Download> = serde_json::from_str(include_str!("../runtime-downloads.json"))?;
-    install_runtime_release(s, "b12032", &assets, c, log)
+pub fn install_runtime_release(
+    s: &Settings,
+    build: &str,
+    assets: &[Download],
+    c: &Control,
+    log: &Activity,
+) -> Result<RuntimeRecord> {
+    install_runtime_release_inner(s, build, assets, None, c, log)
+}
+pub fn install_runtime_release_to(
+    s: &Settings,
+    build: &str,
+    assets: &[Download],
+    settings_output: &Path,
+    c: &Control,
+    log: &Activity,
+) -> Result<RuntimeRecord> {
+    install_runtime_release_inner(s, build, assets, Some(settings_output), c, log)
+}
+fn install_runtime_release_inner(
+    s: &Settings,
+    build: &str,
+    assets: &[Download],
+    settings_output: Option<&Path>,
+    c: &Control,
+    log: &Activity,
+) -> Result<RuntimeRecord> {
+    crate::activation::recover_all(&s.models_dir, c)?;
+    let output = settings_output.map(std::path::absolute).transpose()?;
+    let settings_before = output
+        .as_ref()
+        .map(|path| crate::activation::snapshot(path, c))
+        .transpose()?
+        .flatten();
+    let models = installed_local(s)?;
+    let dependencies = models
+        .iter()
+        .map(|model| registry_dependency(s, model, c))
+        .collect::<Result<Vec<_>>>()?;
+    let prepared = prepare_runtime_release(s, build, assets, c, log)?;
+    if prepared.candidate.reused
+        && prepared.record().server == s.server
+        && prepared.record().backend == s.backend
+        && !s.external_server
+    {
+        return Ok(prepared.record().clone());
+    }
+    anyhow::ensure!(
+        !models.is_empty(),
+        Fault::new(
+            "NG660",
+            format!(
+                "Runtime is staged but pending a real local model canary; complete AI setup with a reader. Candidate: {}",
+                prepared.pending_record().map_or_else(
+                    || "user-selected runtime".into(),
+                    |path| path.display().to_string()
+                )
+            )
+        )
+    );
+    let mut next = s.clone();
+    next.server = prepared.record().server.clone();
+    next.backend = prepared.record().backend;
+    next.external_server = false;
+    let proofs = validate_pairs(
+        &models,
+        &next,
+        &s.models_dir.join("activation-canaries"),
+        c,
+        log,
+    )?;
+    prepared.verify(c)?;
+    for (model, proof) in models.iter().zip(&proofs) {
+        proof.verify_current(model, &next.server, c)?;
+    }
+    let mut changes = dependencies;
+    changes.extend(prepared.changes()?);
+    if let Some(output) = &output {
+        changes.push(crate::activation::Change {
+            scope: crate::activation::Scope::Settings,
+            file: output
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| Fault::new("NG660", "Choose a Unicode settings output filename"))?
+                .into(),
+            expected: settings_before,
+            content: serde_json::to_vec_pretty(&next)?,
+        });
+    }
+    if !changes.is_empty() {
+        crate::activation::commit(
+            &s.models_dir,
+            &prepared.candidate.root,
+            output.as_deref(),
+            changes,
+            c,
+        )?;
+    }
+    Ok(prepared.record().clone())
+}
+/// Validate a previously installed native runtime against every active local
+/// reader before restoring its pointer and the selected settings file together.
+pub fn rollback_runtime_to(
+    s: &Settings,
+    settings_output: &Path,
+    c: &Control,
+    log: &Activity,
+) -> Result<Settings> {
+    c.check()?;
+    crate::activation::recover_all(&s.models_dir, c)?;
+    let root = runtime_root(s);
+    crate::watch::no_links(&root)?;
+    let root = root.canonicalize()?;
+    let old_active = crate::activation::snapshot(&root.join("active-ai-runtime.json"), c)?;
+    let old_previous = crate::activation::snapshot(&root.join("previous-ai-runtime.json"), c)?
+        .ok_or_else(|| Fault::new("NG660", "No previous managed runtime is available"))?;
+    let previous: RuntimeRecord = serde_json::from_slice(&old_previous.content()?)?;
+    crate::watch::no_links(&previous.server)?;
+    let server = previous.server.canonicalize()?;
+    anyhow::ensure!(
+        server.starts_with(root.join("ai-backends"))
+            && server
+                .file_name()
+                .is_some_and(|name| name == "llama-server.exe"),
+        Fault::new("NG660", "Previous runtime is outside the managed folder")
+    );
+    let output = std::path::absolute(settings_output)?;
+    let settings_before = crate::activation::snapshot(&output, c)?;
+    let models = installed_local(s)?;
+    anyhow::ensure!(
+        !models.is_empty(),
+        Fault::new(
+            "NG660",
+            "Previous runtime remains pending until a local reader canary is available"
+        )
+    );
+    let dependencies = models
+        .iter()
+        .map(|model| registry_dependency(s, model, c))
+        .collect::<Result<Vec<_>>>()?;
+    let prepared = runtime_candidate(
+        root.clone(),
+        previous,
+        None,
+        old_active,
+        Some(old_previous),
+        false,
+        c,
+    )?;
+    let mut next = s.clone();
+    next.server = server;
+    next.backend = prepared.record().backend;
+    next.external_server = false;
+    let proofs = validate_pairs(
+        &models,
+        &next,
+        &s.models_dir.join("activation-canaries"),
+        c,
+        log,
+    )?;
+    prepared.verify(c)?;
+    for (model, proof) in models.iter().zip(&proofs) {
+        proof.verify_current(model, &next.server, c)?;
+    }
+    let mut changes = dependencies;
+    changes.extend(prepared.changes()?);
+    changes.push(crate::activation::Change {
+        scope: crate::activation::Scope::Settings,
+        file: output
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Fault::new("NG660", "Choose a Unicode settings output filename"))?
+            .into(),
+        expected: settings_before,
+        content: serde_json::to_vec_pretty(&next)?,
+    });
+    crate::activation::commit(&s.models_dir, &root, Some(&output), changes, c)?;
+    Ok(next)
 }
 pub fn runtime_root(s: &Settings) -> PathBuf {
     let parent = s
@@ -318,14 +880,20 @@ pub fn runtime_root(s: &Settings) -> PathBuf {
         .unwrap_or(parent)
         .to_path_buf()
 }
-pub fn install_runtime_release(
+pub fn prepare_runtime_release(
     s: &Settings,
     build: &str,
     assets: &[Download],
     c: &Control,
     log: &Activity,
-) -> Result<RuntimeRecord> {
+) -> Result<PreparedRuntime> {
     crate::maintenance::validate_runtime_release(build, assets)?;
+    let root = runtime_root(s);
+    crate::watch::no_links(&root)?;
+    fs::create_dir_all(&root)?;
+    let root = root.canonicalize()?;
+    let active_snapshot = crate::activation::snapshot(&root.join("active-ai-runtime.json"), c)?;
+    let previous_snapshot = crate::activation::snapshot(&root.join("previous-ai-runtime.json"), c)?;
     if !cfg!(windows) {
         anyhow::ensure!(
             s.server.is_file(),
@@ -334,15 +902,20 @@ pub fn install_runtime_release(
                 "Automatic runtime installation supports Windows x64. Select a native llama-server or use models-only."
             )
         );
-        return Ok(RuntimeRecord {
-            server: s.server.clone(),
-            backend: s.backend,
-            build: "user-selected".into(),
-        });
+        return runtime_candidate(
+            root,
+            RuntimeRecord {
+                server: s.server.clone(),
+                backend: s.backend,
+                build: "user-selected".into(),
+            },
+            None,
+            active_snapshot,
+            previous_snapshot,
+            true,
+            c,
+        );
     }
-    let root = runtime_root(s);
-    fs::create_dir_all(&root)?;
-    let root = root.canonicalize()?;
     if let Some(active) = saved_runtime(&root)
         && active
             .build
@@ -368,7 +941,15 @@ pub fn install_runtime_release(
             0,
             "",
         );
-        return Ok(active);
+        return runtime_candidate(
+            root,
+            active,
+            None,
+            active_snapshot,
+            previous_snapshot,
+            true,
+            c,
+        );
     }
     let candidates = runtime_choices(
         s.backend,
@@ -378,7 +959,7 @@ pub fn install_runtime_release(
     let mut failures = vec![];
     for backend in candidates {
         c.check()?;
-        let result = (|| -> Result<RuntimeRecord> {
+        let result = (|| -> Result<PreparedRuntime> {
             let cache = root.join("downloads");
             fs::create_dir_all(&cache)?;
             let backends = root.join("ai-backends");
@@ -399,7 +980,7 @@ pub fn install_runtime_release(
                 !assets.is_empty(),
                 Fault::new("NG650", "Runtime package metadata missing")
             );
-            for a in assets {
+            for a in &assets {
                 let archive = cache.join(&a.file);
                 models::download(&a.url, &archive, &a.asset(), c, log)?;
                 extract_runtime(&archive, staging.path(), c)?;
@@ -459,11 +1040,21 @@ pub fn install_runtime_release(
                 backend: selected,
                 build: build.into(),
             };
-            if let Some(previous) = saved_runtime(&root) {
-                storage::atomic_json(&root.join("previous-ai-runtime.json"), &previous)?;
-            }
-            storage::atomic_json(&root.join("active-ai-runtime.json"), &record)?;
-            Ok(record)
+            let source = crate::project_lock::RuntimeSource {
+                build: build.into(),
+                backend: selected,
+                assets,
+            };
+            storage::protected_json(&folder.join("notegen-runtime-source.json"), &source)?;
+            runtime_candidate(
+                root.clone(),
+                record,
+                Some(source),
+                active_snapshot.clone(),
+                previous_snapshot.clone(),
+                false,
+                c,
+            )
         })();
         match result {
             Ok(record) => return Ok(record),
@@ -556,6 +1147,45 @@ mod tests {
             assert!(u.weights.bytes > 0 && u.projector.bytes > 0);
         }
         assert!(pinned("../bad").is_err());
+    }
+    #[test]
+    fn first_install_runtime_candidate_is_discovered_without_an_active_pointer_or_saved_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime");
+        let server = runtime.join("ai-backends/cpu-pending/llama-server.exe");
+        fs::create_dir_all(server.parent().unwrap()).unwrap();
+        fs::write(&server, b"MZsynthetic-runtime-not-executed").unwrap();
+        let s = Settings {
+            server: server.clone(),
+            backend: Backend::Cpu,
+            models_dir: root.path().join("models"),
+            shared_model_store: root.path().join("store"),
+            ..Default::default()
+        };
+        let staged = runtime_candidate(
+            runtime.canonicalize().unwrap(),
+            RuntimeRecord {
+                server,
+                backend: Backend::Cpu,
+                build: "b12032".into(),
+            },
+            None,
+            None,
+            None,
+            false,
+            &Control::default(),
+        )
+        .unwrap();
+        let found = pending_runtime(&s, &Control::default()).unwrap().unwrap();
+        assert_eq!(found.pending_record(), staged.pending_record());
+        assert!(!runtime.join("active-ai-runtime.json").exists());
+        assert!(!s.models_dir.join("glm-ocr.notegen.json").exists());
+        let path = staged.pending_record().unwrap();
+        let mut altered: serde_json::Value = storage::read_json(path, 2_000_000).unwrap();
+        altered["record"]["build"] = "tampered".into();
+        fs::write(path, serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(pending_runtime(&s, &Control::default()).is_err());
+        assert!(!runtime.join("active-ai-runtime.json").exists());
     }
     #[test]
     fn model_only_setup_reuses_verified_newer_readers_without_network_or_downgrade() {

@@ -768,6 +768,7 @@ fn convert_internal(
     } else if s.preset == Preset::Fast {
         vec![]
     } else {
+        crate::activation::recover_all(&s.models_dir, c)?;
         let (models, errors) = runtime::inventory_available(&s.models_dir)?;
         for error in errors {
             activity.emit(
@@ -1713,6 +1714,7 @@ pub fn recognition_settings(s: &Settings) -> Settings {
     value.ui = Appearance::default();
     value.experience = ExperienceOptions::default();
     value.writer_reference = None;
+    value.memory_history = None;
     value.assistance.ask_questions = true;
     value.assistance.max_questions = 8;
     value.assistance.web_lookup = false;
@@ -1825,6 +1827,7 @@ pub fn planned_identity(
     } else if s.preset == Preset::Fast {
         vec![]
     } else {
+        crate::activation::recover_all(&s.models_dir, c)?;
         runtime::inventory_available(&s.models_dir)?.0
     };
     let mut plan = planning::build(&hardware::detect_for(s, c), s, &installed)?;
@@ -1936,12 +1939,16 @@ pub fn reconsider(
         pages.len() <= 3000 && pages.iter().all(|n| project.manifest.pages.contains(n)),
         Fault::new("NG500", "Re-read page is outside the project")
     );
-    let resolved = crate::project_lock::resolve_for_project(project, settings, c)?;
+    let mut requested = settings.clone();
+    if requested.preset == Preset::Fast {
+        requested.preset = Preset::Accuracy;
+    }
+    let resolved = crate::project_lock::resolve_for_project(project, &requested, c)?;
     let private = crate::redactions::has_masks(project, c)?;
     let mut s = resolved
         .as_ref()
         .map(|value| value.settings.clone())
-        .unwrap_or_else(|| settings.clone());
+        .unwrap_or_else(|| requested.clone());
     if private {
         s = crate::redactions::private_recognition_settings(&s);
     }
@@ -1955,6 +1962,7 @@ pub fn reconsider(
     let installed = if let Some(locked) = &resolved {
         locked.models.clone()
     } else {
+        crate::activation::recover_all(&s.models_dir, c)?;
         runtime::inventory(&s.models_dir)?
     };
     let mut plan = planning::build(&hardware::detect_for(&s, c), &s, &installed)?;
@@ -2378,12 +2386,16 @@ fn reread_view(
             "Reader-evidence capacity reached; preserve a project copy before further re-reading"
         )
     );
-    let resolved = crate::project_lock::resolve_for_project(project, settings, c)?;
+    let mut requested = settings.clone();
+    requested.preset = Preset::Accuracy;
+    requested.automatic_models = false;
+    requested.model_ids = vec![request.reader.clone()];
+    let resolved = crate::project_lock::resolve_for_project(project, &requested, c)?;
     let private = crate::redactions::has_masks(project, c)?;
     let mut s = resolved
         .as_ref()
         .map(|value| value.settings.clone())
-        .unwrap_or_else(|| settings.clone());
+        .unwrap_or_else(|| requested.clone());
     if private {
         s = crate::redactions::private_recognition_settings(&s);
     }
@@ -2401,6 +2413,7 @@ fn reread_view(
     let installed = if let Some(locked) = &resolved {
         locked.models.clone()
     } else {
+        crate::activation::recover_all(&s.models_dir, c)?;
         runtime::inventory(&s.models_dir)?
     };
     let mut plan = planning::build(&hardware::detect_for(&s, c), &s, &installed)?;

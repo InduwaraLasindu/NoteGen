@@ -264,3 +264,11 @@ path = "rust/tests/code_transcription.rs"
 name = "urgent_yield"
 path = "rust/tests/urgent_yield.rs"
 
+[[test]]
+name = "references"
+path = "rust/tests/references.rs"
+
+[[test]]
+name = "activation"
+path = "rust/tests/activation.rs"
+

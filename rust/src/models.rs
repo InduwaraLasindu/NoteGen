@@ -87,6 +87,8 @@ pub fn validate_model(m: &Model) -> Result<()> {
     }
     Ok(())
 }
+/// Low-level descriptor storage for trusted staging and test fixtures. User
+/// installation paths must use save_custom_validated with their actual settings.
 pub fn save_custom(dir: &Path, mut m: Model, c: &Control) -> Result<Model> {
     validate_model(&m)?;
     c.check()?;
@@ -114,6 +116,398 @@ pub fn save_custom(dir: &Path, mut m: Model, c: &Control) -> Result<Model> {
     }
     atomic_json(&active, &m)?;
     Ok(m)
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateRecord {
+    schema: u32,
+    id: String,
+    registry: PathBuf,
+    model: Model,
+    reference: crate::model_store::VersionReference,
+    active: Option<crate::activation::Snapshot>,
+    previous: Option<crate::activation::Snapshot>,
+}
+/// A staged local reader. Loading it never activates it; activation always runs
+/// a new native canary against the selected runtime.
+pub struct PreparedModel {
+    record: CandidateRecord,
+    path: PathBuf,
+}
+struct CandidateBase {
+    registry: PathBuf,
+    active: Option<crate::activation::Snapshot>,
+    previous: Option<crate::activation::Snapshot>,
+}
+fn candidate_base(s: &Settings, id: &str, c: &Control) -> Result<CandidateBase> {
+    crate::activation::recover_all(&s.models_dir, c)?;
+    crate::watch::no_links(&s.models_dir)?;
+    fs::create_dir_all(&s.models_dir)?;
+    let registry = s.models_dir.canonicalize()?;
+    Ok(CandidateBase {
+        active: crate::activation::snapshot(&registry.join(format!("{id}.notegen.json")), c)?,
+        previous: crate::activation::snapshot(&registry.join(format!("{id}.previous.json")), c)?,
+        registry,
+    })
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CandidateSummary {
+    pub id: String,
+    pub model_id: String,
+    pub revision: String,
+    pub sha256: String,
+    pub record: PathBuf,
+    pub status: String,
+}
+impl PreparedModel {
+    pub fn model(&self) -> &Model {
+        &self.record.model
+    }
+    pub fn summary(&self) -> CandidateSummary {
+        CandidateSummary {
+            id: self.record.id.clone(),
+            model_id: self.record.model.id.clone(),
+            revision: self.record.model.revision.clone(),
+            sha256: self.record.model.sha256.clone(),
+            record: self.path.clone(),
+            status: "pending real canary validation; not active".into(),
+        }
+    }
+    pub(crate) fn changes(&self, c: &Control) -> Result<Vec<crate::activation::Change>> {
+        c.check_cancelled()?;
+        validate_candidate(&self.record)?;
+        let mut changes = vec![];
+        if let Some(active) = &self.record.active {
+            changes.push(crate::activation::Change {
+                scope: crate::activation::Scope::Models,
+                file: format!("{}.previous.json", self.record.model.id),
+                expected: self.record.previous.clone(),
+                content: active.content()?,
+            });
+        }
+        changes.push(crate::activation::Change {
+            scope: crate::activation::Scope::Models,
+            file: format!("{}.notegen.json", self.record.model.id),
+            expected: self.record.active.clone(),
+            content: serde_json::to_vec_pretty(&self.record.model)?,
+        });
+        Ok(changes)
+    }
+    pub(crate) fn evidence_parent(&self) -> PathBuf {
+        self.path.parent().unwrap().join("canary")
+    }
+}
+fn candidate_id(record: &CandidateRecord) -> Result<String> {
+    fingerprint(&(
+        1,
+        &record.registry,
+        &record.model,
+        &record.reference,
+        &record.active,
+        &record.previous,
+    ))
+}
+fn validate_candidate(record: &CandidateRecord) -> Result<()> {
+    validate_model(&record.model)?;
+    anyhow::ensure!(
+        record.schema == 1
+            && record.registry.is_absolute()
+            && record.model.endpoint.is_none()
+            && record.id == candidate_id(record)?
+            && record.reference.model.id == record.model.id
+            && record.reference.model.sha256 == record.model.sha256
+            && serde_json::to_vec_pretty(record)?.len() <= 4_000_000,
+        Fault::new(
+            "NG660",
+            "Prepared reader metadata changed or exceeds its bound"
+        )
+    );
+    Ok(())
+}
+fn stage_model(
+    s: &Settings,
+    stored: crate::model_store::StoredModel,
+    base: CandidateBase,
+    c: &Control,
+) -> Result<PreparedModel> {
+    crate::watch::no_links(&s.models_dir)?;
+    anyhow::ensure!(
+        s.models_dir.canonicalize()? == base.registry,
+        Fault::new("NG660", "Candidate registry changed during preparation")
+    );
+    let mut record = CandidateRecord {
+        schema: 1,
+        id: String::new(),
+        active: base.active,
+        previous: base.previous,
+        registry: base.registry,
+        model: stored.model,
+        reference: stored.reference,
+    };
+    record.id = candidate_id(&record)?;
+    validate_candidate(&record)?;
+    let folder = record.registry.join("candidates").join(&record.id);
+    crate::watch::no_links(&folder)?;
+    fs::create_dir_all(&folder)?;
+    let path = folder.join("candidate.json");
+    crate::watch::no_links(&path)?;
+    if path.exists() {
+        let previous: CandidateRecord = read_json(&path, 4_000_000)?;
+        validate_candidate(&previous)?;
+        anyhow::ensure!(
+            fingerprint(&previous)? == fingerprint(&record)?,
+            Fault::new("NG660", "Immutable prepared candidate record changed")
+        );
+    } else {
+        crate::storage::protected_json(&path, &record)?;
+    }
+    Ok(PreparedModel { record, path })
+}
+pub fn read_prepared(path: &Path, s: &Settings, c: &Control) -> Result<PreparedModel> {
+    c.check()?;
+    crate::watch::no_links(path)?;
+    let record: CandidateRecord = read_json(path, 4_000_000)?;
+    validate_candidate(&record)?;
+    anyhow::ensure!(
+        record.registry == s.models_dir.canonicalize()?,
+        Fault::new("NG660", "Prepared reader belongs to another registry")
+    );
+    let expected = record
+        .registry
+        .join("candidates")
+        .join(&record.id)
+        .join("candidate.json");
+    anyhow::ensure!(
+        path.canonicalize()? == expected.canonicalize()?,
+        Fault::new(
+            "NG660",
+            "Prepared reader record path is not its owned candidate folder"
+        )
+    );
+    crate::canary::model_identity(&record.model, c)?;
+    let store = crate::model_store::Store::read(&s.shared_model_store)?;
+    let resolved = store.resolve_reference(&record.reference, c)?;
+    anyhow::ensure!(
+        fingerprint(&resolved)? == fingerprint(&record.model)?,
+        Fault::new(
+            "NG660",
+            "Prepared reader must use its exact immutable CAS objects"
+        )
+    );
+    Ok(PreparedModel {
+        record,
+        path: expected,
+    })
+}
+pub fn prepare(
+    s: &Settings,
+    m: &Model,
+    u: &Update,
+    c: &Control,
+    log: &Activity,
+) -> Result<PreparedModel> {
+    c.check()?;
+    validate_model(m)?;
+    anyhow::ensure!(
+        m.endpoint.is_none(),
+        Fault::new("NG660", "Managed reader updates require local GGUF objects")
+    );
+    let hub = m
+        .hub
+        .as_ref()
+        .ok_or_else(|| Fault::new("NG650", "Reader has no publisher source"))?;
+    validate_hub(hub)?;
+    anyhow::ensure!(
+        u.id == m.id
+            && u.repository == hub.repository
+            && u.previous_revision == m.revision
+            && u.weights.file == hub.weights
+            && u.projector.file == hub.projector
+            && u.revision.len() == 40
+            && u.revision.bytes().all(|ch| ch.is_ascii_hexdigit())
+            && [&u.weights, &u.projector].iter().all(|a| a.bytes >= 4
+                && a.bytes <= 100_000_000_000
+                && a.sha256.len() == 64
+                && a.sha256
+                    .bytes()
+                    .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())),
+        Fault::new("NG650", "Prepared update metadata identity changed")
+    );
+    let base = candidate_base(s, &m.id, c)?;
+    let mut desired = m.clone();
+    if let Some(active) = &base.active
+        && let Ok(current) = serde_json::from_slice::<Model>(&active.content()?)
+    {
+        anyhow::ensure!(
+            current.id == m.id
+                && current.sha256 == m.sha256
+                && (current.revision == m.revision || current.revision.is_empty())
+                && current.family == m.family
+                && current.prompt == m.prompt
+                && current.role == m.role,
+            Fault::new(
+                "NG660",
+                "Registered reader changed; refresh the update before preparing this candidate"
+            )
+        );
+        desired = current;
+        desired.hub = m.hub.clone();
+    }
+    let store = crate::model_store::Store::open(&s.shared_model_store)?;
+    let (weights, weights_path) = store.download_object(
+        &format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            u.repository, u.revision, u.weights.file
+        ),
+        &u.weights,
+        crate::model_store::Kind::Gguf,
+        c,
+        log,
+    )?;
+    let (projector, projector_path) = store.download_object(
+        &format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            u.repository, u.revision, u.projector.file
+        ),
+        &u.projector,
+        crate::model_store::Kind::Gguf,
+        c,
+        log,
+    )?;
+    let mut model = desired;
+    model.weights = weights_path;
+    model.projector = projector_path;
+    model.revision = u.revision.clone();
+    model.sha256 = fingerprint(&(&weights.sha256, &projector.sha256))?;
+    model.weights_mib = (weights.bytes + projector.bytes).div_ceil(1048576);
+    model.resident_mib = model.resident_mib.max(model.weights_mib + 512);
+    let reference = store.write_reference(&model, weights, projector, c)?;
+    stage_model(
+        s,
+        crate::model_store::StoredModel { model, reference },
+        base,
+        c,
+    )
+}
+pub fn prepare_custom(s: &Settings, mut model: Model, c: &Control) -> Result<PreparedModel> {
+    c.check()?;
+    validate_model(&model)?;
+    anyhow::ensure!(
+        model.endpoint.is_none(),
+        Fault::new(
+            "NG660",
+            "Local byte validation does not apply to an external service configuration"
+        )
+    );
+    let base = candidate_base(s, &model.id, c)?;
+    let old = model.sha256.clone();
+    model.sha256.clear();
+    model.alias.clear();
+    let store = crate::model_store::Store::open(&s.shared_model_store)?;
+    let mut stored = store.adopt_model(&model, c)?;
+    if old != stored.model.sha256
+        && (stored.model.revision.is_empty() || stored.model.revision.len() == 40)
+    {
+        stored.model.revision = format!("local-{}", &stored.model.sha256[..16]);
+        stored.reference = store.write_reference(
+            &stored.model,
+            stored.reference.weights,
+            stored.reference.projector,
+            c,
+        )?;
+    }
+    stage_model(s, stored, base, c)
+}
+pub fn activate_prepared(
+    prepared: &PreparedModel,
+    s: &Settings,
+    c: &Control,
+    log: &Activity,
+) -> Result<Model> {
+    anyhow::ensure!(
+        !s.external_server,
+        Fault::new(
+            "NG660",
+            "Managed candidate remains pending: disable the external service override before local canary activation"
+        )
+    );
+    anyhow::ensure!(
+        prepared.record.registry == s.models_dir.canonicalize()?,
+        Fault::new("NG660", "Candidate registry changed")
+    );
+    if let Some(model) = crate::setup::activate_with_pending_runtime(prepared, s, c, log)? {
+        return Ok(model);
+    }
+    let passed = crate::canary::run(prepared.model(), s, &prepared.evidence_parent(), c, log)?;
+    passed.verify_current(prepared.model(), &s.server, c)?;
+    crate::activation::commit(
+        &s.models_dir,
+        &crate::setup::runtime_root(s),
+        None,
+        prepared.changes(c)?,
+        c,
+    )?;
+    log.emit(
+        "models",
+        format!(
+            "{} activated after the known print/table canary; real documents still require review",
+            prepared.model().name
+        ),
+        0,
+        1,
+        1,
+        "",
+    );
+    Ok(prepared.model().clone())
+}
+pub fn install_validated(
+    s: &Settings,
+    m: &Model,
+    u: &Update,
+    c: &Control,
+    log: &Activity,
+) -> Result<Model> {
+    let prepared = prepare(s, m, u, c, log)?;
+    activate_prepared(&prepared, s, c, log)
+}
+pub fn save_custom_validated(
+    s: &Settings,
+    model: Model,
+    c: &Control,
+    log: &Activity,
+) -> Result<Model> {
+    if model.endpoint.is_some() {
+        log.emit("models","Local HTTP configuration is not a byte-pinned managed installation; service/model identity remains unverified",0,0,0,"NG660");
+        return save_custom(&s.models_dir, model, c);
+    }
+    let prepared = prepare_custom(s, model, c)?;
+    activate_prepared(&prepared, s, c, log)
+}
+pub fn register_validated(
+    s: &Settings,
+    id: &str,
+    weights: &Path,
+    projector: &Path,
+    c: &Control,
+    log: &Activity,
+) -> Result<Model> {
+    let mut model = crate::planning::catalog()
+        .into_iter()
+        .find(|model| model.id == id)
+        .ok_or_else(|| Fault::new("NG200", "Unknown catalog reader ID"))?;
+    model.weights = weights.to_path_buf();
+    model.projector = projector.to_path_buf();
+    save_custom_validated(s, model, c, log)
+}
+pub fn rollback_validated(s: &Settings, id: &str, c: &Control, log: &Activity) -> Result<Model> {
+    anyhow::ensure!(
+        crate::writers::valid_id(id),
+        Fault::new("NG650", "Invalid reader ID")
+    );
+    let path = s.models_dir.join(format!("{id}.previous.json"));
+    crate::watch::no_links(&path)?;
+    let model: Model = read_json(&path, 100_000)?;
+    save_custom_validated(s, model, c, log)
 }
 pub fn attach_catalog_metadata(m: &mut Model) {
     let Ok(items) = serde_json::from_str::<Vec<Value>>(include_str!("../downloads.json")) else {
@@ -704,96 +1098,31 @@ pub(crate) fn download(
         download_async(&client, url, path, a, c, log).await
     })
 }
+/// Compatibility wrapper using default runtime settings. Application callers
+/// should use install_validated so the selected native runtime is tested.
 pub fn install(dir: &Path, m: &Model, u: &Update, c: &Control, log: &Activity) -> Result<Model> {
-    validate_model(m)?;
-    // Verify metadata identity again before touching disk; update objects can be loaded from files.
-    let h = m
-        .hub
-        .as_ref()
-        .ok_or_else(|| Fault::new("NG650", "Reader has no publisher source"))?;
-    validate_hub(h)?;
-    anyhow::ensure!(
-        u.id == m.id
-            && u.repository == h.repository
-            && u.previous_revision == m.revision
-            && u.weights.file == h.weights
-            && u.projector.file == h.projector
-            && u.revision.len() == 40
-            && u.revision.bytes().all(|b| b.is_ascii_hexdigit())
-            && [&u.weights, &u.projector].iter().all(|a| a.bytes >= 4
-                && a.bytes <= 100_000_000_000
-                && a.sha256.len() == 64
-                && a.sha256.bytes().all(|b| b.is_ascii_hexdigit())),
-        Fault::new("NG650", "Update metadata changed; check again")
-    );
-    let path = dir.join("versions").join(&m.id).join(&u.revision);
-    fs::create_dir_all(&path)?;
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let absolute = std::path::absolute(&path)?;
-    if let Some(disk) = disks
-        .iter()
-        .filter(|d| absolute.starts_with(d.mount_point()))
-        .max_by_key(|d| d.mount_point().components().count())
-    {
-        let required = u
-            .weights
-            .bytes
-            .saturating_add(u.projector.bytes)
-            .saturating_add(128 * 1024 * 1024);
-        anyhow::ensure!(
-            disk.available_space() > required,
-            Fault::new(
-                "NG650",
-                "Not enough free disk space for a safe model update"
-            )
-        );
-    }
-    let weights = path.join("weights.gguf");
-    let projector = path.join("projector.gguf");
-    for (a, p) in [(&u.weights, &weights), (&u.projector, &projector)] {
-        download(
-            &format!(
-                "https://huggingface.co/{}/resolve/{}/{}",
-                u.repository, u.revision, a.file
-            ),
-            p,
-            a,
-            c,
-            log,
-        )?;
-    }
-    c.check()?;
-    let mut next = m.clone();
-    next.weights = weights;
-    next.projector = projector;
-    next.revision = u.revision.clone();
-    let result = save_custom(dir, next, c)?;
-    log.emit(
-        "models",
-        format!(
-            "Activated {} revision {}. Previous reader retained for rollback.",
-            m.name,
-            &u.revision[..12]
-        ),
-        0,
-        1,
-        1,
-        "",
-    );
-    Ok(result)
+    install_validated(
+        &Settings {
+            models_dir: dir.to_path_buf(),
+            ..Default::default()
+        },
+        m,
+        u,
+        c,
+        log,
+    )
 }
+/// Compatibility wrapper; application callers should use rollback_validated.
 pub fn rollback(dir: &Path, id: &str) -> Result<Model> {
-    anyhow::ensure!(
-        crate::writers::valid_id(id),
-        Fault::new("NG650", "Invalid reader ID")
-    );
-    let path = dir.join(format!("{id}.previous.json"));
-    let previous: Model = read_json(&path, 100_000)?;
-    anyhow::ensure!(
-        previous.id == id,
-        Fault::new("NG650", "Previous reader ID mismatch")
-    );
-    save_custom(dir, previous, &Control::default())
+    rollback_validated(
+        &Settings {
+            models_dir: dir.to_path_buf(),
+            ..Default::default()
+        },
+        id,
+        &Control::default(),
+        &Activity::default(),
+    )
 }
 
 #[cfg(test)]

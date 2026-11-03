@@ -42,7 +42,7 @@ pub const GUIDE: &[(&str, &str)] = &[
     ),
     (
         "ui.locale",
-        "Language of core interface labels: en (English), si (Sinhala), ta (Tamil). Detailed help remains English; OCR language is configured separately.",
+        "Interface labels, settings help and error remedies: en (English), si (Sinhala), ta (Tamil). OCR language and model support are configured separately.",
     ),
     (
         "preset",
@@ -214,6 +214,14 @@ pub const GUIDE: &[(&str, &str)] = &[
         "Optional exact project environment lock file. When set, validate its pinned readers, runtime, OCR resources and preparation settings before recognition; mismatches stop instead of silently upgrading.",
     ),
     (
+        "measured_policy",
+        "Optional local calibration and regional reader policy. Exact reader, runtime, inference profile and held-out data identities must match; missing or incompatible evidence never counts as calibrated accuracy.",
+    ),
+    (
+        "memory_history",
+        "Optional local memory observations used only to raise conservative admission estimates. Recorded process peaks, sampled lower bounds and unknown GPU metrics remain distinct; current reservations still apply.",
+    ),
+    (
         "endpoint",
         "Literal localhost endpoint for an external inference server. Remote conversion endpoints are blocked.",
     ),
@@ -363,4 +371,16 @@ pub fn description(key: &str) -> &'static str {
         .iter()
         .find(|(k, _)| *k == key)
         .map_or("", |(_, v)| *v)
+}
+pub fn description_localized(locale: crate::localization::Locale, key: &str) -> String {
+    let original = description(key);
+    if original.is_empty() {
+        return String::new();
+    }
+    let message = format!("help.{key}");
+    if crate::localization::has_key(&message) {
+        crate::localization::text(locale, &message).to_owned()
+    } else {
+        original.to_owned()
+    }
 }

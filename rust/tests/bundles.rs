@@ -104,6 +104,78 @@ fn offline_preview_lists_exact_bytes_hashes_and_excludes_private_settings_paths_
     assert_eq!(checked.total_bytes, preview.total_bytes);
 }
 #[test]
+fn validated_import_with_missing_native_runtime_preserves_working_registry_and_retains_pending_candidates()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let source = fixture(&dir.path().join("source"));
+    let input = bundle(&source, dir.path());
+    let mut target = fixture(&dir.path().join("target"));
+    target.shared_model_store = dir.path().join("isolated-store");
+    let active = target.models_dir.join("fixture-reader.notegen.json");
+    let original_active = fs::read(&active).unwrap();
+    let original_bundle = hash_file(&input, &Control::default()).unwrap();
+    let destination = dir.path().join("pending-import");
+    let error = bundles::import_validated(
+        &target,
+        &input,
+        &destination,
+        &Control::default(),
+        &notegen::storage::Activity::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("remains isolated/pending"));
+    assert_eq!(fs::read(active).unwrap(), original_active);
+    assert!(
+        !target
+            .models_dir
+            .join("fixture-reader.previous.json")
+            .exists()
+    );
+    assert_eq!(
+        hash_file(&input, &Control::default()).unwrap(),
+        original_bundle
+    );
+    let payload = destination.join("payload");
+    assert!(
+        payload
+            .join("pending-registry/fixture-reader.notegen.json")
+            .is_file()
+    );
+    assert!(!payload.join("models/fixture-reader.notegen.json").exists());
+    let status: serde_json::Value =
+        notegen::storage::read_json(&payload.join("canary-status.json"), 10_000).unwrap();
+    assert_eq!(status["state"], "pending");
+    let candidates = fs::read_dir(payload.join("models/candidates"))
+        .unwrap()
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    let prepared = models::read_prepared(
+        &candidates[0].path().join("candidate.json"),
+        &Settings {
+            models_dir: payload.join("models"),
+            ..target.clone()
+        },
+        &Control::default(),
+    )
+    .unwrap();
+    assert!(prepared.summary().status.contains("not active"));
+    assert!(
+        bundles::import_validated(
+            &target,
+            &input,
+            &destination,
+            &Control::default(),
+            &notegen::storage::Activity::default()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(target.models_dir.join("fixture-reader.notegen.json")).unwrap(),
+        original_active
+    );
+}
+#[test]
 fn valid_registration_metadata_is_bounded_before_preview_or_bundle_publication() {
     let dir = tempfile::tempdir().unwrap();
     let settings = fixture(&dir.path().join("source"));
@@ -354,12 +426,163 @@ fn preflight_counts_pinned_remaining_bytes_and_cards_do_not_invent_license_or_la
     for card in cards {
         assert_eq!(card.pinned_revision.len(), 40);
         assert!(card.tested_languages.is_empty());
-        assert!(card.license.contains("Not recorded"));
+        assert!(card.license.contains("Publisher model declaration:"));
         assert!(card.source.starts_with("https://"));
         assert!(card.download_bytes > 0);
     }
     assert!(bundles::preview(&s, &ids(), Some("unsupported"), &c).is_err());
     assert!(bundles::preview(&s, &[], None, &c).is_err());
+}
+
+#[test]
+fn packaged_capability_cards_separate_primary_sources_conversions_estimates_and_unmeasured_claims()
+{
+    use bundles::{CapabilitySourceKind as S, LicenseScope as L, MemoryEstimateBasis as M};
+    let cards = bundles::capability_cards().unwrap();
+    for card in &cards {
+        let (model, pin) = setup::pinned(&card.id).unwrap();
+        assert_eq!(card.provenance.conversion_repository, pin.repository);
+        assert_eq!(card.provenance.conversion_revision, pin.revision);
+        assert_eq!(card.provenance.upstream_documentation_revision.len(), 40);
+        assert!(
+            card.provenance.upstream_weights_revision.is_none(),
+            "a documentation snapshot must not invent the converter's base commit"
+        );
+        assert_ne!(
+            card.provenance.upstream_publisher_account,
+            card.provenance.conversion_repository_owner
+        );
+        assert_eq!(card.assets.len(), 2);
+        for (role, asset) in [("weights", &pin.weights), ("projector", &pin.projector)] {
+            let actual = card.assets.iter().find(|a| a.role == role).unwrap();
+            assert_eq!(actual.file, asset.file);
+            assert_eq!(actual.bytes, asset.bytes);
+            assert_eq!(actual.sha256, asset.sha256);
+            assert_eq!(
+                actual.immutable_url,
+                format!(
+                    "https://huggingface.co/{}/resolve/{}/{}",
+                    pin.repository, pin.revision, asset.file
+                )
+            );
+        }
+        assert_eq!(card.download_bytes, pin.weights.bytes + pin.projector.bytes);
+        assert_eq!(card.memory_estimate.basis, M::PlanningCatalogEstimate);
+        assert_eq!(card.memory_estimate.resident_mib, model.resident_mib);
+        assert_eq!(
+            card.estimated_resident_mib,
+            card.memory_estimate.resident_mib
+        );
+        assert!(card.memory_estimate.measured_peak_mib.is_none());
+        assert!(card.tested_languages.is_empty());
+        assert!(!card.publisher_claims.is_empty());
+        assert!(!card.task_protocols.is_empty());
+        assert!(
+            card.task_protocols.iter().all(|p| p.adapter == model.prompt
+                && p.evidence_note.contains("not a measured accuracy"))
+        );
+        assert!(card.sources.iter().any(|s| s.kind == S::PublisherModelCard));
+        assert!(
+            card.sources
+                .iter()
+                .any(|s| s.kind == S::ConversionModelCard)
+        );
+        for source in &card.sources {
+            assert_eq!(source.sha256.len(), 64);
+            assert!(source.bytes > 0);
+            assert!(source.url.contains(&format!("/raw/{}/", source.revision)));
+            assert!(!source.url.contains("/main/"));
+        }
+        let license = card
+            .license_declarations
+            .iter()
+            .find(|l| l.scope == L::PublisherModel)
+            .unwrap();
+        if card.id.starts_with("qwen") {
+            assert_eq!(license.declared_identifier.as_deref(), Some("apache-2.0"));
+            assert!(license.separate_license_file_available);
+            assert!(
+                card.sources
+                    .iter()
+                    .any(|s| s.kind == S::PublisherLicenseFile
+                        && s.sha256
+                            == "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a")
+            );
+        }
+    }
+    let glm = cards.iter().find(|c| c.id == "glm-ocr").unwrap();
+    assert_eq!(glm.provenance.upstream_repository, "zai-org/GLM-OCR");
+    assert_eq!(glm.download_repository, "ggml-org/GLM-OCR-GGUF");
+    assert_eq!(
+        glm.license_declarations
+            .iter()
+            .find(|l| l.scope == L::PublisherModel)
+            .unwrap()
+            .declared_identifier
+            .as_deref(),
+        Some("mit")
+    );
+    assert!(
+        glm.license_declarations
+            .iter()
+            .find(|l| l.scope == L::ConversionModel)
+            .unwrap()
+            .declared_identifier
+            .is_none()
+    );
+    assert_eq!(
+        glm.publisher_declared_languages,
+        vec!["zh", "en", "fr", "es", "ru", "de", "ja", "ko"]
+    );
+    assert_eq!(
+        glm.task_protocols
+            .iter()
+            .map(|p| p.request.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Text Recognition:", "Table Recognition:"]
+    );
+    assert!(glm.publisher_claims.iter().any(|s| s.contains("formula")));
+    assert!(!glm.tasks.iter().any(|s| s.contains("formula")));
+    let light1 = cards.iter().find(|c| c.id == "lighton3-1b").unwrap();
+    let light4 = cards.iter().find(|c| c.id == "lighton3-4b").unwrap();
+    assert!(
+        light1
+            .publisher_claims
+            .iter()
+            .any(|s| s.contains("handwriting"))
+    );
+    assert!(
+        !light4
+            .publisher_claims
+            .iter()
+            .any(|s| s.contains("handwriting"))
+    );
+    assert_eq!(light1.task_protocols[0].request, "grounding");
+    assert!(light1.publisher_declared_languages.is_empty());
+    assert!(!light1.license_declarations[0].separate_license_file_available);
+    assert!(
+        cards
+            .iter()
+            .find(|c| c.id == "qwen35-2b")
+            .unwrap()
+            .publisher_claims
+            .iter()
+            .any(|s| s.contains("201"))
+    );
+    assert!(
+        cards
+            .iter()
+            .find(|c| c.id == "qwen38-27b")
+            .unwrap()
+            .publisher_claims
+            .iter()
+            .all(|s| !s.contains("201"))
+    );
+    let again = bundles::capability_cards().unwrap();
+    assert_eq!(
+        serde_json::to_vec(&cards).unwrap(),
+        serde_json::to_vec(&again).unwrap()
+    );
 }
 #[cfg(unix)]
 #[test]

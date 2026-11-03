@@ -5,7 +5,7 @@ $ErrorActionPreference='Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 $sourceRoot=(Get-Location).Path
 if(-not $SkipBuild){
- & cargo build --locked --release --features desktop --bins -j 2
+ & "$PSScriptRoot/Build-Reproducible.ps1"
  if($LASTEXITCODE -ne 0){throw 'Rust release compilation failed'}
 }
 $stage=Join-Path (Get-Location) ('build/rust-package-'+[guid]::NewGuid().ToString())
@@ -18,6 +18,7 @@ Copy-Item rust/languages.json "$package/assets/ocr-language-downloads.json"
 Copy-Item README.md,LICENSE,THIRD_PARTY_NOTICES.md,CONTRIBUTING.md $package
 Copy-Item docs/WINDOWS.md,docs/TESTING.md,docs/RUST_PLAN.md,docs/STUDIO.md,docs/RELEASE_0.4.0.md,docs/RELEASE_0.4.1.md "$package/docs"
 Copy-Item docs/WORKBENCH.md,docs/FEATURES_0.5.0.md,docs/RELEASE_0.5.0.md,docs/INSTALLER.md,docs/ACCESSIBILITY.md "$package/docs"
+Copy-Item docs/SOURCE_REVIEW.md,docs/PROJECT_OPERATIONS.md,docs/CONFIRMED_REFERENCES.md,docs/BUILD_PROVENANCE.md "$package/docs"
 New-Item -ItemType Directory -Force "$package/docs/images" | Out-Null
 Copy-Item docs/images/notegen-banner.svg "$package/docs/images"
 Copy-Item docs/images/rust-workspace.png "$package/docs/images"
@@ -61,6 +62,8 @@ $commit=$env:GITHUB_SHA
 if(-not $commit){$commit=(& git rev-parse HEAD).Trim();if($LASTEXITCODE -ne 0){throw 'Cannot determine source commit for build provenance'}}
 & "$sourceRoot/scripts/Build-Provenance.ps1" -SourceCommit $commit -BinaryDirectory $package -OutputDirectory "$package/provenance"
 if($LASTEXITCODE -ne 0){throw 'Build provenance generation failed'}
+if(-not(Test-Path target/release/reproducible-build.json)){throw 'Release build recipe record is missing; use Build-Reproducible.ps1'}
+Copy-Item target/release/reproducible-build.json "$package/provenance/reproducible-build.json"
 Push-Location $package
 try{
  & ./notegen-cli.exe self-test -o ./package-test.docx

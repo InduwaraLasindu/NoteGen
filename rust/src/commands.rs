@@ -936,7 +936,13 @@ pub fn run(action: Action, s: &Settings, c: &Control) -> Result<()> {
                 !output.exists(),
                 Fault::new("NG401", "Settings output exists")
             );
-            let next = notegen::bundles::import(s, &input, &destination, c)?;
+            let next = notegen::bundles::import_validated(
+                s,
+                &input,
+                &destination,
+                c,
+                &Activity::default(),
+            )?;
             protected_json(&output, &next)
         }
         Action::InstallPreflight { models, runtime } => print(notegen::bundles::preflight(

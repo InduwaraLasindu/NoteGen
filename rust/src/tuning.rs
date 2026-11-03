@@ -183,7 +183,7 @@ pub fn run(s: &Settings, c: &Control, log: &Activity) -> Result<Report> {
     models.retain(|m| m.endpoint.is_none());
     models.sort_by_key(|m| (m.role != "ocr", m.weights_mib));
     let image = sample()?;
-    let work = tempfile::tempdir()?;
+    let work = crate::storage::temporary_dir(c, "notegen-tuning-")?;
     // Declared after the temporary directory so its preview is cleared first,
     // including cancellation and error exits.
     let mut preview = TemporaryPreview::new(log);

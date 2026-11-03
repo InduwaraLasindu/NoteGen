@@ -514,14 +514,45 @@ fn right_to_left_paragraphs_and_tables_preserve_number_text() {
     let p = &f.project;
     let mut page = p.load(1).unwrap();
     page.content.blocks[0].text = "المجموع 123.45 سنة 2026".into();
-    page.content.blocks[1].rows[0][0] = "שם".into();
+    page.content.blocks[1].rows = vec![
+        vec!["שמאל".into(), "1250.50".into(), "ימין".into()],
+        vec!["A".into(), "B".into(), "C".into()],
+    ];
+    page.content.blocks[1].merges = vec![Merge {
+        row: 1,
+        col: 1,
+        rowspan: 1,
+        colspan: 2,
+    }];
     p.save(&page).unwrap();
     let output = f.document.parent().unwrap().join("rtl.docx");
     word::export(p, &output, &Control::default()).unwrap();
     let xml = text_part(&output, "word/document.xml");
     assert!(xml.contains("<w:bidi/>"));
-    assert!(xml.contains("<w:bidiVisual/>"));
+    assert!(!xml.contains("<w:bidiVisual/>"));
     assert!(xml.contains("123.45"));
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let table = parsed
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "tbl")
+        .unwrap();
+    let rows = table
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "tr")
+        .map(|row| {
+            row.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "tc")
+                .map(|cell| {
+                    cell.descendants()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "t")
+                        .filter_map(|n| n.text())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows, vec![vec!["שמאל", "1250.50", "ימין"], vec!["A", "BC"]]);
+    assert!(xml.contains("<w:gridSpan w:val=\"2\"/>"));
     let preview = roundtrip::preview(p, &output, &Control::default()).unwrap();
     assert!(preview.fields.iter().all(|f| f.status == "unchanged"));
 }

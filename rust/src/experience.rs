@@ -337,10 +337,18 @@ impl Desktop {
             let mut s = self.state.settings.clone();
             s.preset = Preset::Maximum;
             let preset = self.state.settings.preset;
+            let output = self.settings_output.clone();
             self.studio_task(ctx, move |c, log| {
-                let mut next = crate::setup::install(&s, &Default::default(), &c, &log)?;
-                next.preset = preset;
-                atomic_json(Path::new("ai-settings.json"), &next)?;
+                let next = crate::setup::install_to(
+                    &s,
+                    &crate::setup::Options {
+                        output_preset: Some(preset),
+                        ..Default::default()
+                    },
+                    &output,
+                    &c,
+                    &log,
+                )?;
                 Ok(studio::StudioMessage::Setup(Box::new(next)))
             });
         }
@@ -480,9 +488,10 @@ impl Desktop {
                 }
                 let s = self.state.settings.clone();
                 let report = report.clone();
+                let output = self.settings_output.clone();
                 self.studio_task(ctx, move |c, log| {
                     Ok(studio::StudioMessage::Updated(Box::new(
-                        maintenance::apply(&s, &report, &c, &log)?,
+                        maintenance::apply_to(&s, &report, &output, &c, &log)?,
                     )))
                 });
             }
@@ -547,9 +556,10 @@ impl Desktop {
                 .clicked()
         {
             let s = self.state.settings.clone();
-            self.studio_task(ctx, move |c, _| {
+            let output = self.settings_output.clone();
+            self.studio_task(ctx, move |c, log| {
                 Ok(studio::StudioMessage::Updated(Box::new(
-                    maintenance::rollback_runtime(&s, &c)?,
+                    maintenance::rollback_runtime_to(&s, &output, &c, &log)?,
                 )))
             });
         }
