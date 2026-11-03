@@ -151,6 +151,54 @@ fn renamed_duplicate_reuses_exact_project_or_preserves_private_history_in_a_new_
         project.load(1).unwrap().content.blocks[0].text,
         "Confirmed 1250"
     );
+    let prior_origins = fs::read_dir(&fork.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("revision-origin-")
+        })
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_owned(),
+                fs::read(&path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prior_origins.len(), 1);
+    let nested_preview = project_reuse::preview(
+        &renamed,
+        &settings,
+        std::slice::from_ref(&fork.root),
+        &Control::default(),
+    )
+    .unwrap();
+    let nested = project_reuse::choose(
+        &nested_preview,
+        &nested_preview.token,
+        0,
+        Choice::SeparateRevision,
+        Some(&temp.path().join("nested-revision")),
+        &Control::default(),
+    )
+    .unwrap();
+    for (name, bytes) in prior_origins {
+        assert_eq!(fs::read(nested.root.join(name)).unwrap(), bytes);
+    }
+    assert_eq!(
+        fs::read_dir(&nested.root)
+            .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("revision-origin-"))
+            .count(),
+        2
+    );
     assert!(
         project_reuse::choose(
             &preview,

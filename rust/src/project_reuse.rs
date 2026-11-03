@@ -378,7 +378,7 @@ fn fork(project: &Project, target: &Path, files: &[File], c: &Control) -> Result
     fs::create_dir(&target)
         .map_err(|_| fail("Revision destination already exists or cannot be created"))?;
     let result: Result<Project> = (|| {
-        crate::storage::atomic_json(
+        crate::storage::protected_json(
             &target.join("revision-copy.pending"),
             &serde_json::json!({"schema":1,"source_snapshot":fingerprint(files)?,"note":"Incomplete private revision; source project remains unchanged. A valid manifest is published last."}),
         )?;
@@ -414,6 +414,10 @@ fn fork(project: &Project, target: &Path, files: &[File], c: &Control) -> Result
             fail("Private project changed before revision publication")
         );
         c.check()?;
+        crate::storage::protected_json(
+            &target.join(format!("revision-origin-{}.json", fingerprint(files)?)),
+            &serde_json::json!({"schema":1,"parent_snapshot":fingerprint(files)?,"source_input_sha256":project.manifest.input_sha256,"note":"Explicit private separate revision; source identities, readings and exact locks retained."}),
+        )?;
         let mut output = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -421,12 +425,7 @@ fn fork(project: &Project, target: &Path, files: &[File], c: &Control) -> Result
         output.write_all(&manifest_bytes)?;
         output.sync_all()?;
         fs::remove_file(target.join("revision-copy.pending"))?;
-        let result = Project::read(target.clone())?;
-        crate::storage::atomic_json(
-            &target.join("revision-origin.json"),
-            &serde_json::json!({"schema":1,"parent_snapshot":fingerprint(files)?,"source_input_sha256":project.manifest.input_sha256,"note":"Explicit private separate revision; source identities, readings and exact locks retained."}),
-        )?;
-        Ok(result)
+        Project::read(target.clone())
     })();
     result.map_err(|error|error.context(format!("Private source unchanged; partial revision retained at {}. If incomplete, choose a fresh folder.",target.display())))
 }

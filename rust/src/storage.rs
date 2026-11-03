@@ -237,7 +237,7 @@ pub fn hash_file(path: &Path, c: &Control) -> Result<String> {
     }
     Ok(hex::encode(h.finalize()))
 }
-pub fn fingerprint<T: Serialize>(value: &T) -> Result<String> {
+pub fn fingerprint<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
 }
 pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
