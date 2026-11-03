@@ -406,6 +406,18 @@ impl Review {
         self.dirty = false;
         Ok(())
     }
+    fn visible_revision_comparison(&self, revision: u64) -> Result<String> {
+        let mut old = crate::review::snapshot(&self.project, revision, self.page.page)?;
+        if !self.page.confirmed_redactions.is_empty() {
+            old.confirmed_redactions = self.page.confirmed_redactions.clone();
+        }
+        let old = crate::redactions::analysis_page(&self.project, &old, &Control::default())?;
+        let current =
+            crate::redactions::analysis_page(&self.project, &self.page, &Control::default())?;
+        Ok(serde_json::to_string_pretty(&crate::review::compare(
+            &old, &current,
+        )?)?)
+    }
     fn refresh_issues(&mut self) {
         self.fine_heatmap = crate::geometry::heatmap(
             &self.project,
@@ -1885,10 +1897,7 @@ impl Desktop {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(format!("{} · {} · {}",revision.id,revision.label,revision.created));
                             if ui.add_enabled(!r.dirty,egui::Button::new("Compare")).clicked() {
-                                match crate::review::snapshot(&r.project,revision.id,r.page.page) {
-                                    Ok(old) => match crate::review::compare(&old,&r.page).and_then(|d| Ok(serde_json::to_string_pretty(&d)?)) {Ok(text)=>self.review_error=text,Err(e)=>self.review_error=e.to_string()},
-                                    Err(e) => self.review_error=e.to_string(),
-                                }
+                                match r.visible_revision_comparison(revision.id) {Ok(text)=>self.review_error=text,Err(error)=>self.review_error=error.to_string()}
                             }
                             if ui.add_enabled(!r.dirty && !r.raw_open && self.worker.is_none(),egui::Button::new("Restore")).clicked() {
                                 match crate::review::restore(&r.project,revision.id).and_then(|_| r.reload()) {

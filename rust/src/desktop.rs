@@ -3089,6 +3089,8 @@ mod acceptance {
             .unwrap();
         let original = fs::read(project.image(1)).unwrap();
         let mut page = project.load(1).unwrap();
+        page.content.blocks[0].text = "PRIVATE COMPARISON SECRET".into();
+        project.save(&page).unwrap();
         let mask = crate::redactions::MaskSpec {
             region: BoxRect {
                 left: 0.25,
@@ -3142,6 +3144,12 @@ mod acceptance {
             "Apply confirmed mask visibility"
         );
         let pixels = uploaded_crop(&ctx, review.texture.as_ref().unwrap().id());
+        assert!(
+            !review
+                .visible_revision_comparison(history.revisions[0].id)
+                .unwrap()
+                .contains("PRIVATE COMPARISON SECRET")
+        );
         assert_eq!(pixels[(20, 20)], Color32::BLACK);
         assert_eq!(pixels[(0, 0)], Color32::from_rgb(210, 30, 60));
         let magnifier = SourceMagnifier::new(

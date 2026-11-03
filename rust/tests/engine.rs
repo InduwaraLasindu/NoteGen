@@ -336,7 +336,8 @@ fn native_word_has_real_merges_and_embedded_figure() {
         ..Default::default()
     })
     .unwrap();
-    let target = t.path().join("notes.docx");
+    let exported = tempfile::tempdir().unwrap();
+    let target = exported.path().join("notes.docx");
     word::export(&p, &target, &Control::default()).unwrap();
     let mut z = zip::ZipArchive::new(fs::File::open(&target).unwrap()).unwrap();
     let mut text = String::new();

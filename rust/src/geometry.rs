@@ -2,6 +2,7 @@
 use crate::{redactions::SourceIdentity, storage::Control, types::*, watch::no_links};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 
 pub const MAX_PAGE_ENTRIES: usize = 100_000;

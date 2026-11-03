@@ -20,7 +20,9 @@ pub struct Report {
     pub observations: Vec<Observation>,
 }
 pub fn analyze(im: &DynamicImage) -> Report {
-    let gray = im.thumbnail(1000, 1000).to_luma8();
+    let gray = im
+        .thumbnail(im.width().min(1000), im.height().min(1000))
+        .to_luma8();
     let mut histogram = [0usize; 256];
     for v in gray.as_raw() {
         histogram[*v as usize] += 1;
@@ -169,10 +171,11 @@ pub fn analyze(im: &DynamicImage) -> Report {
                 "Check letters at full resolution. Move closer or scan at a higher DPI while keeping page margins; compare punctuation and decimal points.",
             );
         }
-        let tile = (width.min(height) / 12).clamp(12, 80);
+        let tile = (width.min(height) / 20).clamp(12, 48);
+        let stride = (tile / 2).max(1);
         let mut glare = None;
-        'tiles: for y in (tile..height.saturating_sub(tile * 2)).step_by(tile) {
-            for x in (tile..width.saturating_sub(tile * 2)).step_by(tile) {
+        'tiles: for y in (tile..height.saturating_sub(tile * 2)).step_by(stride) {
+            for x in (tile..width.saturating_sub(tile * 2)).step_by(stride) {
                 let mut bright = 0usize;
                 let mut sum = 0usize;
                 let mut ring_sum = 0usize;
