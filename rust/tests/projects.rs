@@ -363,8 +363,6 @@ fn templates_roundtrip_policy_and_protect_existing_outputs() {
     s.models_dir = f.root.join("private-models");
     s.shared_model_store = f.root.join("private-user-model-store");
     s.project_lock = Some(f.root.join("private-project/model-lock.json"));
-    s.measured_policy = Some(f.root.join("private-measurement-policy.json"));
-    s.memory_history = Some(f.root.join("private-memory-history.json"));
     s.assistance.sources.push(notegen::assistance::WebSource {
         title: "Private context".into(),
         excerpt: "Not portable".into(),
@@ -384,9 +382,6 @@ fn templates_roundtrip_policy_and_protect_existing_outputs() {
         std::path::PathBuf::from("models/shared")
     );
     assert!(template.settings.project_lock.is_none());
-    assert!(
-        template.settings.measured_policy.is_none() && template.settings.memory_history.is_none()
-    );
     let bytes = std::fs::read(&output).unwrap();
     let json = String::from_utf8(bytes.clone()).unwrap();
     for private in [
@@ -394,8 +389,6 @@ fn templates_roundtrip_policy_and_protect_existing_outputs() {
         "private-project",
         "private-writers",
         "private-models",
-        "private-measurement-policy",
-        "private-memory-history",
     ] {
         assert!(!json.contains(private), "{private}");
     }

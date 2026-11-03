@@ -1714,7 +1714,6 @@ pub fn recognition_settings(s: &Settings) -> Settings {
     value.ui = Appearance::default();
     value.experience = ExperienceOptions::default();
     value.writer_reference = None;
-    value.memory_history = None;
     value.assistance.ask_questions = true;
     value.assistance.max_questions = 8;
     value.assistance.web_lookup = false;

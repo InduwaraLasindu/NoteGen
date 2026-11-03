@@ -866,6 +866,7 @@ fn chat_authenticated(
     page: usize,
     api_key: Option<&str>,
 ) -> Result<String> {
+    c.check()?;
     let url = local_endpoint(endpoint)?.join("v1/chat/completions")?;
     let request_guard =
         crate::connections::begin(url.as_str(), crate::connections::Purpose::Reader);
@@ -877,7 +878,7 @@ fn chat_authenticated(
         tokio::pin!(request);
         let mut response = loop {
             tokio::select! {
-                r = &mut request => break r.map_err(|e| Fault::new("NG200", format!("Local request failed: {e}")))?,
+                r = &mut request => { c.check_cancelled()?; break r.map_err(|e| Fault::new("NG200", format!("Local request failed: {e}")))?; },
                 _ = tokio::time::sleep(Duration::from_millis(50)) => c.check()?,
             }
         };
@@ -892,7 +893,7 @@ fn chat_authenticated(
         let mut preview_at = Instant::now();
         loop {
             let chunk = tokio::select! {
-                r = response.chunk() => r.map_err(|e| Fault::new("NG200", format!("Local response interrupted: {e}")))?,
+                r = response.chunk() => { c.check_cancelled()?; r.map_err(|e| Fault::new("NG200", format!("Local response interrupted: {e}")))? },
                 _ = tokio::time::sleep(Duration::from_millis(50)) => { c.check()?; continue; },
             };
             let Some(chunk) = chunk else { break; };

@@ -134,8 +134,6 @@ pub struct Settings {
     pub models_dir: PathBuf,
     pub shared_model_store: PathBuf,
     pub project_lock: Option<PathBuf>,
-    pub measured_policy: Option<PathBuf>,
-    pub memory_history: Option<PathBuf>,
     pub endpoint: String,
     pub external_server: bool,
     pub subject: String,
@@ -205,8 +203,6 @@ impl Default for Settings {
             models_dir: "models".into(),
             shared_model_store: crate::model_store::default_root().unwrap_or_default(),
             project_lock: None,
-            measured_policy: None,
-            memory_history: None,
             endpoint: "http://127.0.0.1:18745".into(),
             external_server: false,
             subject: String::new(),
@@ -422,14 +418,6 @@ impl Settings {
                     || path.to_string_lossy().len() > 4096
                     || path.to_string_lossy().chars().any(char::is_control)
             })
-            || [&self.measured_policy, &self.memory_history]
-                .into_iter()
-                .flatten()
-                .any(|path| {
-                    path.as_os_str().is_empty()
-                        || path.to_string_lossy().len() > 4096
-                        || path.to_string_lossy().chars().any(char::is_control)
-                })
         {
             return bad("Choose a bounded shared model store and optional project lock path");
         }

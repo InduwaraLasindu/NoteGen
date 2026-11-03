@@ -234,7 +234,7 @@ pub fn catalog_keys() -> Vec<&'static str> {
 }
 /// Explicit presentation keys, or exact known English UI text. Unknown caller
 /// labels stay readable. Never apply this function to recognition or secret data.
-pub fn text<'a>(locale: Locale, key: &'a str) -> &'a str {
+pub fn text(locale: Locale, key: &str) -> &str {
     let Some(c) = catalog() else {
         return key;
     };
@@ -390,5 +390,5 @@ pub fn context_template(ctx: &eframe::egui::Context, key: &str, args: &[(&str, S
         .unwrap_or_else(|_| text(context_locale(ctx), "template_error").into())
 }
 pub fn coverage_note() -> &'static str {
-    "Interface catalogs are independent of OCR/model languages. Detailed help and error remedies use the same catalogs. Native-speaker translation and visual acceptance remain pending."
+    "Core labels are translated. Detailed help and recovery guidance use the same catalogs; specialist controls remain in English. Interface and OCR languages are independent. Native-speaker translation and visual acceptance remain pending."
 }

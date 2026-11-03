@@ -87,6 +87,7 @@ try{
 }finally{Pop-Location}
 $zip=Join-Path (Get-Location) 'dist/NoteGen-Rust-Windows-x64.zip'
 Compress-Archive -Path $package -DestinationPath $zip -Force
-(Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() | Set-Content "$zip.sha256"
+$zipHash=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+"$zipHash  NoteGen-Rust-Windows-x64.zip" | Set-Content "$zip.sha256" -Encoding utf8NoBOM
 Write-Host "Ready: $zip"
 

@@ -160,6 +160,9 @@ fn evidence_label(page: &Page) -> String {
         ),
     }
 }
+#[cfg(test)]
+#[path = "accessibility_audit.rs"]
+mod accessibility_audit;
 #[path = "download_ui.rs"]
 mod download_ui;
 #[path = "experience.rs"]
@@ -185,7 +188,6 @@ enum Message {
     Failed(String, String),
     Hardware(Hardware, Vec<planning::Model>, Option<String>),
     QueueWeights(Vec<(usize, usize)>),
-    Notice(String),
     Exported(PathBuf),
 }
 struct Review {
@@ -812,12 +814,6 @@ impl Desktop {
                     }
                     self.finished();
                 }
-                Message::Notice(s) => {
-                    self.notice = s;
-                    self.busy_setup = false;
-                    self.finished();
-                    self.refresh(ctx);
-                }
                 Message::Exported(p) => {
                     self.notice = format!("Corrected Word document saved: {}", p.display());
                     self.finished();
@@ -1196,9 +1192,17 @@ impl Desktop {
                     else{
                         Color32::from_rgb(65,35,31)}
                     ).inner_margin(12).corner_radius(10).show(ui,|ui|{
-                        ui.label(&self.notice);
-                        if !self.error_code.is_empty(){
-                            ui.small(Fault::new(code_static(&self.error_code),"").remedy());
+                        if self.error_code.is_empty(){
+                            Self::accessible_status(ui,"workspace-operation-result",&self.notice,false);
+                        }else{
+                            let locale=self.state.settings.ui.locale;
+                            let guidance=crate::localization::remedy(locale,&self.error_code);
+                            let summary=if locale==crate::localization::Locale::En {self.notice.clone()}else{format!("{} · {}",self.error_code,guidance.title)};
+                            Self::accessible_status(ui,"workspace-operation-result",&summary,true);
+                            for message in guidance.checks.iter().chain(&guidance.actions){ui.small(message);}
+                            if locale!=crate::localization::Locale::En {
+                                egui::CollapsingHeader::new(crate::localization::text(locale,"error_details")).id_salt("workspace-error-details").show(ui,|ui|{ui.label(&self.notice);});
+                            }
                         }
                     }
                     );
@@ -2440,6 +2444,7 @@ impl Desktop {
         }
     }
     fn theme(&self, ctx: &egui::Context) {
+        crate::localization::set_context_locale(ctx, self.state.settings.ui.locale);
         ctx.set_theme(if self.state.settings.ui.dark {
             egui::Theme::Dark
         } else {
@@ -2712,30 +2717,6 @@ fn failure(e: anyhow::Error) -> Message {
             )
         ),
     )
-}
-fn code_static(s: &str) -> &'static str {
-    match s {
-        "NG100" => "NG100",
-        "NG102" => "NG102",
-        "NG110" => "NG110",
-        "NG200" => "NG200",
-        "NG201" => "NG201",
-        "NG202" => "NG202",
-        "NG203" => "NG203",
-        "NG300" => "NG300",
-        "NG400" => "NG400",
-        "NG401" => "NG401",
-        "NG500" => "NG500",
-        "NG610" => "NG610",
-        "NG620" => "NG620",
-        "NG630" => "NG630",
-        "NG640" => "NG640",
-        "NG650" => "NG650",
-        "NG661" => "NG661",
-        "NG900" => "NG900",
-        "NG901" => "NG901",
-        _ => "NG500",
-    }
 }
 fn numeric<T: egui::emath::Numeric>(
     ui: &mut egui::Ui,

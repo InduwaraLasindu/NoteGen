@@ -1,89 +1,70 @@
-# 0.5.0 completion plan
+# 0.5.0 release completion plan
 
-The active goal is all 100 proposals, followed by repeated validation and publication.
-The implementation ledger records current evidence; it is not a claim that every
-proposal is complete. No release is published while required code gaps remain.
-Corpus collection (#1) and Windows signing (#10) remain excluded by the user's
-earlier instruction. Other skips require a documented overlap or a reason the
-original proposal does not require the extra scope.
+The user has frozen feature scope: finish the work already in progress, validate it
+and publish 0.5.0 promptly. The earlier requirement to complete every non-excluded
+roadmap item before release is superseded. No new workstreams are added. Corpus
+collection (#1) and Windows Authenticode signing (#10) remain excluded by request.
 
-## Current validation baseline
+The [feature ledger](FEATURES_0.5.0.md) maps all 100 original proposals: 87 have
+production implementations, 11 remain partial and 2 are excluded. These counts
+describe code and recorded limits, not universal quality or a completed release gate.
+The [verification record](TESTING.md) owns exact source/run/test evidence; older
+successful snapshots never validate subsequent changes.
 
-The current baseline passed two ordinary-suite runs on both Windows and Linux,
-native Review visibility/click/scroll checks, Windows font and credential checks,
-optimized compilation, packaged OCR and desktop startup. A real Qwen table request
-then exposed invalid merge claims. The exact raw response is now a regression
-fixture: the reader adapter retains all cells, removes that affected table's merge
-claims, and requires review. Strict project/import validators remain strict.
-Consensus must preserve this uncertainty even when other readers agree on text.
+## Frozen implementation scope
 
-The new recovery is being validated independently while the remaining feature
-work is integrated. Baseline CI success is never substituted for testing a later
-source snapshot.
-
-## Implementation sequence
-
-| Workstream | Required outcome |
+| Area | Current production paths and limits |
 |---|---|
-| Redactions (#27, #84) | Confirm source-bound covers; mask all recognition views; withhold intersecting or ungrounded output; preserve redaction placeholders across review/export; produce an isolated sharing copy with sanitized source, text, metadata and evidence. |
-| Fonts (#59) | Explicit confirmed Unicode scalars, clusters, ligatures and alternatives; valid cmap/GSUB tables; no inferred unsampled joining; real shaping tests and proof sheets. |
-| Warm readers (#66) | One owned process, complete compatibility key, fresh context barrier, short TTL, memory admission, immediate release and correct cancellation/log ownership; real same-PID isolation tests. |
-| Downloads (#73) | One manager for verified asset transfers, persisted jobs, bandwidth budget, metered/unknown controls, UTC windows, pause/resume/cancel, partial-range recovery and no credential persistence. |
-| Canary activation (#76) | Stage and verify candidates; run a known recognition fixture before activation; bind results to candidate/fixture hashes; retain working pointers on failure or cancellation. |
-| Encryption (#82) | Maintained authenticated encryption, bounded inputs, encrypted private manifest, passphrase and recovery workflow, verified backups/rotation, atomic commits and explicit managed plaintext lifecycle. |
-| Asset identity (#75, #77, #78) | Immutable content-addressed objects, version-aware references, exact project locks/restoration and project version/channel policies. |
-| Project transactions (#30, #46, #87, #88) | Stable source-page identities, reversible layout changes, explicit compatible duplicate reuse/compare, extracted-runtime repair and supported migration backup/journal/rollback. |
-| Measured recognition (#3, #5, #53, #63, #72) | Deployable calibration/routing artifacts, paired personalized evaluation, conservative learned memory admission and source-bound capability cards; distinguish measurements from estimates. |
-| Recognition detail (#6, #11, #12, #16, #17, #20, #24, #32, #37) | Better preflight/script/language routing; bounded chemistry/code handling; confirmed references; editable line/table geometry; retain geometry actually supplied by readers. |
-| Desktop workflows (#9, #45, #81, #91, #94) | Learned-example history, durable-stage urgent scheduling, active in-app connection/operation inventory, configurable shortcuts and a bounded full-resolution magnifier. |
-| Accessibility/locales (#92, #93, #95) | Complete named/focused/status controls, viewport/preset matrix, externalized interface/help/error catalogs and explicit native-language/Narrator acceptance records. |
-| Reliability/provenance (#89, #90) | Deterministic storage/process/GPU-loss and interrupted-activation tests, isolated build comparison and verifiable build attestations where the connected service supports them. |
+| Source privacy | Preparation without recognition, confirmed source-bound covers, masking before every OCR/AI crop, context omission, conservative output withholding, sanitized sharing/export projections and stale-source rejection. Originals and private history remain private. |
+| Review and geometry | Durable page/context/writer history, configurable focus-scoped shortcuts, responsive review actions, original-pixel magnifier, script suggestions, confirmed language regions, line repair/reread, table-grid mappings and coordinate-backed heatmaps. Missing geometry is not invented. |
+| Recognition detail | Literal code OCR/evidence and whitespace-sensitive consensus; bounded chemical element/charge/reaction checks; explicit footnote/citation/bibliography relationships and Word footnotes. No automatic semantic correction. |
+| Projects and queue | Stable source catalog, reversible page layout transactions, compatible duplicate reuse/comparison/private forks, supported project/settings migrations with backups and rollback, urgent queue yielding at durable checkpoints and original-job resume. |
+| Fonts and languages | Confirmed scalar/cluster/ligature/alternate shapes, cmap/GSUB generation and proof sheets; no inferred contextual joining. Core English/Sinhala/Tamil actions, settings help and known-error catalogs are separate from OCR resources. Specialist controls still include English. |
+| Private workspaces | Authenticated age snapshots, recovery/backup/rotation, managed work copies and guarded app-owned temporary data; explicit retention cleanup/recovery. Unlocked native RAM and OS/driver/pagefile caches remain outside at-rest guarantees. |
+| AI assets and setup | Managed verified downloads with scheduling/rate/network policy, immutable shared objects, version references, exact project locks/restoration, known print/table canaries, journaled activation recovery and selective verified runtime repair. |
+| Performance and transparency | Optional max-one warm reader with reset/TTL/release and cold private/trial jobs; bounded preparation overlap; resource reservations and honest sampled memory/timing observations; source/license capability cards and active in-app request inventory. |
+| Exports and provenance | Word/text/PDF/XLSX with privacy guards and fail-closed correction import; locked SBOM and binary/source hashes; fresh independent Windows executable comparison and eligible native attestation workflows. Actual evidence remains CI-dependent. |
 
-Shared-file ownership is coordinated before edits. New helpers do not count as
-complete features until production entry points, CLI/desktop controls, persistence,
-undo/recovery and appropriate tests are wired.
+Unused calibration/memory settings and the unfinished writer-source sidecar prototype
+have been removed. Existing scorecards, calibration-bin reports, writer-separated
+dataset checks and sampled hardware observations remain available. No ignored setting
+or draft module is presented as a finished measurement workflow.
 
-## Overlap decisions to verify against original wording
+## Deferred scope and external acceptance
 
-The following are evidence-backed candidates for completion without adding an
-extra feature that the proposal did not require:
+The following do not block the frozen release by reopening implementation scope:
 
-- #19 already offers keep/remove for recurring elements; mapping to Word sections
-  was an alternative, not an additional mandatory choice.
-- #21 can improve uneven lighting without promising recovery of destroyed detail.
-- #23 has editable four-corner correction through the CLI; a draggable editor was
-  not specified by the proposal.
-- #39 already flags cross-page inconsistencies without forcing normalization.
-- #65 reserves application capacity; a hard operating-system quota is extra scope.
-- #70 overlaps selected page/context/region rereads; automatic dependency discovery
-  must not be silently added to the original requirement.
-- #71 reports selected/reused/download bytes and a conservative safe disk bound;
-  an unknown archive's exact expansion is not asserted.
-- #83 supplies explicit retention and cleanup/recovery reports. Encryption and
-  forensic erasure of OS/native caches are separate concerns.
-- #49's HEIC support was conditional on a reliable decoder. Supported TIFF
-  color/depth limits must remain explicit.
+- Deployable hash-bound calibration/abstention policies, measured automatic regional
+  reader routing, paired profile/baseline evaluation and learned memory admission.
+- Automatic language-region classification and measured tested-language/model quality
+  claims beyond available evidence; source/license cards explicitly identify unknowns.
+- Physical multi-GPU comparisons, instantaneous RAM/VRAM peak guarantees, real device
+  removal/GPU-loss acceptance and broad natural-handwriting measurements.
+- Complete desktop localization, native-speaker/font visual review, the full Narrator
+  audit and every panel/viewport/readability-preset combination.
 
-These decisions do not excuse the separate missing code in the workstream table.
-Ledger statuses change only after the relevant path and tests are verified.
+Unsupported formats/grammars, archive variants and geometry precision remain explicit
+at their production boundaries. No secure-erasure, universal accuracy or 100% stability
+guarantee is inferred from automated tests. The original roadmap stays unchanged as a
+record of proposals; deferred work is for future releases.
 
-## Validation and acceptance
+## Remaining release sequence
 
-Each completed implementation receives focused regression/contract tests and then
-the full all-feature/all-target suite twice on Windows and Linux, including a
-serial repeat. Native gates cover real printed OCR, font loading/shaping, reader
-startup/isolation, three reader families, Maximum conversion, packaging and the
-actual installer. Install acceptance includes a clean install, the released 0.4.1
-upgrade, reinstall, cancellation, provenance, uninstall and retained user data.
+1. Freeze coherent source, finish only assigned regression fixes and capture the exact
+   tested commit. Do not add measurement or other new feature workstreams.
+2. Run format/strict Clippy and the all-feature/all-target suites twice on Windows and
+   Linux, including the serial repeat. Run native UI/accessibility checks, printed OCR,
+   font shaping/loading, privacy/workspace behavior, owned-reader reset/isolation,
+   known canaries, real reader families and Maximum conversion for that source.
+3. Build the Windows package with its recipe/provenance and compile both executables
+   independently in a fresh job. Require exact executable hash comparison for release;
+   record attestation eligibility honestly. Do not claim a match until CI produces it.
+4. Merge only the validated source, then run the installer release workflow against its
+   verified artifacts. Exercise clean install, released 0.4.1 upgrade, reinstall,
+   cancellation, installed provenance, uninstall and retained user data.
+5. Finalize README/release evidence and publish 0.5.0 only after those available gates
+   pass. Verify published installer/portable assets, manifests and metadata hashes.
 
-External acceptance remains distinct from missing workflow code. Permission-cleared
-held-out labels are required for real calibration, routing and personalization
-claims; collecting the excluded corpus is not performed. Physical multi-GPU,
-target-device peak/offload behavior, native-language shaping/translation and
-Narrator reading require their corresponding environment and observed evidence.
-Synthetic CPU tests are not substitutes for those measurements. No universal
-accuracy, secure-erasure or 100% stability guarantee is inferred from passing tests.
-
-After all required code and available acceptance gates pass, update the minimal
-README and final verification record, merge the exact tested source, run the
-installer/release workflow, and verify the published 0.5.0 assets and manifest.
+No earlier CI run, generated report template or implemented test is substituted for
+observed final-source acceptance. The release may accurately describe frozen partial
+scope without promising completion of all 100 proposals.

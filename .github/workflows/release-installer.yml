@@ -184,46 +184,11 @@ jobs:
           $manifest.authenticode_signed=$false
           @($manifest.portable_metadata | ForEach-Object {"$($_.sha256)  $($_.name)"}) | Set-Content dist/installer/portable-metadata.sha256 -Encoding utf8NoBOM
           $manifest | ConvertTo-Json -Depth 8 | Set-Content dist/installer/installer-manifest.json -Encoding utf8
-          @"
-          Install NoteGen directly on Windows 10/11 x64-compatible systems.
-
-          Download **NoteGen-Setup-$env:RELEASE_VERSION.exe** below and run the wizard.
-          Installation is per user and does not require administrator rights. Start menu
-          shortcuts and an optional desktop shortcut are included. Uninstall from Windows
-          Settings; user models and document data are preserved.
-
-          This release adds a local workbench for project search, templates,
-          recovery, named review history, undo/redo, source-linked numeric/table
-          suggestions and targeted region re-reading. Imports include images,
-          multipage TIFF and scan folders. New exports include Markdown, HTML,
-          LaTeX, Excel and searchable PDF, with explicit uncertainty and source
-          limits. Word exports add semantic styles, editable bounded-grammar
-          equations and previewed correction import.
-
-          Other additions include verified optional OCR language packs, offline
-          AI bundles, writer-example quarantine and version tools, inspectable
-          diagnostics, resource-budget previews and Windows credential storage.
-          Some tools use the CLI. The [workbench guide](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/WORKBENCH.md)
-          explains each workflow. The [100-item implementation ledger](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/FEATURES_0.5.0.md)
-          records implemented, partial, planned and excluded scope.
-
-          Release validation requires Windows/Linux formatting, strict Clippy,
-          two complete ordinary test-suite passes, native raster-PDF OCR,
-          Windows font and credential-store checks, native desktop captures,
-          real CPU inference with three AI families and Maximum conversion.
-          Installer acceptance covers upgrade from 0.4.1, GUI/Word/font export,
-          AI setup, cancellation, reinstall, uninstall and user-data retention.
-          The executable payload is from successful run $env:SOURCE_RUN at $env:SOURCE_SHA.
-          GPU performance and broad natural-handwriting accuracy remain unmeasured.
-
-          Corpus collection and Windows signing were excluded by request. The
-          installer is unsigned. SHA256, installer payload hashes and the verified
-          portable application's dependency inventory/provenance accompany the assets.
-          The two NoteGen executables also matched an independent Windows build.
-          See windows-reproducibility.json for the exact subjects, recipe and scope.
-          Native build attestation availability is recorded in attestation-support.json.
-          [Usage and AI setup](https://github.com/InduwaraLasindu/NoteGen/blob/main/docs/INSTALLER.md)
-          "@ | Set-Content dist/installer/release-notes.md -Encoding utf8
+          $notes=Get-Content docs/RELEASE_0.5.0.md -Raw
+          $notes=[regex]::Replace($notes,'\]\((?!https?://|#)([^)]+)\)',{param($match) "](https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/docs/$($match.Groups[1].Value))"})
+          $notes+="`n`nDownload **NoteGen-Setup-$env:RELEASE_VERSION.exe** for Windows, or the portable ZIP. The installer is unsigned. Per-user installation preserves user models and document data on uninstall.`n"
+          $notes+="`nVerified application source: $env:SOURCE_SHA ([run $env:SOURCE_RUN](https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN)). The manifest records the installer, payload hashes, two suite passes, native checks and independent executable comparison. See the attached evidence files for exact scope and attestation availability.`n"
+          $notes | Set-Content dist/installer/release-notes.md -Encoding utf8NoBOM
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: NoteGen-Windows-Installer-${{ steps.payload.outputs.version }}

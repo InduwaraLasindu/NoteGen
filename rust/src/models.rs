@@ -230,6 +230,7 @@ fn stage_model(
     base: CandidateBase,
     c: &Control,
 ) -> Result<PreparedModel> {
+    c.check()?;
     crate::watch::no_links(&s.models_dir)?;
     anyhow::ensure!(
         s.models_dir.canonicalize()? == base.registry,

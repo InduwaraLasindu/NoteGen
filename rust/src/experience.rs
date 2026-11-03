@@ -57,9 +57,12 @@ fn help(ui: &mut egui::Ui, key: &str) {
         Color32::from_gray(75)
     };
     ui.label(
-        RichText::new(settings_help::description(key))
-            .size(12.)
-            .color(color),
+        RichText::new(settings_help::description_localized(
+            crate::localization::context_locale(ui.ctx()),
+            key,
+        ))
+        .size(12.)
+        .color(color),
     );
 }
 impl Desktop {
@@ -268,6 +271,7 @@ impl Desktop {
             });
     }
     pub(super) fn settings_ui(&mut self, ctx: &egui::Context) {
+        crate::localization::set_context_locale(ctx, self.state.settings.ui.locale);
         if !self.experience.open {
             return;
         }
@@ -286,7 +290,8 @@ impl Desktop {
                         ui.add_enabled_ui(self.worker.is_none(),|ui| {
                             ui.heading("Recognition & Word output");
                             egui::ComboBox::from_label(crate::localization::text(self.state.settings.ui.locale,"interface_language")).selected_text(self.state.settings.ui.locale.label()).show_ui(ui,|ui|{for locale in crate::localization::locales(){ui.selectable_value(&mut self.state.settings.ui.locale,locale,locale.label());}});
-                            ui.small(crate::localization::coverage_note());
+                            crate::localization::set_context_locale(ctx,self.state.settings.ui.locale);
+                            ui.small(crate::localization::text(self.state.settings.ui.locale,"catalog_note"));
                             egui::ComboBox::from_label("Quality").selected_text(format!("{:?}",self.state.settings.preset)).show_ui(ui,|ui| { for p in [Preset::Fast,Preset::Balanced,Preset::Accuracy,Preset::Maximum] { ui.selectable_value(&mut self.state.settings.preset,p,format!("{p:?}")); } }); help(ui,"preset");
                             ui.add_space(8.); let label = ui.label("OCR languages"); ui.text_edit_singleline(&mut self.state.settings.languages).labelled_by(label.id); help(ui,"languages");
                             ui.checkbox(&mut self.state.settings.deskew,"Straighten tilted scans"); help(ui,"deskew");
@@ -313,7 +318,7 @@ impl Desktop {
                         ui.heading("Configuration reference"); ui.label("Search by setting name or description. All options are editable in Advanced, including raw JSON.");
                         ui.add(egui::TextEdit::singleline(&mut self.experience.search).hint_text("Search settings…")).accessible_name("Search setting names and descriptions");
                         let query=self.experience.search.to_lowercase();
-                        for (key,description) in settings_help::GUIDE { if query.is_empty() || key.contains(&query) || description.to_lowercase().contains(&query) { ui.add_space(7.); ui.strong(*key); ui.label(*description); } }
+                        for (key,description) in settings_help::GUIDE { let translated=settings_help::description_localized(self.state.settings.ui.locale,key); if query.is_empty() || key.contains(&query) || description.to_lowercase().contains(&query) || translated.to_lowercase().contains(&query) { ui.add_space(7.); ui.strong(*key); ui.label(translated); } }
                     }
                 }
                 if !self.experience.error.is_empty() { Self::accessible_status(ui,"settings-error",&self.experience.error,true); }

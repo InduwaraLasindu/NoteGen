@@ -272,3 +272,8 @@ path = "rust/tests/references.rs"
 name = "activation"
 path = "rust/tests/activation.rs"
 
+[[test]]
+name = "failure_injection"
+path = "rust/tests/failure_injection.rs"
+harness = false
+

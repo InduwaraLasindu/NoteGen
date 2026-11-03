@@ -378,9 +378,9 @@ impl Desktop {
         ui.add_enabled_ui(self.worker.is_none(),|ui|{
    ui.strong("What are these notes about?");
    ui.label("Add the subject, purpose, people, abbreviations, dates or labels the reader needs to understand. Source text remains the evidence.");
-   ui.add(egui::TextEdit::multiline(&mut self.state.settings.subject).hint_text("Example: Fluid mechanics lecture. A and B are tanks. Q denotes volume flow rate; handwritten r often looks like v.").desired_width(f32::INFINITY).desired_rows(4).char_limit(8000));
+   ui.add(egui::TextEdit::multiline(&mut self.state.settings.subject).hint_text("Example: Fluid mechanics lecture. A and B are tanks. Q denotes volume flow rate; handwritten r often looks like v.").desired_width(f32::INFINITY).desired_rows(4).char_limit(8000)).accessible_name("Document subject and recognition context");
    ui.add_space(10.);ui.strong("Names, terminology and context");
-   ui.add(egui::TextEdit::multiline(&mut self.state.settings.assistance.glossary).hint_text("Names, technical words, units and their meanings…").desired_width(f32::INFINITY).desired_rows(3).char_limit(8000));
+   ui.add(egui::TextEdit::multiline(&mut self.state.settings.assistance.glossary).hint_text("Names, technical words, units and their meanings…").desired_width(f32::INFINITY).desired_rows(3).char_limit(8000)).accessible_name("Names, terminology and glossary");
    ui.checkbox(&mut self.state.settings.assistance.ask_questions,"Ask me about unclear words, numbers and pictures before export");
    ui.add(egui::Slider::new(&mut self.state.settings.assistance.max_questions,0..=32).text("Maximum questions per document"));
    ui.checkbox(&mut self.state.settings.writer.use_examples,"Use confirmed examples from the selected writer in compatible vision readers");
@@ -439,7 +439,8 @@ impl Desktop {
                     egui::TextEdit::singleline(&mut self.studio.name)
                         .hint_text("Name a writer")
                         .char_limit(120),
-                );
+                )
+                .accessible_name("New writer profile name");
                 if ui.button("Add person").clicked() {
                     match writers::create(&self.state.settings.writer.root, &self.studio.name) {
                         Ok(p) => {
@@ -918,7 +919,8 @@ impl Desktop {
                     .hint_text("Public topic, e.g. siphon diagram")
                     .desired_width(400.)
                     .char_limit(500),
-            );
+            )
+            .accessible_name("Public topic search query");
             if ui
                 .add_enabled(
                     self.worker.is_none() && self.state.settings.assistance.web_lookup,

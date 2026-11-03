@@ -108,6 +108,50 @@ fn template_argument_mistakes_and_resource_bounds_fail_without_echoing_private_v
     assert_ne!(unknown.title, remedy(Locale::En, "unknown").title);
 }
 
+#[test]
+fn every_shipped_settings_description_and_recovery_code_has_localized_guidance() {
+    validate_catalog().unwrap();
+    let guide_keys = notegen::settings_help::GUIDE
+        .iter()
+        .map(|(key, _)| format!("help.{key}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let catalog_help = catalog_keys()
+        .into_iter()
+        .filter(|key| key.starts_with("help."))
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(catalog_help, guide_keys, "Stale or missing settings help");
+    for (key, english) in notegen::settings_help::GUIDE {
+        assert_eq!(
+            notegen::settings_help::description_localized(Locale::En, key),
+            *english
+        );
+        for locale in [Locale::Si, Locale::Ta] {
+            let translated = notegen::settings_help::description_localized(locale, key);
+            assert!(!translated.is_empty());
+            assert_ne!(translated, *english, "Untranslated {key}");
+        }
+    }
+    for code in [
+        "NG100", "NG102", "NG110", "NG200", "NG201", "NG202", "NG203", "NG300", "NG400", "NG401",
+        "NG500", "NG610", "NG620", "NG630", "NG640", "NG650", "NG660", "NG661", "NG670", "NG680",
+        "NG682", "NG710", "NG720", "NG730", "NG740", "NG750", "NG900", "NG901",
+    ] {
+        let english = remedy(Locale::En, code);
+        for locale in [Locale::Si, Locale::Ta] {
+            let translated = remedy(locale, code);
+            assert_eq!(translated.code, code);
+            assert_ne!(translated.title, english.title, "Untranslated {code}");
+            assert!(!translated.checks.is_empty() && !translated.actions.is_empty());
+            assert_ne!(translated.checks, english.checks);
+            assert_ne!(translated.actions, english.actions);
+        }
+    }
+    assert!(remedy(Locale::En, "NG661").title.contains("activation"));
+    assert!(remedy(Locale::En, "NG901").actions[0].contains("automatically"));
+    assert!(coverage_note().contains("specialist controls remain in English"));
+}
+
 #[cfg(feature = "desktop")]
 #[test]
 fn independent_ui_contexts_keep_their_own_locale_without_mutating_settings_or_other_contexts() {

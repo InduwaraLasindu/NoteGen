@@ -12,7 +12,6 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -352,9 +351,20 @@ fn registry_dependency(
         )
     })?;
     let current: Model = serde_json::from_slice(&before.content()?)?;
+    // Match inventory's path resolution before trusting this newer snapshot.
+    // A claimed pair hash alone cannot bind a descriptor to the files probed.
+    let resolved = |path: &Path| {
+        if path.is_relative() {
+            s.models_dir.join(path)
+        } else {
+            path.to_path_buf()
+        }
+    };
     anyhow::ensure!(
         current.id == model.id
             && current.sha256 == model.sha256
+            && resolved(&current.weights) == model.weights
+            && resolved(&current.projector) == model.projector
             && current.prompt == model.prompt
             && current.family == model.family
             && current.role == model.role
@@ -1137,6 +1147,58 @@ pub(crate) fn extract_runtime(archive: &Path, dir: &Path, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_dependency_rejects_changed_paths_even_when_bytes_and_claimed_hash_match() {
+        for field in ["weights", "projector"] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = root.path().join("models");
+            fs::create_dir(&registry).unwrap();
+            let (mut model, _) = pinned("glm-ocr").unwrap();
+            model.weights = registry.join("weights.gguf");
+            model.projector = registry.join("projector.gguf");
+            fs::write(&model.weights, b"GGUForiginal weights").unwrap();
+            fs::write(&model.projector, b"GGUForiginal projector").unwrap();
+            models::save_custom(&registry, model, &Control::default()).unwrap();
+            let descriptor = registry.join("glm-ocr.notegen.json");
+            let mut value: serde_json::Value = storage::read_json(&descriptor, 100_000).unwrap();
+            // Both unchanged relative paths must resolve exactly as inventory does.
+            value["weights"] = "weights.gguf".into();
+            value["projector"] = "projector.gguf".into();
+            fs::write(&descriptor, serde_json::to_vec(&value).unwrap()).unwrap();
+            let s = Settings {
+                models_dir: registry.clone(),
+                ..Default::default()
+            };
+            let captured = installed_local(&s).unwrap().remove(0);
+            assert!(registry_dependency(&s, &captured, &Control::default()).is_ok());
+            let original_hash = value["sha256"].clone();
+            let replacement = registry.join(format!("replacement-{field}.gguf"));
+            let original = if field == "weights" {
+                &captured.weights
+            } else {
+                &captured.projector
+            };
+            fs::copy(original, &replacement).unwrap();
+            // Exercise relative and absolute replacements without changing any
+            // other descriptor field or any model bytes.
+            value[field] = if field == "weights" {
+                replacement.file_name().unwrap().to_str().unwrap().into()
+            } else {
+                replacement.to_str().unwrap().into()
+            };
+            assert_eq!(value["sha256"], original_hash);
+            let changed = serde_json::to_vec(&value).unwrap();
+            fs::write(&descriptor, &changed).unwrap();
+            let error = registry_dependency(&s, &captured, &Control::default())
+                .err()
+                .expect("changed model paths must invalidate activation dependencies");
+            assert_eq!(error.downcast_ref::<Fault>().unwrap().code, "NG660");
+            assert_eq!(fs::read(&descriptor).unwrap(), changed);
+            assert!(!registry.join("glm-ocr.previous.json").exists());
+            assert!(!registry.join(".notegen-activation").exists());
+            assert_eq!(fs::read(original).unwrap(), fs::read(replacement).unwrap());
+        }
+    }
     #[test]
     fn all_bundled_models_have_immutable_matching_downloads() {
         for model in planning::catalog() {

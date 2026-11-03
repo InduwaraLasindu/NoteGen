@@ -214,14 +214,6 @@ pub const GUIDE: &[(&str, &str)] = &[
         "Optional exact project environment lock file. When set, validate its pinned readers, runtime, OCR resources and preparation settings before recognition; mismatches stop instead of silently upgrading.",
     ),
     (
-        "measured_policy",
-        "Optional local calibration and regional reader policy. Exact reader, runtime, inference profile and held-out data identities must match; missing or incompatible evidence never counts as calibrated accuracy.",
-    ),
-    (
-        "memory_history",
-        "Optional local memory observations used only to raise conservative admission estimates. Recorded process peaks, sampled lower bounds and unknown GPU metrics remain distinct; current reservations still apply.",
-    ),
-    (
         "endpoint",
         "Literal localhost endpoint for an external inference server. Remote conversion endpoints are blocked.",
     ),
