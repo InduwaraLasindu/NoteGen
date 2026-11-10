@@ -8,6 +8,11 @@ Its record includes the exact source commit, recipe hash, Cargo.lock hash, compi
 runner image and actual executable hashes. A recipe record alone is not evidence
 that another build matched.
 
+The pinned `rust-embed` dependency enables `deterministic-timestamps` for the
+translations embedded by `age`. Their created/modified metadata is zero, so
+cached dependency outputs cannot retain a previous source commit's timestamp.
+The build record still retains the current source commit and timestamp.
+
 After both operating systems pass the required tests and native acceptance,
 another Windows runner checks out the same source and compiles into an empty
 target directory. It receives the first portable artifact, verifies each declared
