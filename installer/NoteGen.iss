@@ -57,14 +57,14 @@ Source: "{#PayloadDir}\runtime\tesseract\*"; DestDir: "{app}\runtime\tesseract";
 Source: "{#PayloadDir}\runtime\*"; DestDir: "{app}\runtime"; Excludes: "pdfium.dll"; Flags: onlyifdoesntexist
 
 [Icons]
-Name: "{group}\NoteGen"; Filename: "{app}\NoteGen.exe"; WorkingDir: "{app}"
+Name: "{group}\NoteGen"; Filename: "{app}\NoteGen.exe"; Parameters: "--renderer glow"; WorkingDir: "{app}"
 Name: "{group}\Set up local AI"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\Configure-AI.ps1"""; WorkingDir: "{app}"
 Name: "{group}\Setup guide"; Filename: "{app}\docs\INSTALLER.txt"
 Name: "{group}\Uninstall NoteGen"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\NoteGen"; Filename: "{app}\NoteGen.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\NoteGen"; Filename: "{app}\NoteGen.exe"; Parameters: "--renderer glow"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\NoteGen.exe"; Description: "Launch NoteGen"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\NoteGen.exe"; Parameters: "--renderer glow"; Description: "Launch NoteGen"; Flags: nowait postinstall skipifsilent
 
 [Messages]
 WelcomeLabel2=Install NoteGen on this Windows account.%n%nPrinted OCR, PDF rendering, English language data and native dependencies are included. Leave local AI selected to download and verify a compatible AI runtime and all reader models needed for this PC inside this installer. This needs internet and several GB of disk space.%n%nYou can skip AI for an offline installation and install it later from Settings. Models, writer profiles and document projects are preserved during upgrades and uninstall.
