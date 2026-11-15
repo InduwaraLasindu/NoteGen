@@ -36,8 +36,7 @@ clean installation, binary inventory, CLI Word export, actual printed OCR,
 eight-second OpenGL GUI startup, reinstall, actual 0.4.1 upgrade and uninstall/data
 retention checks. Its SHA256 is
 `7049f92340f2c546f740c464081937d5b17e7ff3abcde66819440a4d2a45e0ec`.
-The installer AI downloading branch was not rerun. Publication and uploaded asset
-download verification remain the final steps. Release notes and manifests
+The installer AI downloading branch was not rerun. [Version 0.5.0](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.5.0) is published; all 13 uploaded assets were downloaded again and matched their SHA256 hashes and sizes. Release notes and manifests
 must distinguish the application source from the installer packaging source and
 later documentation changes.
 

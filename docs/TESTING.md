@@ -58,7 +58,7 @@ Installer SHA256:
 The installer AI download/integration branch was not rerun during this offline
 acceptance. The earlier source-195 native AI checks are separate evidence.
 The 0.5.0 installer is packaged separately from the immutable application binaries.
-Publication and downloaded-asset hash verification remain the final steps.
+[Version 0.5.0](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.5.0) is published. All 13 release assets were downloaded again and their SHA256 hashes and sizes matched the finalized local artifacts.
 The [Narrator audit](ACCESSIBILITY.md), broad natural-handwriting measurements and
 additional physical hardware/language acceptance remain unclaimed. The historical
 results below apply only to their named source snapshots.

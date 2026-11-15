@@ -81,8 +81,7 @@ original binary checks, Word export, actual printed raster-PDF OCR, same-version
 reinstall, actual 0.4.1-to-0.5.0 upgrade and uninstall/data retention checks. The
 installed GUI stayed alive for eight seconds in each tested stage using the shipped
 OpenGL renderer. Installer AI downloading was not rerun; the earlier native AI
-producer-job evidence remains separate. Publication and uploaded-download hash
-verification are the final steps.
+producer-job evidence remains separate. [Version 0.5.0](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.5.0) is published, with all 13 downloaded assets verified against their SHA256 hashes and sizes.
 
 Installer SHA256:
 `7049f92340f2c546f740c464081937d5b17e7ff3abcde66819440a4d2a45e0ec`.

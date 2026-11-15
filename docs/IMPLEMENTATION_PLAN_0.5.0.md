@@ -50,6 +50,8 @@ record of proposals; deferred work is for future releases.
 
 ## Release sequence after the GitHub testing deferral
 
+Completed on 15 November 2026: [v0.5.0](https://github.com/InduwaraLasindu/NoteGen/releases/tag/v0.5.0) is published. All 13 release assets were downloaded again and matched their SHA256 hashes and sizes. No paid cloud service or new GitHub Actions build was used for publication.
+
 The user authorized skipping the blocked GitHub testing path and publishing the
 completed update. This supersedes the earlier requirement to wait for independent
 reproducibility before publication. It does not turn a failed comparison into a pass.
