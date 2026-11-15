@@ -2,9 +2,9 @@
 
 The 0.5.0 scope is frozen at the user's request: finish and validate the current work, then publish. This ledger maps the original 100 proposals to the resulting code; it does not claim all 100 are complete. **Implemented** means the production path exists, not that every hardware, language or release acceptance gate has passed. **Partial** records missing code or external acceptance, deferred beyond this release. Corpus collection (#1) and Windows signing (#10) remain excluded by request.
 
-The [verification record](TESTING.md) and the exact release manifests record observed results. New source must pass its own gates; earlier successful runs do not validate a later snapshot. Independent executable comparison and eligible native attestation are implemented release workflows, with actual evidence still dependent on CI. No universal accuracy or 100% stability claim is made.
+The [verification record](TESTING.md) identifies the tested application source, `19550373dd25afb36b21a37add0172b46da84117`. Its Windows/Linux functional and native checks passed. Independent executable comparison failed and is deferred for 0.5.0 under the user's instruction to skip the blocked GitHub testing path. Later build-metadata changes on main are not included in these application binaries. No universal accuracy or 100% stability claim is made.
 
-Current mapping: **87 implemented, 11 partial, 2 excluded**. Partial work is recorded for future releases and does not reopen the frozen 0.5.0 scope.
+Current mapping: **86 implemented, 12 partial, 2 excluded**. Partial work is recorded for future releases and does not reopen the frozen 0.5.0 scope.
 
 | # | Proposal | Status | Implementation / remaining scope |
 |---|---|---|---|
@@ -97,7 +97,7 @@ Current mapping: **87 implemented, 11 partial, 2 excluded**. Partial work is rec
 | 87 | Verified repair tools | Implemented | Selected compiled-pinned assets and extracted members of verified publisher runtime archives can be repaired with damaged/concurrent bytes retained; registrations and active pointers stay unchanged. Custom/unverified archives are not authority; shared MSVC files remain installer-serviced. |
 | 88 | Migration recovery | Implemented | Registered project/settings migration previews bind exact before/after bytes; durable backup/journal/rollback, stale-write checks and conflict-preserving recovery protect later edits. Unsupported transitions fail closed. |
 | 89 | Failure-injection testing | Partial | Storage journal interruption/collision/disk-full simulations and real owned-child transport/crash/cancel tests plus interrupted-activation recovery; physical storage disconnect and real GPU-loss acceptance remain unperformed. |
-| 90 | Stronger build provenance | Implemented | Locked CycloneDX inventory and hashed provenance; a fresh independent Windows job compares both NoteGen executables and release rechecks its report. Native attestation is conditional on service/repository eligibility. Actual final comparison is pending CI; unsigned metadata is never called a signed attestation. |
+| 90 | Stronger build provenance | Partial | Locked CycloneDX inventory, actual binary hashes and exact source/build records are available. Independent executable comparison failed; reproducibility is deferred for 0.5.0. The timestamp fix on main is not included in the tested release binaries. No successful reproducibility comparison or signed native attestation is claimed. |
 | 91 | Command palette and shortcuts | Implemented | Searchable major actions, editable validated bindings and visible focus; review shortcuts require explicit review scope and leave text editing intact. |
 | 92 | Screen-reader support | Partial | Native AccessKit integration, named settings/source controls, polite status updates and accessibility-tree tests; full desktop labels and Narrator reading/focus audit remain. |
 | 93 | Readable-layout presets | Partial | Large/spacious/compact/high-contrast presets; full clipping audit at each viewport remains. |

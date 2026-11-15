@@ -5,8 +5,8 @@ and publish 0.5.0 promptly. The earlier requirement to complete every non-exclud
 roadmap item before release is superseded. No new workstreams are added. Corpus
 collection (#1) and Windows Authenticode signing (#10) remain excluded by request.
 
-The [feature ledger](FEATURES_0.5.0.md) maps all 100 original proposals: 87 have
-production implementations, 11 remain partial and 2 are excluded. These counts
+The [feature ledger](FEATURES_0.5.0.md) maps all 100 original proposals: 86 have
+production implementations, 12 remain partial and 2 are excluded. These counts
 describe code and recorded limits, not universal quality or a completed release gate.
 The [verification record](TESTING.md) owns exact source/run/test evidence; older
 successful snapshots never validate subsequent changes.
@@ -23,7 +23,7 @@ successful snapshots never validate subsequent changes.
 | Private workspaces | Authenticated age snapshots, recovery/backup/rotation, managed work copies and guarded app-owned temporary data; explicit retention cleanup/recovery. Unlocked native RAM and OS/driver/pagefile caches remain outside at-rest guarantees. |
 | AI assets and setup | Managed verified downloads with scheduling/rate/network policy, immutable shared objects, version references, exact project locks/restoration, known print/table canaries, journaled activation recovery and selective verified runtime repair. |
 | Performance and transparency | Optional max-one warm reader with reset/TTL/release and cold private/trial jobs; bounded preparation overlap; resource reservations and honest sampled memory/timing observations; source/license capability cards and active in-app request inventory. |
-| Exports and provenance | Word/text/PDF/XLSX with privacy guards and fail-closed correction import; locked SBOM and binary/source hashes; fresh independent Windows executable comparison and eligible native attestation workflows. Actual evidence remains CI-dependent. |
+| Exports and provenance | Word/text/PDF/XLSX with privacy guards and fail-closed correction import; locked SBOM and binary/source hashes. Independent comparison failed and is deferred for this release; no reproducibility or native attestation claim. |
 
 Unused calibration/memory settings and the unfinished writer-source sidecar prototype
 have been removed. Existing scorecards, calibration-bin reports, writer-separated
@@ -48,23 +48,38 @@ at their production boundaries. No secure-erasure, universal accuracy or 100% st
 guarantee is inferred from automated tests. The original roadmap stays unchanged as a
 record of proposals; deferred work is for future releases.
 
-## Remaining release sequence
+## Release sequence after the GitHub testing deferral
 
-1. Freeze coherent source, finish only assigned regression fixes and capture the exact
-   tested commit. Do not add measurement or other new feature workstreams.
-2. Run format/strict Clippy and the all-feature/all-target suites twice on Windows and
-   Linux, including the serial repeat. Run native UI/accessibility checks, printed OCR,
-   font shaping/loading, privacy/workspace behavior, owned-reader reset/isolation,
-   known canaries, real reader families and Maximum conversion for that source.
-3. Build the Windows package with its recipe/provenance and compile both executables
-   independently in a fresh job. Require exact executable hash comparison for release;
-   record attestation eligibility honestly. Do not claim a match until CI produces it.
-4. Merge only the validated source, then run the installer release workflow against its
-   verified artifacts. Exercise clean install, released 0.4.1 upgrade, reinstall,
-   cancellation, installed provenance, uninstall and retained user data.
-5. Finalize README/release evidence and publish 0.5.0 only after those available gates
-   pass. Verify published installer/portable assets, manifests and metadata hashes.
+The user authorized skipping the blocked GitHub testing path and publishing the
+completed update. This supersedes the earlier requirement to wait for independent
+reproducibility before publication. It does not turn a failed comparison into a pass.
+Feature #90 remains partial; no new application development is added.
 
-No earlier CI run, generated report template or implemented test is substituted for
-observed final-source acceptance. The release may accurately describe frozen partial
-scope without promising completion of all 100 proposals.
+1. Release the immutable application binaries from source
+   `19550373dd25afb36b21a37add0172b46da84117`, whose Windows/Linux functional and
+   native checks passed. Keep their existing source records and checksums intact.
+2. Record that overall run `41604450276` failed independent executable comparison.
+   The later timestamp-metadata fix on main is outside these release binaries.
+   Do not label the application as built from the newer main revision.
+3. Use installer-packaging source `4bf4692d9320cc45026a48c757725fc34a815f8f` for the release
+   tag. Its only changes from the tested application source select the existing
+   `--renderer glow` compatibility renderer in three installer GUI entrypoints.
+   Rust/Cargo inputs and portable binaries stay unchanged. Portable users with
+   older GPUs can select the same renderer with `NoteGen.exe --renderer glow`.
+   Package the tested application into the Windows installer and record the exact
+   installer recipe/source, payload hashes and actual acceptance results separately.
+   The final installer passed clean installation, all 106 original binary checks,
+   Word export, actual printed OCR, eight-second OpenGL GUI startup, reinstall,
+   actual 0.4.1 upgrade and uninstall/data retention. Installer SHA256:
+   `7049f92340f2c546f740c464081937d5b17e7ff3abcde66819440a4d2a45e0ec`.
+   The installer AI downloading branch was not rerun; source-195 native AI
+   evidence remains separate.
+4. Publish the release at the installer-packaging source while identifying the
+   separate tested application source in the manifest. Attach the available
+   checksums/build evidence, and verify the uploaded assets can be downloaded and
+   match their recorded hashes. No paid cloud services or spending changes are used.
+
+Earlier successful snapshots never validate changed application code. Release
+notes and manifests must distinguish the tested application, installer packaging
+and any later documentation changes. This release does not claim all 100 proposals,
+byte-for-byte reproducibility, signed native attestations or unperformed tests.

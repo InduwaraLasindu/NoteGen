@@ -19,6 +19,8 @@ NoteGen turns scanned pages into editable documents using a native Rust desktop 
 
 Printed English OCR works immediately. Select **Install local AI** for handwriting and additional readers. AI downloads may require several GB; the app selects compatible models and verifies their checksums. No Python or Rust installation is needed to use the installer.
 
+The installer launches the OpenGL compatibility renderer. If the portable app fails to start on an older GPU, run `NoteGen.exe --renderer glow`.
+
 ## What it does
 
 | Convert | Review | Organize and export |

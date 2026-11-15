@@ -4,26 +4,64 @@ Implemented behavior, mocked/protocol tests and physical quality evidence are se
 Use [Actions](https://github.com/InduwaraLasindu/NoteGen/actions/workflows/verify-and-build.yml)
 for exact Windows/Linux results, native visual evidence and the executable download.
 
-## 0.5.0 release gates
+## 0.5.0 application evidence and deferred gates
 
-Publishing 0.5.0 requires successful Windows and Linux verification. CI runs
-all-target strict Clippy and the complete ordinary suite twice, with the
-second pass using serial test execution. Native OCR, font installation, credential
-storage, desktop captures, packaged conversion and real CPU model checks follow.
-The installer has separate clean-install, 0.4.1 upgrade and retention checks,
-including verification of the installed dependency inventory and application
-provenance. Its published `installer-manifest.json` identifies the exact source
-commit, source run, asset hashes and successful installer checks. Use that run
-for the test count and native-model results of the downloaded version.
+The release application source is
+[`19550373dd25afb36b21a37add0172b46da84117`](https://github.com/InduwaraLasindu/NoteGen/commit/19550373dd25afb36b21a37add0172b46da84117).
+The successful producer jobs in
+[run 41604450276](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41604450276)
+are:
 
-Local formatting, locked metadata and all-feature/all-target type checks passed.
-A local GNU test executable compiled but exited with an access violation before
-the test harness; no tests passed in that attempt. Native execution evidence comes
-from Linux/MSVC CI and the verified MSVC portable's local CLI, Word and two printed
-OCR checks. Native accessibility-tree tests are included; the
-[Narrator audit](ACCESSIBILITY.md) remains pending. Real handwriting
-quality, additional hardware and native-language acceptance require their own
-measurements. The historical results below apply to their named source snapshots.
+- [Windows verification](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41604450276/job/125810703182):
+  strict formatting/Clippy, complete ordinary suites twice (including a serial
+  pass), native font and isolated credential checks, packaged scanned-PDF OCR,
+  portable desktop startup, actual CPU reader installation/inference, warm-reader
+  reset/reuse/isolation and Maximum Accuracy conversion.
+- [Linux verification](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41604450276/job/125810703596):
+  strict formatting/Clippy, complete ordinary suites twice, actual raster-PDF OCR
+  and native desktop/source-review captures.
+
+The overall run failed its separate independent executable comparison. No matching
+independent-build report or signed native attestation is claimed. The user has
+explicitly authorized deferring this GitHub testing blocker for 0.5.0. Later main
+commit `74e3d5b899e65cf2d1092c41619bffbcd248ec25` contains a timestamp-metadata fix;
+that fix is not included in these release binaries and has not passed the full
+new-source verification path. Feature #90 is therefore partial.
+
+The unchanged portable package SHA256 is
+`0e1b7e281e9412fdd5fe24a20ddf71381b7485ac2bb6dca5ea86852e3824112f`.
+Its 106 binary subjects were checked against packaged provenance. Additional local
+checks of this exact MSVC package passed CLI version, Word self-test and two
+independent printed OCR/table conversions; each retained 1250 in an editable Word
+table. These checks do not replace the separate CI evidence or measure handwriting
+quality, GPU performance or full accessibility.
+
+The release tag uses installer-packaging commit
+`4bf4692d9320cc45026a48c757725fc34a815f8f`, with unchanged Rust/Cargo application inputs
+and three installer GUI entrypoints selecting `--renderer glow`. The actual
+installer passed its 106-subject payload inventory, CLI Word export and real printed
+OCR checks. On Intel HD 4000, the default WGPU desktop panicked during surface
+configuration; launching the same binary with `--renderer glow` stayed alive for
+12 seconds. This is a bounded startup observation, not a general stability result.
+The final production installer, built with that existing compatibility option,
+passed clean installation and verification of all 106 original binary subjects,
+CLI Word export and actual printed raster-PDF OCR. The installed OpenGL GUI stayed
+alive for eight seconds after clean install, same-version reinstall and actual
+0.4.1-to-0.5.0 upgrade. Reinstall preserved the selected runtime and synthetic user
+documents/models. Both uninstall paths removed the executable, registration and
+shortcuts while retaining synthetic user data. The actual prior 0.4.1 CLI/version
+and upgrade were tested; its GUI was deliberately not launched because it ignores
+data-directory isolation.
+
+Installer SHA256:
+`7049f92340f2c546f740c464081937d5b17e7ff3abcde66819440a4d2a45e0ec`.
+The installer AI download/integration branch was not rerun during this offline
+acceptance. The earlier source-195 native AI checks are separate evidence.
+The 0.5.0 installer is packaged separately from the immutable application binaries.
+Publication and downloaded-asset hash verification remain the final steps.
+The [Narrator audit](ACCESSIBILITY.md), broad natural-handwriting measurements and
+additional physical hardware/language acceptance remain unclaimed. The historical
+results below apply only to their named source snapshots.
 
 ## Historical verified build — 31 October 2026
 

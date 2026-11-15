@@ -2,7 +2,7 @@
 
 This release expands local source review, private workspaces and verified AI setup.
 Its scope is frozen at the user's request. The [100-item ledger](FEATURES_0.5.0.md)
-records 87 implemented proposals, 11 partial items and 2 exclusions; it is not an
+records 86 implemented proposals, 12 partial items and 2 exclusions; it is not an
 all-100-complete claim. The [verification record](TESTING.md) and published manifests
 identify the exact tested source and observed acceptance results.
 
@@ -58,12 +58,34 @@ shapes can generate cmap/GSUB font packs and proof sheets; missing joining/posit
 is not invented. English/Sinhala/Tamil catalogs cover core actions, settings help and
 known-error remedies independently of OCR; specialist controls remain English.
 
-Release workflows require repeated Windows/Linux tests, native OCR/readers, packaging,
-installer acceptance and an independent fresh Windows build comparison of both NoteGen
-executables. Final-source comparison and acceptance remain pending until their CI
-evidence exists. Published metadata includes checksums, a CycloneDX inventory, build
-recipe and comparison report. Native attestation is produced only when the repository
-and service support it; unsigned metadata is never described as signed proof.
+The application binaries come from tested source
+[`19550373`](https://github.com/InduwaraLasindu/NoteGen/commit/19550373dd25afb36b21a37add0172b46da84117).
+The release tag uses installer-packaging commit
+[`4bf4692d`](https://github.com/InduwaraLasindu/NoteGen/commit/4bf4692d9320cc45026a48c757725fc34a815f8f),
+whose Rust source and Cargo inputs are unchanged from that application build. Its
+only packaging change launches the existing OpenGL compatibility renderer from
+the installer and shortcuts. Portable users with older GPUs can run
+`NoteGen.exe --renderer glow`.
+
+The complete Windows/Linux functional suites passed twice, alongside native OCR,
+reader, warm-reader isolation and Maximum Accuracy checks. The overall
+[verification run](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41604450276)
+failed its independent executable comparison; it is not a fully green CI run.
+
+At the user's request, the blocked GitHub testing path and reproducibility acceptance
+are deferred for this release. The later timestamp-metadata fix on main is not part
+of these binaries. Checksums, the locked dependency inventory and source/build records
+identify the actual payload; they do not establish reproducibility or a signed
+attestation. The final production installer passed clean installation, all 106
+original binary checks, Word export, actual printed raster-PDF OCR, same-version
+reinstall, actual 0.4.1-to-0.5.0 upgrade and uninstall/data retention checks. The
+installed GUI stayed alive for eight seconds in each tested stage using the shipped
+OpenGL renderer. Installer AI downloading was not rerun; the earlier native AI
+producer-job evidence remains separate. Publication and uploaded-download hash
+verification are the final steps.
+
+Installer SHA256:
+`7049f92340f2c546f740c464081937d5b17e7ff3abcde66819440a4d2a45e0ec`.
 
 Deployment calibration, measured automatic reader routing, paired personalization
 evaluation and learned memory admission are deferred. Broad handwriting accuracy,

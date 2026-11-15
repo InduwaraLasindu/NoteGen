@@ -1,65 +1,73 @@
 # Verify build evidence
 
-The Windows verification workflow compiles the two application executables using
-Rust 1.99.1, the locked dependencies, release optimizations, disabled incremental
-compilation, remapped build/source/dependency paths and the MSVC `/Brepro` linker
-option. The recipe refuses an unclean source checkout or ambient compiler flags.
-Its record includes the exact source commit, recipe hash, Cargo.lock hash, compiler,
-runner image and actual executable hashes. A recipe record alone is not evidence
-that another build matched.
+## 0.5.0 release evidence
 
-The pinned `rust-embed` dependency enables `deterministic-timestamps` for the
-translations embedded by `age`. Their created/modified metadata is zero, so
-cached dependency outputs cannot retain a previous source commit's timestamp.
-The build record still retains the current source commit and timestamp.
+The application binaries are the unchanged tested build from
+[`19550373dd25afb36b21a37add0172b46da84117`](https://github.com/InduwaraLasindu/NoteGen/commit/19550373dd25afb36b21a37add0172b46da84117).
+[Windows](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41604450276/job/125810703182)
+and [Linux](https://github.com/InduwaraLasindu/NoteGen/actions/runs/41604450276/job/125810703596)
+functional/native producer jobs passed. The overall run failed its independent
+executable comparison; there is no successful reproducibility report for this build.
+The user has authorized deferring that GitHub testing blocker for 0.5.0. Feature #90
+is partial, and no byte-for-byte reproducibility claim is made.
 
-After both operating systems pass the required tests and native acceptance,
-another Windows runner checks out the same source and compiles into an empty
-target directory. It receives the first portable artifact, verifies each declared
-hash against the actual archived executable, checks the recipe/environment
-identity, then compares the independently compiled executable bytes. A mismatch
-fails verification and prevents the installer release. No reproducibility claim
-is made for ZIP timestamps, the installer, third-party native dependencies or
-other compiler/SDK/runner versions.
+The portable ZIP SHA256 is
+`0e1b7e281e9412fdd5fe24a20ddf71381b7485ac2bb6dca5ea86852e3824112f`.
+Its `provenance` directory contains:
 
-The release includes:
+- `build-provenance.json`: exact application source, input pins and actual binary hashes.
+- `notegen.cdx.json`: the locked CycloneDX dependency inventory.
+- `provenance.sha256`: hashes of those metadata files.
+- `reproducible-build.json`: compiler, recipe, source and executable hashes for one build.
 
-- `windows-reproducibility.json`: exact matching subjects and comparison scope.
-- `portable-build-recipe.json`: source/compiler/recipe record for the first build.
-- `portable-notegen.cdx.json`: CycloneDX locked dependency inventory.
-- `portable-build-provenance.json`: actual portable binary hashes and source pins.
-- `installer-manifest.json`: verified workflow/artifact identities, reproduced
-  executable hashes, installer acceptance and installer payload inventory.
-- `portable-metadata.sha256`: hashes of the published metadata files.
-- The portable ZIP and its SHA256 file, alongside the tested installer.
+These unsigned records identify inputs and bytes; they do not prove that another
+build matched.
 
-The installer workflow independently checks that the comparison's source and two
-executable hashes match the actual installer payload before building the installer.
-The installer adds CRT libraries; those are recorded separately in its manifest.
+The release tag points to installer-packaging commit
+`4bf4692d9320cc45026a48c757725fc34a815f8f`, a child of the tested application source.
+Only three installer GUI entrypoints change to pass `--renderer glow`; application
+Rust source, Cargo inputs and portable bytes remain unchanged. The installed app
+therefore uses the existing OpenGL compatibility renderer. Portable users can
+select it with `NoteGen.exe --renderer glow`.
+
+Installer packaging adds app-local native runtime files and has its
+own source, inventory and acceptance record. The final production installer passed
+clean installation, binary inventory, CLI Word export, actual printed OCR,
+eight-second OpenGL GUI startup, reinstall, actual 0.4.1 upgrade and uninstall/data
+retention checks. Its SHA256 is
+`7049f92340f2c546f740c464081937d5b17e7ff3abcde66819440a4d2a45e0ec`.
+The installer AI downloading branch was not rerun. Publication and uploaded asset
+download verification remain the final steps. Release notes and manifests
+must distinguish the application source from the installer packaging source and
+later documentation changes.
+
+The timestamp-metadata fix in main commit
+`74e3d5b899e65cf2d1092c41619bffbcd248ec25` enables `rust-embed` deterministic
+translation timestamps. It is not included in the tested 0.5.0 application binaries.
+The existing portable provenance must not be relabelled as built from that commit.
+
+## Retained independent-build workflow
+
+The retained workflow uses Rust 1.99.1, locked dependencies, release optimizations,
+disabled incremental compilation, remapped paths and MSVC `/Brepro`. A fresh
+Windows job compares actual executable SHA256 values against the first portable
+artifact and checks source/compiler/recipe/runner identity. A mismatch fails the
+workflow. Future successful evidence must come from an actual comparison; the
+0.5.0 release exception does not change the comparison result or normalize bytes.
+ZIP timestamps, installers, third-party binaries and other toolchain/SDK/runner
+versions are outside its comparison scope. Synthetic comparator tests do not
+substitute for independently compiling matching executable bytes.
 
 ## Native build attestations
 
-On eligible repositories, the trusted main-branch workflow uses a commit-pinned
-`actions/attest` action to produce GitHub/Sigstore build provenance for the portable
-ZIP and comparison report. The attestation job has OIDC/attestation permissions;
-the jobs compiling project code do not. Pull-request builds never publish these
-attestations. Verify an available portable build attestation with GitHub CLI:
+No signed native attestation is claimed for this 0.5.0 payload. Checksums and
+unsigned JSON records are not cryptographic attestations. Windows Authenticode
+signing remains excluded by request.
 
-```powershell
-gh attestation verify NoteGen-Rust-Windows-x64.zip --repo InduwaraLasindu/NoteGen
-```
-
-Check the reported repository, workflow, commit and subject digest against the
-release manifest. A checksum or unsigned JSON file is not a cryptographic
-attestation. The Windows Authenticode signing feature remains excluded.
-
-[GitHub's availability rules](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
-require Enterprise Cloud for private/internal build attestations. Public
-repositories use the supported default. An eligible private repository can set
-`ENABLE_PRIVATE_ATTESTATIONS=true`; a configured attestation failure fails the
-workflow. Otherwise `attestation-support.json` explicitly records that the native
-service was not configured. No signed build attestation is claimed in that case.
-
-The compare logic is tested twice with matching synthetic byte fixtures, corrupt
-and missing binaries, changed source, recipe, dependency and environment records.
-Those logic tests do not substitute for the independent real compilation gate.
+On eligible repositories, the retained trusted main-branch workflow can use a
+commit-pinned `actions/attest` action with OIDC permissions to attest the portable
+ZIP and successful comparison report. Pull-request builds do not publish these
+attestations. [GitHub's availability rules](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+require Enterprise Cloud for private/internal repositories. An eligible repository
+may deliberately configure the service in a later verified build; no paid service
+or spending change is enabled for this release.
